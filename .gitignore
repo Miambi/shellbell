@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.expo/
+.wrangler/
+*.log
+.DS_Store
+apps/agent/src/backends/iterm2/gen/
