@@ -776,7 +776,7 @@ git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styl
 - Create: `apps/agent/scripts/spike-tmux.ts`, `docs/spike-tmux.md`, `apps/agent/test/fixtures/tmux-transcript.txt`
 
 **Interfaces:**
-- Produces: evidence for (a) `%output` flowing to a `-C` client with `-f read-only,ignore-size`, (b) whether such a client resizes a GUI-attached session, (c) the exact escaping of `capture-pane -e` output inside `%begin/%end`, (d) reply latency. The recorded transcript becomes the fixture for Plan 04's control-mode parser tests.
+- Produces: evidence for (a) `%output` flowing to a `-C` client with `-f ignore-size`, (b) whether such a client resizes a GUI-attached session, (c) the exact escaping of `capture-pane -e` output inside `%begin/%end`, (d) reply latency. The recorded transcript becomes the fixture for Plan 04's control-mode parser tests.
 
 - [ ] **Step 1: Install tmux and create a test server**
 
@@ -802,7 +802,7 @@ const SESSION = process.env.TMUX_SPIKE_SESSION ?? "spike";
 mkdirSync(join(import.meta.dirname, "..", "test", "fixtures"), { recursive: true });
 const transcript = createWriteStream(join(import.meta.dirname, "..", "test", "fixtures", "tmux-transcript.txt"));
 
-const client = spawn("tmux", ["-L", SOCKET, "-C", "attach-session", "-t", SESSION, "-f", "read-only,ignore-size"], {
+const client = spawn("tmux", ["-L", SOCKET, "-C", "attach-session", "-t", SESSION, "-f", "ignore-size"], {
   stdio: ["pipe", "pipe", "inherit"],
 });
 const rl = createInterface({ input: client.stdout });
@@ -892,7 +892,7 @@ Watch the GUI terminal: its tmux window must **not** resize when the control cli
 # Spike: tmux control mode — results (YYYY-MM-DD)
 
 - tmux version: __.
-- `-C attach -f read-only,ignore-size` resized the GUI session: yes/no.  (Spec 18.10 — if yes, the fallback is polling `capture-pane` over a plain client; record that decision here.)
+- `-C attach -f ignore-size` resized the GUI session: yes/no.  (Spec 18.10 — if yes, the fallback is polling `capture-pane` over a plain client; record that decision here.)
 - `%output` events arrived after send-keys: yes/no.
 - `list-clients` shows our client with `client_control_mode=1` and the GUI client with `0`: yes/no.
 - `capture-pane -e` inside `%begin/%end`: ESC arrives as literal byte / as `\033` text. (Spec 8.11 unescape rule: keep / adjust.)

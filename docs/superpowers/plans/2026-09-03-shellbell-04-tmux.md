@@ -4,7 +4,7 @@
 
 **Goal:** Sessions running under tmux — in Ghostty, Warp, Terminal.app, Alacritty, Kitty, WezTerm, or over SSH — appear in the app next to iTerm2 sessions, stream `%output`-driven diffs, accept input, and can be created from the phone; panes that iTerm2 already shows through `tmux -CC` are not duplicated.
 
-**Architecture:** One long-lived `tmux -C attach-session -f read-only,ignore-size` client per tmux session provides `%output`/layout events; the first one doubles as the **command channel** (all tmux commands run through it — no child process per frame). `TmuxBackend` implements `TerminalBackend` on top of that client using `list-panes`/`list-clients` parsers, `capture-pane -e -N` + `parseSgrLine`, and `send-keys`. The registry (Plan 03) already knows how to merge and de-duplicate.
+**Architecture:** One long-lived `tmux -C attach-session -f ignore-size` client per tmux session provides `%output`/layout events; the first one doubles as the **command channel** (all tmux commands run through it — no child process per frame). `TmuxBackend` implements `TerminalBackend` on top of that client using `list-panes`/`list-clients` parsers, `capture-pane -e -N` + `parseSgrLine`, and `send-keys`. The registry (Plan 03) already knows how to merge and de-duplicate.
 
 **Tech Stack:** Node 22, `@shellbell/protocol` (`parseSgrLine`, `stringCells`), tmux ≥ 3.2.
 
@@ -141,8 +141,8 @@ import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
 import type { Logger } from "../../log.js";
 
-/** Set from docs/spike-tmux.md: true when capture-pane output inside %begin/%end arrives as "\033" text. */
-export const UNESCAPE_OCTAL = true;
+/** From docs/spike-tmux.md (tmux 3.7c): ESC arrives as a literal 0x1B byte inside %begin/%end, so no unescaping. */
+export const UNESCAPE_OCTAL = false;
 
 export function tmuxQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
@@ -181,7 +181,7 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
   }
 
   start(): Promise<void> {
-    const args = [...(this.opts.socketName ? ["-L", this.opts.socketName] : []), "-C", "attach-session", "-t", this.opts.sessionId, "-f", "read-only,ignore-size"];
+    const args = [...(this.opts.socketName ? ["-L", this.opts.socketName] : []), "-C", "attach-session", "-t", this.opts.sessionId, "-f", "ignore-size"];
     const child = (this.opts.spawnImpl ?? spawn)("tmux", args, { stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     this.alive = true;

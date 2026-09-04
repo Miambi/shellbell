@@ -1038,7 +1038,7 @@ terminal content, or input text. Log input **lengths** only.
 
 ### 8.11 tmux backend (`src/backends/tmux/`)
 
-**Requirements:** `tmux` ≥ 3.2 on `PATH` (client flags `-f read-only,ignore-size`) and a
+**Requirements:** `tmux` ≥ 3.2 on `PATH` (client flags `-f ignore-size`) and a
 running server on the default socket. `doctor` reports the version; older tmux → backend
 disabled with "tmux 3.2+ required for Shellbell (found 3.1)". Only the default server is
 supported in v1.
@@ -1048,7 +1048,10 @@ session index in `list-sessions`, `tabId` = window id (`@N`), `tabIndex` = `#{wi
 `paneIndex` = `#{pane_index}`.
 
 **Control-mode clients (`control.ts`).** For each tmux session the agent keeps one
-long-lived `tmux -C attach-session -t $N -f read-only,ignore-size` (stdio pipes). The
+long-lived `tmux -C attach-session -t $N -f ignore-size` (stdio pipes). Not
+`read-only`: the M0b spike showed that a `read-only` client blocks `send-keys` for the
+**whole session** while attached, so the write-safety comes from protocol discipline
+(every command line is built from typed messages and `tmuxQuote`), not from the flag. The
 **first** such client is also the **command channel**: every tmux command the backend runs
 (`list-panes`, `capture-pane`, `display-message`, `send-keys`, `new-window`,
 `split-window`, `list-clients`) is written to its stdin and its reply is read between
@@ -1695,7 +1698,7 @@ runs with `--relay ws://localhost:8787`; a dev build of the app scans the printe
 
 | Milestone | Deliverable | Done when |
 |---|---|---|
-| **M0 Spikes** | (a) Node ↔ iTerm2 API: sessions, styled screen, send text; (b) tmux control mode: `%output` flow, command channel replies, `-f read-only,ignore-size` does not resize a GUI-attached session | `docs/spike-iterm2.md` and `docs/spike-tmux.md` with measured numbers; fixtures captured |
+| **M0 Spikes** | (a) Node ↔ iTerm2 API: sessions, styled screen, send text; (b) tmux control mode: `%output` flow, command channel replies, `-f ignore-size` does not resize a GUI-attached session | `docs/spike-iterm2.md` and `docs/spike-tmux.md` with measured numbers; fixtures captured |
 | **M1 Protocol** | `@shellbell/protocol` complete with tests and golden vectors | `pnpm -F @shellbell/protocol test` green |
 | **M2 Relay** | Worker + DO with auth, window-gated pairing, sync, leases, routing, limits, push | Tests green; `wrangler dev` accepts a scripted agent + phone double |
 | **M3 Agent** | CLI, identity, relay client, phone links, iTerm2 backend, tracker, events, pairing with confirmation, control socket, launchd | `npx shellbell` prints QR; a scripted "phone" in tests pairs (with a stubbed `y`), receives snapshots and types |
@@ -1734,7 +1737,7 @@ rich notifications.
 | 18.7 | iTerm2 consent dialog confuses users | `doctor` + first-run copy; screenshot in README |
 | 18.8 | Session ids change when a terminal restarts | The app treats unknown ids as gone and refreshes from `sessions` |
 | 18.9 | Shell integration not installed → no prompt events | Idle heuristic covers it; `doctor` suggests installing shell integration |
-| 18.10 | tmux control-mode client resizes a GUI-attached session or `%output` does not flow with `read-only,ignore-size` | **M0b.** Fallback: poll `capture-pane` every 250 ms for viewed panes over a plain client and drop `subscribe` for tmux |
+| 18.10 | tmux control-mode client resizes a GUI-attached session or `%output` does not flow | **Resolved by M0b (2026-09-04, tmux 3.7c):** `-f ignore-size` does not resize; `%output` flows. `read-only` must **not** be used — it blocks `send-keys` for the whole session while attached. Fallback (unused): poll `capture-pane` every 250 ms |
 | 18.11 | Control-mode reply escaping differs from expectation | M0b records exact `%begin/%end` output for `capture-pane -e` and the octal unescape rule is adjusted from evidence |
 | 18.12 | tmux history saturation hides scrolling | Overlap detection in 8.6; tested with a `history-limit 50` server |
 | 18.13 | Same pane visible twice via iTerm2 `-CC` | De-dup rule in 8.12; tested |
