@@ -1,26 +1,26 @@
-# Shellbell Plan 01 — Foundation: monorepo, iTerm2 spike, protocol package
+# Shellbell Plan 01 — Foundation: monorepo, spikes, protocol package
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the monorepo, prove from Node that we can drive the iTerm2 API (list sessions, read a styled screen, send text), and ship `@shellbell/protocol` — the shared types, codec, crypto, key table, QR payload, SGR parser and screen-diff logic that the agent, relay and app all import.
+**Goal:** Stand up the monorepo, prove from Node that we can drive the iTerm2 API and tmux control mode, and ship `@shellbell/protocol` — the shared types, codec, crypto, key table, QR payload, cell-width table, SGR parser, screen-diff logic and golden vectors that the agent, relay and app all import.
 
-**Architecture:** pnpm monorepo. `packages/protocol` is pure TypeScript with no platform APIs (runs in Node, Cloudflare Workers and React Native). The iTerm2 spike lives inside `apps/agent` because its outputs (our proto subset, the generated code, the cookie helper, fixtures) are the first pieces of the real backend.
+**Architecture:** pnpm monorepo. `packages/protocol` is pure TypeScript with no platform APIs (runs in Node, Cloudflare Workers and React Native). The two spikes live inside `apps/agent` because their outputs (our proto subset, generated code, the cookie helper, the control-mode transcript, fixtures) are the first pieces of the real backends.
 
 **Tech Stack:** pnpm 11, TypeScript 5.9.3, Biome 2.5, Vitest 5, zod 4, cborg 6, @noble/{curves,ciphers,hashes} 2.4, @bufbuild/protobuf 2.14 + buf 1.72, ws 8.21, tsx 4.
 
-**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` — sections 5, 6, 7, 8.5.1, 8.5.2, 8.11.1, 15, 16, Appendix A and C. Read those sections before starting; every task below cites the section it implements.
+**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — sections 5, 6, 7, 8.5.1, 8.5.2, 8.11 (spike only), 8.11.1, 8.11.2, 15, 16, Appendix A and C. Read those sections before starting; every task cites the section it implements.
 
 ## Global Constraints
 
 - Node `>= 22` (author has 22.23.1). pnpm `11.12.0`. TypeScript `5.9.3` — **not** 7.x.
-- Every package is ESM (`"type": "module"`); imports of local files use explicit `.js` extensions (`./foo.js`), which TypeScript resolves to `.ts` under `moduleResolution: "bundler"`.
+- Every package is ESM (`"type": "module"`); local imports use explicit `.js` extensions (`./foo.js`), which TypeScript resolves to `.ts` under `moduleResolution: "bundler"`.
 - `@noble/*` subpath imports use the `.js` suffix: `@noble/curves/ed25519.js`, `@noble/ciphers/chacha.js`, `@noble/hashes/sha2.js`, `@noble/hashes/hkdf.js`, `@noble/hashes/utils.js`.
 - `packages/protocol` must not import `node:*`, `Buffer`, `crypto`, `fs`, or anything from React Native or Workers. Only `@noble/*`, `cborg`, `zod`.
 - Fingerprints are exactly 26 lowercase base32 chars (`/^[a-z2-7]{26}$/`). Byte fields on the wire are `Uint8Array`. Byte fields in JSON files and QR codes are base64url without padding.
+- Frame byte limits (spec 7.1): unauth 4 096, ctrl 16 384, e2e-from-phone 65 536, e2e-from-agent 1 048 576. Exported as constants in `envelope.ts`.
 - Biome: 2-space indent, double quotes, semicolons, 100-column lines. Run `pnpm lint` before every commit.
 - Commit messages: `type(scope): summary` (`feat`, `fix`, `test`, `docs`, `chore`). Commit after every task.
-- Never commit generated protobuf code (`apps/agent/src/backends/iterm2/gen/`) or fixtures containing real terminal content from someone else's machine. The spike's fixtures come from the author's own Mac and may be committed after the author reviews them for secrets.
-- License headers are not required; `LICENSE` at the root covers everything.
+- Never commit generated protobuf code (`apps/agent/src/backends/iterm2/gen/`). Fixtures captured from the author's Mac may be committed after the author reviews them for secrets.
 
 ---
 
@@ -30,30 +30,32 @@
 shellbell/
 ├── package.json  pnpm-workspace.yaml  tsconfig.base.json  biome.json  .gitignore  .npmrc
 ├── LICENSE  TRADEMARK.md  README.md  .github/FUNDING.yml  .github/workflows/ci.yml
+├── docs/spike-iterm2.md  docs/spike-tmux.md
 ├── packages/protocol/
 │   ├── package.json  tsconfig.json  vitest.config.ts
+│   ├── scripts/gen-vectors.ts
 │   ├── src/
 │   │   ├── index.ts          re-exports everything below
 │   │   ├── bytes.ts          base64url, base32, utf8, concat, equal
-│   │   ├── screen.ts         Color/Run/Line/Cursor types, mergeRuns, trimTrailing, lineHash, applyDiff, applySnapshot
+│   │   ├── screen.ts         Color/Run/Line/Cursor types, mergeRuns, trimTrailing, lineKey, applyDiff, applySnapshot
 │   │   ├── codec.ts          encodeCbor/decodeCbor (cborg), ProtocolError
-│   │   ├── envelope.ts       Envelope schema, encode/decode helpers
+│   │   ├── envelope.ts       Envelope schema, byte limits, encode/decode
 │   │   ├── ctrl.ts           ctrl message zod schemas + types
 │   │   ├── inner.ts          inner (encrypted) message zod schemas + types, SessionInfo
 │   │   ├── crypto.ts         identity, fingerprint, sign/verify, seal/open, KDFs, AD builders
 │   │   ├── keys.ts           NamedKey enum + byte table
 │   │   ├── colors.ts         16-color theme + xterm-256 → hex
 │   │   ├── qr.ts             QR payload schema, encode/parse
+│   │   ├── width.ts          cellWidth / stringCells
 │   │   └── sgr.ts            ANSI SGR line parser → Line
-│   └── test/                 one *.test.ts per src file
+│   └── test/                 one *.test.ts per src file + vectors.json
 └── apps/agent/
     ├── package.json  tsconfig.json  buf.gen.yaml  vitest.config.ts
     ├── proto/iterm2.proto    our subset (spec 8.5.2)
-    ├── scripts/spike-iterm2.ts
+    ├── scripts/spike-iterm2.ts  scripts/spike-tmux.ts
     ├── src/backends/iterm2/auth.ts      cookie/key via osascript
     ├── src/backends/iterm2/gen/         generated (gitignored)
-    ├── test/fixtures/                   captured GetBuffer responses
-    └── docs/spike-iterm2.md             (in repo docs/) spike results
+    └── test/fixtures/                   captured GetBuffer responses, tmux transcript
 ```
 
 ---
@@ -64,7 +66,7 @@ shellbell/
 - Create: `package.json`, `pnpm-workspace.yaml`, `tsconfig.base.json`, `biome.json`, `.npmrc`, `.gitignore` (replace), `LICENSE`, `TRADEMARK.md`, `README.md`, `.github/FUNDING.yml`
 
 **Interfaces:**
-- Produces: root scripts `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` that fan out to workspaces with `--if-present`.
+- Produces: root scripts `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`.
 
 - [ ] **Step 1: Write the root files**
 
@@ -100,7 +102,6 @@ packages:
 ```
 node-linker=hoisted
 ```
-(Expo/Metro tolerate the hoisted layout far better than pnpm's default symlinked one; deciding this now avoids a migration in the mobile plan.)
 
 `tsconfig.base.json`:
 ```json
@@ -144,7 +145,6 @@ dist/
 *.log
 .DS_Store
 apps/agent/src/backends/iterm2/gen/
-apps/agent/test/fixtures/*.raw.json
 ```
 
 `LICENSE`: the MIT license text with `Copyright (c) 2026 Bilal Ahmad`.
@@ -159,7 +159,7 @@ license, but you may not publish a derivative to an app store or package registr
 the name "Shellbell" or with the Shellbell logo without written permission.
 ```
 
-`README.md` (initial; expanded in a later plan):
+`README.md`:
 ```markdown
 # Shellbell
 
@@ -172,12 +172,12 @@ you reply — from anywhere, end-to-end encrypted, no accounts.
 Status: pre-alpha. See `docs/superpowers/specs/2026-09-03-shellbell-design.md`.
 ```
 
-`.github/FUNDING.yml`: `buy_me_a_coffee: <handle>` — the author's Buy Me a Coffee handle is in the author's memory notes; if you do not have it, leave the file with the key and an empty value and note it in the commit.
+`.github/FUNDING.yml`: `buy_me_a_coffee: <handle>` — the author's Buy Me a Coffee handle is in the author's memory notes; if you do not have it, leave the value empty and say so in the commit message.
 
 - [ ] **Step 2: Install and verify the toolchain**
 
 Run: `cd /Users/bilal/workspace/personal/shellbell && pnpm install && pnpm lint && pnpm exec tsc --version`
-Expected: install succeeds; `biome check` reports no errors (there are no source files yet); `Version 5.9.3`.
+Expected: install succeeds; `biome check` reports no errors; `Version 5.9.3`.
 
 - [ ] **Step 3: Commit**
 
@@ -188,16 +188,14 @@ git commit -m "chore: monorepo scaffold (pnpm, biome, tsconfig, license)"
 
 ---
 
-### Task 2: iTerm2 spike from Node (spec 8.5.1, 8.5.2, 18.1, M0)
-
-This task de-risks the whole project. Its outputs are real: the proto subset and the cookie helper are used unchanged by the agent later.
+### Task 2: iTerm2 spike from Node (spec 8.5.1, 8.5.2, 18.1, M0a)
 
 **Files:**
-- Create: `apps/agent/package.json`, `apps/agent/tsconfig.json`, `apps/agent/buf.gen.yaml`, `apps/agent/proto/iterm2.proto`, `apps/agent/src/backends/iterm2/auth.ts`, `apps/agent/scripts/spike-iterm2.ts`, `docs/spike-iterm2.md`
+- Create: `apps/agent/package.json`, `apps/agent/tsconfig.json`, `apps/agent/buf.gen.yaml`, `apps/agent/vitest.config.ts`, `apps/agent/proto/iterm2.proto`, `apps/agent/src/backends/iterm2/auth.ts`, `apps/agent/scripts/spike-iterm2.ts`, `docs/spike-iterm2.md`
 - Generated (gitignored): `apps/agent/src/backends/iterm2/gen/iterm2_pb.ts`
 
 **Interfaces:**
-- Produces: `requestCookieAndKey(appName: string): Promise<{ cookie: string; key: string }>` in `auth.ts`; generated schemas `ClientOriginatedMessageSchema`, `ServerOriginatedMessageSchema`, etc. from `gen/iterm2_pb.js`; `test/fixtures/getbuffer-*.raw.json` for Plan 03.
+- Produces: `requestCookieAndKey(appName: string): Promise<{ cookie: string; key: string }>` and `class ITerm2AuthError` in `auth.ts`; generated schemas from `gen/iterm2_pb.js`; `test/fixtures/getbuffer-*.json`, `listsessions-*.json` for Plan 03.
 
 - [ ] **Step 1: Create the agent package skeleton**
 
@@ -219,7 +217,8 @@ This task de-risks the whole project. Its outputs are real: the proto subset and
     "pretest": "pnpm proto:gen",
     "typecheck": "pnpm proto:gen && tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "spike:iterm2": "pnpm proto:gen && tsx scripts/spike-iterm2.ts"
+    "spike:iterm2": "pnpm proto:gen && tsx scripts/spike-iterm2.ts",
+    "spike:tmux": "tsx scripts/spike-tmux.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.14.1",
@@ -290,7 +289,6 @@ message ClientOriginatedMessage {
     ActivateRequest activate_request = 114;
     VariableRequest variable_request = 115;
     FocusRequest focus_request = 117;
-    CloseRequest close_request = 131;
     InvokeFunctionRequest invoke_function_request = 132;
   }
 }
@@ -309,7 +307,6 @@ message ServerOriginatedMessage {
     ActivateResponse activate_response = 114;
     VariableResponse variable_response = 115;
     FocusResponse focus_response = 117;
-    CloseResponse close_response = 131;
     InvokeFunctionResponse invoke_function_response = 132;
     Notification notification = 1000;
   }
@@ -478,7 +475,7 @@ message GetPromptResponse {
   optional string unique_prompt_id = 10;
 }
 
-// ---- create / split / activate / close ----
+// ---- create / split / activate ----
 message CreateTabRequest { optional string profile_name = 1; optional string window_id = 2; optional uint32 tab_index = 3; optional bool select_tab = 6; }
 message CreateTabResponse {
   enum Status { OK = 0; INVALID_PROFILE_NAME = 1; INVALID_WINDOW_ID = 2; INVALID_TAB_INDEX = 3; MISSING_SUBSTITUTION = 4; }
@@ -503,12 +500,6 @@ message ActivateRequest {
   optional App activate_app = 7;
 }
 message ActivateResponse { enum Status { OK = 0; BAD_IDENTIFIER = 1; INVALID_OPTION = 2; } optional Status status = 1; }
-message CloseRequest {
-  message CloseSessions { repeated string session_ids = 1; }
-  oneof target { CloseSessions sessions = 2; }
-  optional bool force = 4;
-}
-message CloseResponse { enum Status { OK = 0; NOT_FOUND = 1; USER_DECLINED = 2; } repeated Status statuses = 1; }
 
 // ---- variables / functions / focus ----
 message VariableRequest {
@@ -540,7 +531,7 @@ message FocusResponse { repeated FocusChangedNotification notifications = 1; }
 - [ ] **Step 3: Generate and check the code compiles**
 
 Run: `cd apps/agent && pnpm install && pnpm proto:gen && ls src/backends/iterm2/gen/`
-Expected: `iterm2_pb.ts` exists. Open it and confirm exports such as `ClientOriginatedMessageSchema`, `GetBufferRequestSchema`, `AlternateColor`, `NotificationType` (protobuf-es v2 emits `<Message>Schema` descriptors and plain TS enums; field names are camelCased, e.g. `screenContentsOnly`, `codePointsPerCell`, `fgStandard`).
+Expected: `iterm2_pb.ts` exists. Confirm exports such as `ClientOriginatedMessageSchema`, `GetBufferRequestSchema`, `AlternateColor`, `NotificationType` (protobuf-es v2 emits `<Message>Schema` descriptors and plain TS enums; field names are camelCased, e.g. `screenContentsOnly`, `codePointsPerCell`, `tmuxWindowId`).
 
 - [ ] **Step 4: Write the cookie helper**
 
@@ -597,8 +588,8 @@ async function runOsascript(script: string): Promise<string> {
 `apps/agent/scripts/spike-iterm2.ts`:
 ```ts
 /* Spike: talk to the iTerm2 API from Node. Run with `pnpm spike:iterm2`.
- * Prints sessions, the active session's styled screen, GetBuffer latency, and writes
- * raw fixtures to test/fixtures/. Set ITERM2_SPIKE_SEND=1 to also send a harmless echo. */
+ * Prints sessions, the first session's styled screen, GetBuffer latency, and writes
+ * fixtures to test/fixtures/. Set ITERM2_SPIKE_SEND=1 to also send a harmless echo. */
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -674,7 +665,7 @@ async function main() {
   // 1. sessions
   const ls = await request(ws, { case: "listSessionsRequest", value: create(ListSessionsRequestSchema, {}) });
   if (ls.submessage.case !== "listSessionsResponse") throw new Error(`unexpected ${ls.submessage.case}`);
-  const sessions: { id: string; title: string; w: number; h: number }[] = [];
+  const sessions: { id: string; title: string; w: number; h: number; tmux: string }[] = [];
   for (const win of ls.submessage.value.windows) {
     for (const tab of win.tabs) {
       const walk = (node: typeof tab.root): void => {
@@ -682,7 +673,7 @@ async function main() {
         for (const link of node.links) {
           if (link.child.case === "session") {
             const s = link.child.value;
-            sessions.push({ id: s.uniqueIdentifier ?? "", title: s.title ?? "", w: s.gridSize?.width ?? 0, h: s.gridSize?.height ?? 0 });
+            sessions.push({ id: s.uniqueIdentifier ?? "", title: s.title ?? "", w: s.gridSize?.width ?? 0, h: s.gridSize?.height ?? 0, tmux: tab.tmuxWindowId ?? "" });
           } else if (link.child.case === "node") walk(link.child.value);
         }
       };
@@ -690,7 +681,7 @@ async function main() {
     }
   }
   console.log(`${sessions.length} sessions:`);
-  for (const s of sessions) console.log(`  ${s.id}  ${s.w}x${s.h}  ${s.title}`);
+  for (const s of sessions) console.log(`  ${s.id}  ${s.w}x${s.h}  ${s.title}${s.tmux ? `  (tmux ${s.tmux})` : ""}`);
   const target = sessions[0];
   if (!target) throw new Error("no sessions");
 
@@ -727,8 +718,8 @@ async function main() {
   const dir = join(import.meta.dirname, "..", "test", "fixtures");
   await mkdir(dir, { recursive: true });
   const stamp = Date.now();
-  await writeFile(join(dir, `getbuffer-${stamp}.raw.json`), JSON.stringify(toJson(ServerOriginatedMessageSchema, first), null, 2));
-  await writeFile(join(dir, `listsessions-${stamp}.raw.json`), JSON.stringify(toJson(ServerOriginatedMessageSchema, ls), null, 2));
+  await writeFile(join(dir, `getbuffer-${stamp}.json`), JSON.stringify(toJson(ServerOriginatedMessageSchema, first), null, 2));
+  await writeFile(join(dir, `listsessions-${stamp}.json`), JSON.stringify(toJson(ServerOriginatedMessageSchema, ls), null, 2));
   console.log("fixtures written to", dir);
 
   // 5. optional send
@@ -751,7 +742,7 @@ main().catch((err) => {
 - [ ] **Step 6: Run the spike (needs iTerm2 running with the Python API enabled)**
 
 Run: `cd apps/agent && pnpm spike:iterm2`
-Expected: iTerm2 may show "Allow Shellbell to control iTerm2?" — click Allow. Output lists sessions, prints the first lines of the first session with non-zero style counts, prints latency, writes two fixtures. If the `unix-url` mode fails with a connection error, run `ITERM2_SPIKE_MODE=socketpath pnpm spike:iterm2`. Record which mode worked. Then run once with `ITERM2_SPIKE_SEND=1` and confirm `shellbell-spike-ok` appears in that iTerm2 session.
+Expected: iTerm2 may show "Allow Shellbell to control iTerm2?" — click Allow. Output lists sessions, prints the first lines of the first session with non-zero style counts, prints latency, writes two fixtures. If `unix-url` fails to connect, run `ITERM2_SPIKE_MODE=socketpath pnpm spike:iterm2` and record which mode worked. Then run once with `ITERM2_SPIKE_SEND=1` and confirm `shellbell-spike-ok` appears in that iTerm2 session.
 
 - [ ] **Step 7: Write the spike report**
 
@@ -763,9 +754,9 @@ Expected: iTerm2 may show "Allow Shellbell to control iTerm2?" — click Allow. 
 - iTerm2 version: X.Y.Z. Consent dialog seen: yes/no.
 - Sessions listed: N. First session grid: WxH.
 - GetBuffer (screen only, styles on) latency over 20 calls: p50 = __ ms, p95 = __ ms, max = __ ms.
-  Spec 14 budget: if p50 > 40 ms, set the tracker coalescing interval to 200 ms in Plan 03.
+  Spec 14/18.2: if p50 > 40 ms, set MIN_FRAME_MS to 200 in the relay config.
 - SendText with "\r" produced a new prompt line: yes/no (if no, try "\n" and record).
-- Fixtures: `apps/agent/test/fixtures/getbuffer-<stamp>.raw.json`, `listsessions-<stamp>.raw.json`.
+- Fixtures: `apps/agent/test/fixtures/getbuffer-<stamp>.json`, `listsessions-<stamp>.json`.
   Reviewed for secrets before committing: yes.
 ```
 
@@ -779,13 +770,152 @@ git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styl
 
 ---
 
-### Task 3: `@shellbell/protocol` — package skeleton and `bytes.ts`
+### Task 3: tmux control-mode spike (spec 8.11, 18.10, 18.11, M0b)
+
+**Files:**
+- Create: `apps/agent/scripts/spike-tmux.ts`, `docs/spike-tmux.md`, `apps/agent/test/fixtures/tmux-transcript.txt`
+
+**Interfaces:**
+- Produces: evidence for (a) `%output` flowing to a `-C` client with `-f read-only,ignore-size`, (b) whether such a client resizes a GUI-attached session, (c) the exact escaping of `capture-pane -e` output inside `%begin/%end`, (d) reply latency. The recorded transcript becomes the fixture for Plan 04's control-mode parser tests.
+
+- [ ] **Step 1: Install tmux and create a test server**
+
+Run: `brew install tmux && tmux -V` → expected `tmux 3.x` with x ≥ 2.
+Then in a **GUI terminal window** (Terminal.app or Ghostty): `tmux -L sbspike new-session -s spike` — leave it open, note its size (`tmux -L sbspike display -p '#{window_width}x#{window_height}'`), and run `printf '\e[1;31mred bold\e[0m normal\n'` inside it so the screen has a styled line.
+
+- [ ] **Step 2: Write the spike script**
+
+`apps/agent/scripts/spike-tmux.ts`:
+```ts
+/* Spike: tmux control mode from Node. Run with `pnpm spike:tmux` while a GUI terminal is
+ * attached to `tmux -L sbspike -t spike`. Records everything the control client prints to
+ * test/fixtures/tmux-transcript.txt. */
+import { spawn } from "node:child_process";
+import { createWriteStream } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
+
+const SOCKET = process.env.TMUX_SPIKE_SOCKET ?? "sbspike";
+const SESSION = process.env.TMUX_SPIKE_SESSION ?? "spike";
+
+mkdirSync(join(import.meta.dirname, "..", "test", "fixtures"), { recursive: true });
+const transcript = createWriteStream(join(import.meta.dirname, "..", "test", "fixtures", "tmux-transcript.txt"));
+
+const client = spawn("tmux", ["-L", SOCKET, "-C", "attach-session", "-t", SESSION, "-f", "read-only,ignore-size"], {
+  stdio: ["pipe", "pipe", "inherit"],
+});
+const rl = createInterface({ input: client.stdout });
+
+type Reply = { lines: string[]; error: boolean; t0: number };
+const queue: ((r: Reply) => void)[] = [];
+let current: Reply | null = null;
+
+rl.on("line", (line) => {
+  transcript.write(`${line}\n`);
+  if (line.startsWith("%begin")) {
+    current = { lines: [], error: false, t0: performance.now() };
+  } else if (line.startsWith("%end") || line.startsWith("%error")) {
+    if (current) {
+      current.error = line.startsWith("%error");
+      queue.shift()?.(current);
+      current = null;
+    }
+  } else if (current) {
+    current.lines.push(line);
+  } else if (line.startsWith("%output")) {
+    console.log("EVENT", line.slice(0, 80));
+  } else {
+    console.log("NOTIF", line.slice(0, 120));
+  }
+});
+
+function cmd(s: string): Promise<Reply> {
+  return new Promise((resolve) => {
+    queue.push(resolve);
+    client.stdin.write(`${s}\n`);
+  });
+}
+
+async function main() {
+  await new Promise((r) => setTimeout(r, 500));
+  const panes = await cmd("list-panes -a -F '#{pane_id}\t#{session_name}\t#{pane_width}\t#{pane_height}\t#{history_size}'");
+  console.log("panes:", panes.lines);
+  const clients = await cmd("list-clients -F '#{client_session}\t#{client_control_mode}'");
+  console.log("clients (expect one control=1 and one control=0):", clients.lines);
+  const pane = panes.lines[0]?.split("\t")[0];
+  if (!pane) throw new Error("no pane");
+
+  const size1 = await cmd(`display-message -p -t ${pane} '#{pane_width}x#{pane_height}'`);
+  console.log("pane size seen by control client:", size1.lines[0], "(compare with the GUI window; it must NOT have shrunk)");
+
+  const cap = await cmd(`capture-pane -p -e -N -t ${pane}`);
+  console.log("capture-pane raw reply lines (look at how ESC is escaped):");
+  for (const l of cap.lines.slice(0, 6)) console.log(JSON.stringify(l));
+
+  const samples: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    const r = await cmd(`capture-pane -p -e -N -t ${pane}`);
+    samples.push(performance.now() - r.t0);
+  }
+  samples.sort((a, b) => a - b);
+  console.log(`capture-pane reply latency ms: p50=${samples[10]?.toFixed(1)} max=${samples.at(-1)?.toFixed(1)}`);
+
+  console.log("sending keys via the control channel; expect %output events to follow…");
+  await cmd(`send-keys -t ${pane} -l -- 'echo shellbell-tmux-spike-ok'`);
+  await cmd(`send-keys -t ${pane} Enter`);
+  await new Promise((r) => setTimeout(r, 800));
+
+  const hist = await cmd(`capture-pane -p -e -N -t ${pane} -S -5 -E -1`);
+  console.log("history capture (-S -5 -E -1) lines:", hist.lines.length);
+
+  transcript.end();
+  client.stdin.write("detach-client\n");
+  setTimeout(() => process.exit(0), 300);
+}
+
+main().catch((e) => {
+  console.error("SPIKE FAILED", e);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 3: Run it and observe**
+
+Run: `cd apps/agent && pnpm spike:tmux`
+Watch the GUI terminal: its tmux window must **not** resize when the control client attaches. Confirm `EVENT %output …` lines appear after the `send-keys`, and `shellbell-tmux-spike-ok` shows in the GUI pane. Look at the JSON-printed capture lines: note whether `\x1b` arrives as a literal ESC byte or as the text `\033`.
+
+- [ ] **Step 4: Write the report**
+
+`docs/spike-tmux.md`:
+```markdown
+# Spike: tmux control mode — results (YYYY-MM-DD)
+
+- tmux version: __.
+- `-C attach -f read-only,ignore-size` resized the GUI session: yes/no.  (Spec 18.10 — if yes, the fallback is polling `capture-pane` over a plain client; record that decision here.)
+- `%output` events arrived after send-keys: yes/no.
+- `list-clients` shows our client with `client_control_mode=1` and the GUI client with `0`: yes/no.
+- `capture-pane -e` inside `%begin/%end`: ESC arrives as literal byte / as `\033` text. (Spec 8.11 unescape rule: keep / adjust.)
+- capture-pane reply latency: p50 = __ ms, max = __ ms.
+- Transcript: `apps/agent/test/fixtures/tmux-transcript.txt` (reviewed for secrets: yes).
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add apps/agent/scripts/spike-tmux.ts apps/agent/test/fixtures/tmux-transcript.txt docs/spike-tmux.md
+git commit -m "feat(agent): tmux control-mode spike with recorded transcript"
+```
+
+---
+
+### Task 4: `@shellbell/protocol` — package skeleton and `bytes.ts`
 
 **Files:**
 - Create: `packages/protocol/package.json`, `packages/protocol/tsconfig.json`, `packages/protocol/vitest.config.ts`, `packages/protocol/src/index.ts`, `packages/protocol/src/bytes.ts`, `packages/protocol/test/bytes.test.ts`
 
 **Interfaces:**
-- Produces: `toBase64Url(b: Uint8Array): string`, `fromBase64Url(s: string): Uint8Array`, `toBase32Lower(b: Uint8Array): string`, `utf8(s: string): Uint8Array`, `fromUtf8(b: Uint8Array): string`, `concat(...parts: Uint8Array[]): Uint8Array`, `bytesEqual(a, b): boolean`.
+- Produces: `toBase64Url(b): string`, `fromBase64Url(s): Uint8Array`, `toBase32Lower(b): string`, `utf8(s): Uint8Array`, `fromUtf8(b): string`, `concat(...parts): Uint8Array`, `bytesEqual(a, b): boolean`, `hexToBytes(s): Uint8Array`, `bytesToHex(b): string`.
 
 - [ ] **Step 1: Package files**
 
@@ -801,7 +931,8 @@ git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styl
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "gen:vectors": "tsx scripts/gen-vectors.ts"
   },
   "dependencies": {
     "@noble/ciphers": "2.4.0",
@@ -811,6 +942,7 @@ git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styl
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "tsx": "4.23.13",
     "typescript": "5.9.3",
     "vitest": "5.0.0"
   }
@@ -822,7 +954,7 @@ git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styl
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": { "types": [], "noEmit": true },
-  "include": ["src", "test"]
+  "include": ["src", "test", "scripts"]
 }
 ```
 
@@ -842,7 +974,7 @@ export * from "./bytes.js";
 `packages/protocol/test/bytes.test.ts`:
 ```ts
 import { describe, expect, it } from "vitest";
-import { bytesEqual, concat, fromBase64Url, fromUtf8, toBase32Lower, toBase64Url, utf8 } from "../src/bytes.js";
+import { bytesEqual, bytesToHex, concat, fromBase64Url, fromUtf8, hexToBytes, toBase32Lower, toBase64Url, utf8 } from "../src/bytes.js";
 
 describe("base64url", () => {
   it("round-trips and uses no padding", () => {
@@ -870,7 +1002,11 @@ describe("base32", () => {
   });
 });
 
-describe("misc", () => {
+describe("hex and misc", () => {
+  it("hex round-trips", () => {
+    expect(bytesToHex(new Uint8Array([0, 15, 255]))).toBe("000fff");
+    expect(hexToBytes("000fff")).toEqual(new Uint8Array([0, 15, 255]));
+  });
   it("concat and equal", () => {
     const a = new Uint8Array([1, 2]);
     const b = new Uint8Array([3]);
@@ -925,7 +1061,7 @@ export function fromBase64Url(s: string): Uint8Array {
   let bits = 0;
   let acc = 0;
   for (const ch of s) {
-    acc = (acc << 6) | (B64_LOOKUP.get(ch) as number);
+    acc = ((acc << 6) | (B64_LOOKUP.get(ch) as number)) & 0xffffff;
     bits += 6;
     if (bits >= 8) {
       bits -= 8;
@@ -940,7 +1076,7 @@ export function toBase32Lower(b: Uint8Array): string {
   let bits = 0;
   let acc = 0;
   for (const byte of b) {
-    acc = (acc << 8) | byte;
+    acc = ((acc << 8) | byte) & 0xffff;
     bits += 8;
     while (bits >= 5) {
       bits -= 5;
@@ -948,6 +1084,19 @@ export function toBase32Lower(b: Uint8Array): string {
     }
   }
   if (bits > 0) out += B32[(acc << (5 - bits)) & 31]!;
+  return out;
+}
+
+export function bytesToHex(b: Uint8Array): string {
+  let s = "";
+  for (const x of b) s += x.toString(16).padStart(2, "0");
+  return s;
+}
+
+export function hexToBytes(s: string): Uint8Array {
+  if (s.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(s)) throw new Error("invalid hex");
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = Number.parseInt(s.slice(i * 2, i * 2 + 2), 16);
   return out;
 }
 
@@ -970,10 +1119,7 @@ export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `pnpm test`
-Expected: PASS (3 describe blocks).
+- [ ] **Step 5: Run tests to verify they pass** — `pnpm test`.
 
 - [ ] **Step 6: Commit**
 
@@ -984,7 +1130,7 @@ git commit -m "feat(protocol): package skeleton and byte helpers"
 
 ---
 
-### Task 4: `screen.ts` — runs, lines, hashing, diff application (spec 7.4, 8.6, 10.3)
+### Task 5: `screen.ts` — runs, lines, `lineKey`, snapshot/diff application (spec 7.4, 8.6, 10.3)
 
 **Files:**
 - Create: `packages/protocol/src/screen.ts`, `packages/protocol/test/screen.test.ts`
@@ -993,14 +1139,14 @@ git commit -m "feat(protocol): package skeleton and byte helpers"
 **Interfaces:**
 - Produces (all exported):
   - `type Color = number | [number, number, number]`
-  - `interface Run { t: string; fg?: Color; bg?: Color; b?: boolean; i?: boolean; u?: boolean; s?: boolean; f?: boolean }`
+  - `interface Run { t: string; fg?: Color; bg?: Color; b?: boolean; i?: boolean; u?: boolean; s?: boolean; f?: boolean; n?: number }`
   - `interface Line { r: Run[]; w?: boolean }`, `interface Cursor { x: number; y: number }`
-  - `interface ScreenState { cols; rows; cursor; lines: Line[]; scrollbackTotal: number; gen: number; history: Line[]; historyFrom: number }`
-  - `interface ScreenDiff { scroll: number; changed: { i: number; line: Line }[]; cursor: Cursor; scrollbackTotal: number; gen: number }`
-  - `interface ScreenSnapshot { cols; rows; cursor; lines: Line[]; scrollbackTotal; gen }`
-  - `emptyLine(): Line`, `sameStyle(a: Run, b: Run): boolean`, `mergeRuns(runs: Run[]): Run[]`, `trimTrailing(runs: Run[]): Run[]`, `colorKey(c?: Color): string`, `lineKey(line: Line): string`, `fnv1a32(s: string): number`, `lineHash(line: Line): number`
-  - `applySnapshot(prev: ScreenState | undefined, snap: ScreenSnapshot): ScreenState`
-  - `applyDiff(state: ScreenState, diff: ScreenDiff): { state: ScreenState; gap: boolean }`
+  - `interface ScreenSnapshot { cols; rows; cursor; lines: Line[]; scrollbackTotal; gen; reset?: boolean; degraded?: boolean }`
+  - `interface ScreenDiff { scroll; changed: { i; line }[]; cursor; scrollbackTotal; gen }`
+  - `interface ScreenState extends ScreenSnapshot { history: Line[]; historyFrom: number }`
+  - `emptyLine()`, `sameStyle(a, b)`, `mergeRuns(runs)`, `trimTrailing(runs)`, `colorKey(c?)`, `lineKey(line): string`, `stripStyles(line): Line`, `codePoints(s): number`
+  - `applySnapshot(prev: ScreenState | undefined, snap): ScreenState`
+  - `applyDiff(state, diff): { state; gap: boolean }`
   - `HISTORY_CAP = 5000`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1011,11 +1157,11 @@ import { describe, expect, it } from "vitest";
 import {
   applyDiff,
   applySnapshot,
+  codePoints,
   emptyLine,
-  fnv1a32,
-  lineHash,
   lineKey,
   mergeRuns,
+  stripStyles,
   trimTrailing,
   type Line,
   type ScreenState,
@@ -1024,11 +1170,13 @@ import {
 const L = (t: string, extra: Partial<Line["r"][number]> = {}): Line => ({ r: [{ t, ...extra }] });
 
 describe("runs", () => {
-  it("merges adjacent runs with identical style", () => {
+  it("merges adjacent runs with identical style and sums n", () => {
     expect(mergeRuns([{ t: "a", fg: 1 }, { t: "b", fg: 1 }, { t: "c", fg: 2 }])).toEqual([
       { t: "ab", fg: 1 },
       { t: "c", fg: 2 },
     ]);
+    expect(mergeRuns([{ t: "漢", n: 2 }, { t: "字", n: 2 }])).toEqual([{ t: "漢字", n: 4 }]);
+    expect(mergeRuns([{ t: "a" }, { t: "漢", n: 2 }])).toEqual([{ t: "a漢", n: 3 }]);
   });
   it("treats rgb colors by value", () => {
     expect(mergeRuns([{ t: "a", fg: [1, 2, 3] }, { t: "b", fg: [1, 2, 3] }])).toEqual([{ t: "ab", fg: [1, 2, 3] }]);
@@ -1038,29 +1186,28 @@ describe("runs", () => {
     expect(trimTrailing([{ t: "hi" }, { t: "   ", bg: 4 }])).toEqual([{ t: "hi" }, { t: "   ", bg: 4 }]);
     expect(trimTrailing([{ t: "  " }])).toEqual([]);
   });
+  it("counts code points and strips styles", () => {
+    expect(codePoints("a🚀b")).toBe(3);
+    expect(stripStyles({ r: [{ t: "a", fg: 1, b: true, n: 1 }, { t: "b", bg: 2 }] })).toEqual({ r: [{ t: "ab" }] });
+  });
 });
 
-describe("hashing", () => {
-  it("fnv1a32 known vectors", () => {
-    expect(fnv1a32("")).toBe(0x811c9dc5);
-    expect(fnv1a32("a")).toBe(0xe40c292c);
-    expect(fnv1a32("foobar")).toBe(0xbf9cf968);
-  });
-  it("lineKey is the documented format", () => {
-    expect(lineKey({ r: [{ t: "ab", fg: 1, b: true }, { t: "c", bg: [9, 8, 7], f: true }] })).toBe(
-      "ab|1||10000c||9,8,7|00001",
+describe("lineKey", () => {
+  it("is the documented format", () => {
+    expect(lineKey({ r: [{ t: "ab", fg: 1, b: true }, { t: "c", bg: [9, 8, 7], f: true, n: 2 }] })).toBe(
+      "ab|1||10000|c||9,8,7|00001|2",
     );
   });
-  it("lineHash differs for different styles and is stable", () => {
-    expect(lineHash(L("x"))).toBe(lineHash(L("x")));
-    expect(lineHash(L("x"))).not.toBe(lineHash(L("x", { b: true })));
+  it("differs for different styles and is stable", () => {
+    expect(lineKey(L("x"))).toBe(lineKey(L("x")));
+    expect(lineKey(L("x"))).not.toBe(lineKey(L("x", { b: true })));
   });
 });
 
 describe("applySnapshot / applyDiff", () => {
   const snap = { cols: 10, rows: 3, cursor: { x: 0, y: 2 }, lines: [L("a"), L("b"), L("c")], scrollbackTotal: 100, gen: 1 };
 
-  it("snapshot clears history", () => {
+  it("first snapshot starts with empty history", () => {
     const st = applySnapshot(undefined, snap);
     expect(st.lines.map((l) => l.r[0]?.t)).toEqual(["a", "b", "c"]);
     expect(st.history).toEqual([]);
@@ -1081,6 +1228,18 @@ describe("applySnapshot / applyDiff", () => {
     expect(state.historyFrom).toBe(100);
     expect(state.lines.map((l) => l.r[0]?.t)).toEqual(["b", "c", "d"]);
     expect(state.scrollbackTotal).toBe(101);
+  });
+
+  it("a later snapshot keeps history when scrollbackTotal is unchanged, drops it otherwise or on reset", () => {
+    let st = applySnapshot(undefined, snap);
+    st = applyDiff(st, { scroll: 1, changed: [], cursor: { x: 0, y: 0 }, scrollbackTotal: 101, gen: 2 }).state;
+    expect(st.history.length).toBe(1);
+    const keep = applySnapshot(st, { ...snap, scrollbackTotal: 101, gen: 3 });
+    expect(keep.history.length).toBe(1);
+    const drop = applySnapshot(st, { ...snap, scrollbackTotal: 105, gen: 3 });
+    expect(drop.history).toEqual([]);
+    const reset = applySnapshot(st, { ...snap, scrollbackTotal: 101, gen: 3, reset: true });
+    expect(reset.history).toEqual([]);
   });
 
   it("detects gen gaps and leaves state untouched", () => {
@@ -1105,10 +1264,7 @@ describe("applySnapshot / applyDiff", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pnpm test`
-Expected: FAIL — `../src/screen.js` not found.
+- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
 
 - [ ] **Step 3: Implement `screen.ts`**
 
@@ -1125,6 +1281,8 @@ export interface Run {
   u?: boolean;
   s?: boolean;
   f?: boolean;
+  /** terminal cells occupied; present only when it differs from the code-point count of t */
+  n?: number;
 }
 
 export interface Line {
@@ -1145,6 +1303,8 @@ export interface ScreenSnapshot {
   lines: Line[];
   scrollbackTotal: number;
   gen: number;
+  reset?: boolean;
+  degraded?: boolean;
 }
 
 export interface ScreenDiff {
@@ -1156,7 +1316,7 @@ export interface ScreenDiff {
 }
 
 export interface ScreenState extends ScreenSnapshot {
-  /** lines above the screen that we hold locally; absolute index of history[0] is historyFrom */
+  /** lines above the screen held locally; absolute index of history[0] is historyFrom */
   history: Line[];
   historyFrom: number;
 }
@@ -1165,6 +1325,12 @@ export const HISTORY_CAP = 5000;
 
 export function emptyLine(): Line {
   return { r: [] };
+}
+
+export function codePoints(s: string): number {
+  let n = 0;
+  for (const _ of s) n++;
+  return n;
 }
 
 export function colorKey(c?: Color): string {
@@ -1184,12 +1350,25 @@ export function sameStyle(a: Run, b: Run): boolean {
   );
 }
 
+function cellsOf(r: Run): number {
+  return r.n ?? codePoints(r.t);
+}
+
+/** Merge adjacent runs with identical style. `n` is kept only when it differs from the code-point count. */
 export function mergeRuns(runs: Run[]): Run[] {
   const out: Run[] = [];
   for (const r of runs) {
     const last = out[out.length - 1];
-    if (last && sameStyle(last, r)) last.t += r.t;
-    else out.push({ ...r });
+    if (last && sameStyle(last, r)) {
+      const cells = cellsOf(last) + cellsOf(r);
+      last.t += r.t;
+      if (cells !== codePoints(last.t)) last.n = cells;
+      else delete last.n;
+    } else {
+      const copy: Run = { ...r };
+      if (copy.n !== undefined && copy.n === codePoints(copy.t)) delete copy.n;
+      out.push(copy);
+    }
   }
   return out;
 }
@@ -1205,33 +1384,30 @@ export function trimTrailing(runs: Run[]): Run[] {
   return out;
 }
 
+export function stripStyles(line: Line): Line {
+  const text = line.r.map((r) => r.t).join("");
+  const out: Line = { r: text ? [{ t: text }] : [] };
+  if (line.w) out.w = true;
+  return out;
+}
+
 function flags(r: Run): string {
   return `${r.b ? 1 : 0}${r.i ? 1 : 0}${r.u ? 1 : 0}${r.s ? 1 : 0}${r.f ? 1 : 0}`;
 }
 
-/** Deterministic serialization used for hashing: runs joined by \x1f. */
+/** Canonical string form used for row comparison: runs joined by \x1f. */
 export function lineKey(line: Line): string {
-  return line.r.map((r) => `${r.t}|${colorKey(r.fg)}|${colorKey(r.bg)}|${flags(r)}`).join("");
-}
-
-/** FNV-1a 32-bit over the UTF-8 bytes of s. */
-export function fnv1a32(s: string): number {
-  const bytes = new TextEncoder().encode(s);
-  let h = 0x811c9dc5;
-  for (const b of bytes) {
-    h ^= b;
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h >>> 0;
-}
-
-export function lineHash(line: Line): number {
-  return fnv1a32(lineKey(line));
+  return line.r.map((r) => `${r.t}|${colorKey(r.fg)}|${colorKey(r.bg)}|${flags(r)}|${r.n ?? ""}`).join("");
 }
 
 export function applySnapshot(prev: ScreenState | undefined, snap: ScreenSnapshot): ScreenState {
-  void prev;
-  return { ...snap, lines: snap.lines.slice(), history: [], historyFrom: snap.scrollbackTotal };
+  const keepHistory = prev !== undefined && !snap.reset && prev.scrollbackTotal === snap.scrollbackTotal;
+  return {
+    ...snap,
+    lines: snap.lines.slice(),
+    history: keepHistory ? prev.history : [],
+    historyFrom: keepHistory ? prev.historyFrom : snap.scrollbackTotal,
+  };
 }
 
 export function applyDiff(state: ScreenState, diff: ScreenDiff): { state: ScreenState; gap: boolean } {
@@ -1262,6 +1438,8 @@ export function applyDiff(state: ScreenState, diff: ScreenDiff): { state: Screen
       cursor: diff.cursor,
       scrollbackTotal: diff.scrollbackTotal,
       gen: diff.gen,
+      reset: undefined,
+      degraded: undefined,
     },
     gap: false,
   };
@@ -1270,28 +1448,25 @@ export function applyDiff(state: ScreenState, diff: ScreenDiff): { state: Screen
 
 Add `export * from "./screen.js";` to `src/index.ts`.
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `pnpm test`
-Expected: PASS. (If the `fnv1a32("foobar")` vector fails, you have a multiplication overflow bug — `Math.imul` and `>>> 0` are required.)
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/protocol
-git commit -m "feat(protocol): screen types, line hashing, diff application"
+git commit -m "feat(protocol): screen types, lineKey, snapshot/diff application"
 ```
 
 ---
 
-### Task 5: `codec.ts` + `envelope.ts` (spec 7.1, 7.2)
+### Task 6: `codec.ts` + `envelope.ts` (spec 7.1, 7.2)
 
 **Files:**
 - Create: `packages/protocol/src/codec.ts`, `packages/protocol/src/envelope.ts`, `packages/protocol/test/envelope.test.ts`
 - Modify: `packages/protocol/src/index.ts`
 
 **Interfaces:**
-- Produces: `class ProtocolError extends Error { code: string }`, `encodeCbor(v: unknown): Uint8Array`, `decodeCbor(b: Uint8Array): unknown`, `Bytes(n?: number)` zod helper, `FpSchema`, `EnvelopeSchema`, `type Envelope`, `E2EBodySchema`, `type E2EBody`, `encodeEnvelope(e: Envelope): Uint8Array`, `decodeEnvelope(b: Uint8Array): Envelope` (throws `ProtocolError("malformed")`).
+- Produces: `class ProtocolError extends Error { code: "malformed" | "unsupported" | "crypto" | "replay" }`, `encodeCbor(v): Uint8Array`, `decodeCbor(b): unknown`, `Bytes(n?)` zod helper, `FpSchema`, `EnvelopeSchema`, `type Envelope`, `E2EBodySchema`, `type E2EBody`, `encodeEnvelope(e): Uint8Array`, `decodeEnvelope(b): Envelope`, `FRAME_LIMITS = { unauth: 4096, ctrl: 16384, e2eFromPhone: 65536, e2eFromAgent: 1048576 }`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1299,7 +1474,7 @@ git commit -m "feat(protocol): screen types, line hashing, diff application"
 ```ts
 import { describe, expect, it } from "vitest";
 import { decodeCbor, encodeCbor } from "../src/codec.js";
-import { decodeEnvelope, encodeEnvelope, type Envelope } from "../src/envelope.js";
+import { decodeEnvelope, encodeEnvelope, FRAME_LIMITS, type Envelope } from "../src/envelope.js";
 
 const FP_A = "a".repeat(26);
 const FP_B = "b".repeat(26);
@@ -1322,7 +1497,7 @@ describe("envelope", () => {
     expect((out.body as { c: Uint8Array }).c).toEqual(new Uint8Array([9]));
   });
   it("accepts 'relay' as from for ctrl", () => {
-    const e: Envelope = { v: 1, t: "ctrl", from: "relay", seq: 0, body: { type: "presence", agentOnline: true } };
+    const e: Envelope = { v: 1, t: "ctrl", from: "relay", seq: 0, body: { type: "presence", agentOnline: true, computerName: null } };
     expect(decodeEnvelope(encodeEnvelope(e)).from).toBe("relay");
   });
   it("rejects malformed input", () => {
@@ -1330,13 +1505,13 @@ describe("envelope", () => {
     expect(() => decodeEnvelope(encodeCbor({ v: 2 }))).toThrow(/malformed/);
     expect(() => decodeEnvelope(encodeCbor({ v: 1, t: "e2e", from: "short", seq: 0, body: {} }))).toThrow(/malformed/);
   });
+  it("exposes the documented frame limits", () => {
+    expect(FRAME_LIMITS).toEqual({ unauth: 4096, ctrl: 16384, e2eFromPhone: 65536, e2eFromAgent: 1048576 });
+  });
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pnpm test`
-Expected: FAIL — modules not found.
+- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
 
 - [ ] **Step 3: Implement**
 
@@ -1373,6 +1548,13 @@ export function decodeCbor(bytes: Uint8Array): unknown {
 import { z } from "zod";
 import { decodeCbor, encodeCbor, ProtocolError } from "./codec.js";
 
+export const FRAME_LIMITS = {
+  unauth: 4096,
+  ctrl: 16384,
+  e2eFromPhone: 65536,
+  e2eFromAgent: 1048576,
+} as const;
+
 export const Bytes = (n?: number) =>
   z.custom<Uint8Array>((v) => v instanceof Uint8Array && (n === undefined || v.length === n), {
     message: n === undefined ? "expected bytes" : `expected ${n} bytes`,
@@ -1405,324 +1587,15 @@ export function decodeEnvelope(bytes: Uint8Array): Envelope {
 }
 ```
 
-Add to `src/index.ts`:
-```ts
-export * from "./codec.js";
-export * from "./envelope.js";
-```
+Add to `src/index.ts`: `export * from "./codec.js"; export * from "./envelope.js";`
 
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `pnpm test`
-Expected: PASS.
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/protocol
-git commit -m "feat(protocol): cbor codec and envelope schema"
-```
-
----
-
-### Task 6: `ctrl.ts` and `inner.ts` message schemas (spec 7.3, 7.4)
-
-**Files:**
-- Create: `packages/protocol/src/ctrl.ts`, `packages/protocol/src/inner.ts`, `packages/protocol/test/messages.test.ts`
-- Modify: `packages/protocol/src/index.ts`
-
-**Interfaces:**
-- Produces: `CtrlMessageSchema` (discriminated union on `type`) and `type CtrlMessage`; `InnerMessageSchema` and `type InnerMessage`; `SessionInfoSchema`/`type SessionInfo`; `RunSchema`, `LineSchema`, `CursorSchema`, `ColorSchema`; `BackendName = "iterm2" | "tmux"`; `EventKindSchema`; `parseCtrl(u: unknown): CtrlMessage` and `parseInner(u: unknown): InnerMessage` (throw `ProtocolError("malformed")`).
-
-- [ ] **Step 1: Write the failing tests**
-
-`packages/protocol/test/messages.test.ts`:
-```ts
-import { describe, expect, it } from "vitest";
-import { parseCtrl } from "../src/ctrl.js";
-import { parseInner } from "../src/inner.js";
-
-const FP = "c".repeat(26);
-
-describe("ctrl messages", () => {
-  it("parses every ctrl type", () => {
-    const ok = [
-      { type: "challenge", nonce: new Uint8Array(32), connId: "abc" },
-      { type: "auth", role: "phone", fp: FP, ed25519Pub: new Uint8Array(32), sig: new Uint8Array(64), name: "iPhone", appVersion: "0.1.0" },
-      { type: "auth-ok", role: "phone", agentOnline: true, computerName: "MBP", serverTime: 1 },
-      { type: "auth-fail", reason: "not-paired" },
-      { type: "presence", agentOnline: false, computerName: null },
-      { type: "pairing-request", phoneFp: FP, box: { n: new Uint8Array(24), c: new Uint8Array(3) } },
-      { type: "pairing-response", phoneFp: FP, box: { n: new Uint8Array(24), c: new Uint8Array(3) } },
-      { type: "pairing-reject", phoneFp: FP, reason: "bad-code" },
-      { type: "pairing-add", phoneFp: FP, ed25519Pub: new Uint8Array(32), name: "iPhone" },
-      { type: "unpair", phoneFp: FP },
-      { type: "push-token", token: "ExponentPushToken[x]", platform: "ios" },
-      { type: "notify", sessionId: "iterm2:1", kind: "prompt", exitCode: 0, durationMs: 12000, mutedFor: [] },
-      { type: "phones", connected: [{ phoneFp: FP, connId: "abc", name: "iPhone" }] },
-      { type: "phone-connected", phoneFp: FP, connId: "abc", name: "iPhone" },
-      { type: "phone-disconnected", phoneFp: FP, connId: "abc" },
-      { type: "error", code: "x", message: "y" },
-    ];
-    for (const m of ok) expect(parseCtrl(m).type).toBe(m.type);
-  });
-  it("rejects unknown type and bad fields", () => {
-    expect(() => parseCtrl({ type: "nope" })).toThrow(/malformed/);
-    expect(() => parseCtrl({ type: "auth", role: "god", fp: FP })).toThrow(/malformed/);
-  });
-});
-
-describe("inner messages", () => {
-  it("parses representative inner types", () => {
-    const line = { r: [{ t: "hi", fg: 2, b: true }] };
-    const ok = [
-      { type: "conn.hello", n: new Uint8Array(16) },
-      { type: "hello", agentVersion: "0.1.0", backends: [{ name: "iterm2", capabilities: { subscribe: true, prompts: true, createSession: true, focus: true, rename: true, close: true, history: true } }], computerName: "MBP", accent: "emerald" },
-      { type: "sessions", list: [{ id: "iterm2:x", backend: "iterm2", title: "zsh", cols: 80, rows: 24, windowId: "iterm2:w1", windowNumber: 1, tabId: "iterm2:t1", tabIndex: 0, paneIndex: 0, isFocusedOnMac: true, state: "editing" }] },
-      { type: "screen.snapshot", sessionId: "iterm2:x", cols: 80, rows: 1, cursor: { x: 0, y: 0 }, lines: [line], scrollbackTotal: 0, gen: 1 },
-      { type: "screen.diff", sessionId: "iterm2:x", scroll: 1, changed: [{ i: 0, line }], cursor: { x: 0, y: 0 }, scrollbackTotal: 1, gen: 2 },
-      { type: "history", sessionId: "iterm2:x", before: 10, lines: [line] },
-      { type: "event", sessionId: "iterm2:x", kind: "idle", durationMs: 5000, at: 1 },
-      { type: "ack", reqId: "r1", ok: true, sessionId: "iterm2:y" },
-      { type: "subscribe", sessionIds: ["iterm2:x"] },
-      { type: "input.line", sessionId: "iterm2:x", text: "ls" },
-      { type: "input.text", sessionId: "iterm2:x", text: "a" },
-      { type: "input.key", sessionId: "iterm2:x", key: "ctrl-c" },
-      { type: "history.get", sessionId: "iterm2:x", before: 10, count: 200 },
-      { type: "session.create", reqId: "r2", in: { kind: "tab", backend: "tmux" } },
-      { type: "session.create", reqId: "r3", in: { kind: "split", sessionId: "iterm2:x", direction: "vertical" } },
-      { type: "session.focus", reqId: "r4", sessionId: "iterm2:x" },
-      { type: "session.close", reqId: "r5", sessionId: "iterm2:x" },
-      { type: "session.rename", reqId: "r6", sessionId: "iterm2:x", title: "build" },
-      { type: "session.mute", sessionId: "iterm2:x", muted: true },
-      { type: "snapshot.get", sessionId: "iterm2:x" },
-    ];
-    for (const m of ok) expect(parseInner(m).type).toBe(m.type);
-  });
-  it("rejects a bad key name and count out of range", () => {
-    expect(() => parseInner({ type: "input.key", sessionId: "x", key: "ctrl-alt-del" })).toThrow(/malformed/);
-    expect(() => parseInner({ type: "history.get", sessionId: "x", before: 1, count: 501 })).toThrow(/malformed/);
-  });
-});
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pnpm test`
-Expected: FAIL — modules not found.
-
-- [ ] **Step 3: Implement `keys.ts` first (needed by `inner.ts`)** — see Task 7 Step 3 for its content; create it now with that exact content, then continue here. (Task 7 adds its tests.)
-
-- [ ] **Step 4: Implement `ctrl.ts`**
-
-`packages/protocol/src/ctrl.ts`:
-```ts
-import { z } from "zod";
-import { ProtocolError } from "./codec.js";
-import { Bytes, E2EBodySchema, FpSchema } from "./envelope.js";
-
-export const RoleSchema = z.enum(["agent", "phone", "pairing"]);
-export const EventKindSchema = z.enum(["prompt", "idle", "bell", "exit"]);
-
-const PairingBox = E2EBodySchema;
-
-export const CtrlMessageSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("challenge"), nonce: Bytes(32), connId: z.string().min(1) }),
-  z.object({
-    type: z.literal("auth"),
-    role: RoleSchema,
-    fp: FpSchema,
-    ed25519Pub: Bytes(32),
-    sig: Bytes(64),
-    name: z.string().max(64),
-    appVersion: z.string().max(32),
-  }),
-  z.object({
-    type: z.literal("auth-ok"),
-    role: RoleSchema,
-    agentOnline: z.boolean(),
-    computerName: z.string().nullable(),
-    serverTime: z.number(),
-  }),
-  z.object({ type: z.literal("auth-fail"), reason: z.enum(["bad-sig", "not-paired", "fp-mismatch", "no-agent", "timeout"]) }),
-  z.object({ type: z.literal("presence"), agentOnline: z.boolean(), computerName: z.string().nullable() }),
-  z.object({ type: z.literal("pairing-request"), phoneFp: FpSchema, box: PairingBox }),
-  z.object({ type: z.literal("pairing-response"), phoneFp: FpSchema, box: PairingBox }),
-  z.object({ type: z.literal("pairing-reject"), phoneFp: FpSchema, reason: z.enum(["bad-code", "window-closed", "no-agent", "too-many"]) }),
-  z.object({ type: z.literal("pairing-add"), phoneFp: FpSchema, ed25519Pub: Bytes(32), name: z.string().max(64) }),
-  z.object({ type: z.literal("unpair"), phoneFp: FpSchema }),
-  z.object({ type: z.literal("push-token"), token: z.string().min(1).max(256), platform: z.enum(["ios", "android"]) }),
-  z.object({
-    type: z.literal("notify"),
-    sessionId: z.string(),
-    kind: EventKindSchema,
-    exitCode: z.number().int().optional(),
-    durationMs: z.number().int().nonnegative().optional(),
-    mutedFor: z.array(FpSchema),
-  }),
-  z.object({ type: z.literal("phones"), connected: z.array(z.object({ phoneFp: FpSchema, connId: z.string(), name: z.string() })) }),
-  z.object({ type: z.literal("phone-connected"), phoneFp: FpSchema, connId: z.string(), name: z.string() }),
-  z.object({ type: z.literal("phone-disconnected"), phoneFp: FpSchema, connId: z.string() }),
-  z.object({ type: z.literal("error"), code: z.string(), message: z.string() }),
-]);
-export type CtrlMessage = z.infer<typeof CtrlMessageSchema>;
-export type Role = z.infer<typeof RoleSchema>;
-export type EventKind = z.infer<typeof EventKindSchema>;
-
-export function parseCtrl(u: unknown): CtrlMessage {
-  const r = CtrlMessageSchema.safeParse(u);
-  if (!r.success) throw new ProtocolError("malformed", `ctrl: ${r.error.message}`);
-  return r.data;
-}
-```
-
-- [ ] **Step 5: Implement `inner.ts`**
-
-`packages/protocol/src/inner.ts`:
-```ts
-import { z } from "zod";
-import { ProtocolError } from "./codec.js";
-import { EventKindSchema } from "./ctrl.js";
-import { Bytes } from "./envelope.js";
-import { NamedKeySchema } from "./keys.js";
-
-export const BackendNameSchema = z.enum(["iterm2", "tmux"]);
-export type BackendName = z.infer<typeof BackendNameSchema>;
-
-const byte = z.number().int().min(0).max(255);
-export const ColorSchema = z.union([byte, z.tuple([byte, byte, byte])]);
-export const RunSchema = z.object({
-  t: z.string(),
-  fg: ColorSchema.optional(),
-  bg: ColorSchema.optional(),
-  b: z.boolean().optional(),
-  i: z.boolean().optional(),
-  u: z.boolean().optional(),
-  s: z.boolean().optional(),
-  f: z.boolean().optional(),
-});
-export const LineSchema = z.object({ r: z.array(RunSchema), w: z.boolean().optional() });
-export const CursorSchema = z.object({ x: z.number().int(), y: z.number().int() });
-
-export const CapabilitiesSchema = z.object({
-  subscribe: z.boolean(),
-  prompts: z.boolean(),
-  createSession: z.boolean(),
-  focus: z.boolean(),
-  rename: z.boolean(),
-  close: z.boolean(),
-  history: z.boolean(),
-});
-export type Capabilities = z.infer<typeof CapabilitiesSchema>;
-
-export const SessionInfoSchema = z.object({
-  id: z.string(),
-  backend: BackendNameSchema,
-  title: z.string(),
-  cwd: z.string().optional(),
-  cols: z.number().int().positive(),
-  rows: z.number().int().positive(),
-  windowId: z.string(),
-  windowNumber: z.number().int(),
-  tabId: z.string(),
-  tabIndex: z.number().int(),
-  paneIndex: z.number().int(),
-  isFocusedOnMac: z.boolean(),
-  state: z.enum(["unknown", "editing", "running", "finished"]),
-});
-export type SessionInfo = z.infer<typeof SessionInfoSchema>;
-
-const sid = z.string().min(1);
-const reqId = z.string().min(1).max(64);
-
-export const CreateWhereSchema = z.union([
-  z.object({ kind: z.literal("tab"), backend: BackendNameSchema, windowId: z.string().optional() }),
-  z.object({ kind: z.literal("split"), sessionId: sid, direction: z.enum(["vertical", "horizontal"]) }),
-]);
-export type CreateWhere = z.infer<typeof CreateWhereSchema>;
-
-export const InnerMessageSchema = z.discriminatedUnion("type", [
-  // both directions
-  z.object({ type: z.literal("conn.hello"), n: Bytes(16) }),
-  // agent -> phone
-  z.object({
-    type: z.literal("hello"),
-    agentVersion: z.string(),
-    backends: z.array(z.object({ name: BackendNameSchema, capabilities: CapabilitiesSchema })),
-    computerName: z.string(),
-    accent: z.string(),
-  }),
-  z.object({ type: z.literal("sessions"), list: z.array(SessionInfoSchema) }),
-  z.object({
-    type: z.literal("screen.snapshot"),
-    sessionId: sid,
-    cols: z.number().int().positive(),
-    rows: z.number().int().positive(),
-    cursor: CursorSchema,
-    lines: z.array(LineSchema),
-    scrollbackTotal: z.number().int().nonnegative(),
-    gen: z.number().int().nonnegative(),
-  }),
-  z.object({
-    type: z.literal("screen.diff"),
-    sessionId: sid,
-    scroll: z.number().int().nonnegative(),
-    changed: z.array(z.object({ i: z.number().int().nonnegative(), line: LineSchema })),
-    cursor: CursorSchema,
-    scrollbackTotal: z.number().int().nonnegative(),
-    gen: z.number().int().nonnegative(),
-  }),
-  z.object({ type: z.literal("history"), sessionId: sid, before: z.number().int().nonnegative(), lines: z.array(LineSchema) }),
-  z.object({
-    type: z.literal("event"),
-    sessionId: sid,
-    kind: EventKindSchema,
-    exitCode: z.number().int().optional(),
-    durationMs: z.number().int().nonnegative().optional(),
-    command: z.string().optional(),
-    at: z.number(),
-  }),
-  z.object({ type: z.literal("ack"), reqId, ok: z.boolean(), error: z.string().optional(), sessionId: z.string().optional() }),
-  // phone -> agent
-  z.object({ type: z.literal("subscribe"), sessionIds: z.array(sid).max(32) }),
-  z.object({ type: z.literal("input.line"), sessionId: sid, text: z.string().max(8192) }),
-  z.object({ type: z.literal("input.text"), sessionId: sid, text: z.string().max(65536) }),
-  z.object({ type: z.literal("input.key"), sessionId: sid, key: NamedKeySchema }),
-  z.object({ type: z.literal("history.get"), sessionId: sid, before: z.number().int().nonnegative(), count: z.number().int().min(1).max(500) }),
-  z.object({ type: z.literal("session.create"), reqId, in: CreateWhereSchema }),
-  z.object({ type: z.literal("session.focus"), reqId, sessionId: sid }),
-  z.object({ type: z.literal("session.close"), reqId, sessionId: sid }),
-  z.object({ type: z.literal("session.rename"), reqId, sessionId: sid, title: z.string().min(1).max(120) }),
-  z.object({ type: z.literal("session.mute"), sessionId: sid, muted: z.boolean() }),
-  z.object({ type: z.literal("snapshot.get"), sessionId: sid }),
-]);
-export type InnerMessage = z.infer<typeof InnerMessageSchema>;
-export type InnerMessageOf<T extends InnerMessage["type"]> = Extract<InnerMessage, { type: T }>;
-
-export function parseInner(u: unknown): InnerMessage {
-  const r = InnerMessageSchema.safeParse(u);
-  if (!r.success) throw new ProtocolError("malformed", `inner: ${r.error.message}`);
-  return r.data;
-}
-```
-
-Add to `src/index.ts`:
-```ts
-export * from "./ctrl.js";
-export * from "./inner.js";
-export * from "./keys.js";
-```
-
-- [ ] **Step 6: Run tests to verify they pass**
-
-Run: `pnpm test`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add packages/protocol
-git commit -m "feat(protocol): ctrl and inner message schemas"
+git commit -m "feat(protocol): cbor codec, envelope schema, frame limits"
 ```
 
 ---
@@ -1730,10 +1603,11 @@ git commit -m "feat(protocol): ctrl and inner message schemas"
 ### Task 7: `keys.ts` named keys (spec 7.5)
 
 **Files:**
-- Create: `packages/protocol/src/keys.ts` (if not created in Task 6), `packages/protocol/test/keys.test.ts`
+- Create: `packages/protocol/src/keys.ts`, `packages/protocol/test/keys.test.ts`
+- Modify: `packages/protocol/src/index.ts`
 
 **Interfaces:**
-- Produces: `NAMED_KEYS: Record<NamedKey, string>`, `NamedKeySchema` (zod enum), `type NamedKey`, `bytesForKey(k: NamedKey): string`.
+- Produces: `NAMED_KEYS: Record<NamedKey, string>`, `NamedKeySchema` (zod enum), `type NamedKey`, `bytesForKey(k): string`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1762,7 +1636,7 @@ describe("named keys", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails** (skip if `keys.ts` already exists from Task 6 — then it should pass; still run it).
+- [ ] **Step 2: Run test to verify it fails** — `pnpm test`.
 
 - [ ] **Step 3: Implement `keys.ts`**
 
@@ -1813,6 +1687,8 @@ export function bytesForKey(k: NamedKey): string {
 }
 ```
 
+Add `export * from "./keys.js";` to `src/index.ts`.
+
 - [ ] **Step 4: Run tests to verify they pass** — `pnpm test`.
 
 - [ ] **Step 5: Commit**
@@ -1824,7 +1700,327 @@ git commit -m "feat(protocol): named key table"
 
 ---
 
-### Task 8: `crypto.ts` — identity, fingerprint, signatures, AEAD, KDFs (spec 6.1–6.7)
+### Task 8: `ctrl.ts` and `inner.ts` message schemas (spec 7.3, 7.4)
+
+**Files:**
+- Create: `packages/protocol/src/ctrl.ts`, `packages/protocol/src/inner.ts`, `packages/protocol/test/messages.test.ts`
+- Modify: `packages/protocol/src/index.ts`
+
+**Interfaces:**
+- Produces: `CtrlMessageSchema` / `type CtrlMessage` / `parseCtrl(u)`; `InnerMessageSchema` / `type InnerMessage` / `parseInner(u)` / `type InnerMessageOf<T>`; `RoleSchema`, `EventKindSchema`, `AuthFailReasonSchema`, `PairingRejectReasonSchema`; `SessionInfoSchema`/`type SessionInfo`; `RunSchema`, `LineSchema`, `CursorSchema`, `ColorSchema`, `CapabilitiesSchema`/`type Capabilities`, `BackendNameSchema`/`type BackendName`, `CreateWhereSchema`/`type CreateWhere`; `MAX_PAIRINGS = 10`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/protocol/test/messages.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { parseCtrl } from "../src/ctrl.js";
+import { parseInner } from "../src/inner.js";
+
+const FP = "c".repeat(26);
+const box = { n: new Uint8Array(24), c: new Uint8Array(3) };
+
+describe("ctrl messages", () => {
+  it("parses every ctrl type", () => {
+    const ok = [
+      { type: "challenge", nonce: new Uint8Array(32), connId: "abc" },
+      { type: "auth", role: "phone", fp: FP, ed25519Pub: new Uint8Array(32), sig: new Uint8Array(64), name: "iPhone", appVersion: "0.1.0" },
+      { type: "auth", role: "pairing", fp: FP, ed25519Pub: new Uint8Array(32), sig: new Uint8Array(64), name: "iPhone", appVersion: "0.1.0", gate: new Uint8Array(16) },
+      { type: "auth-ok", role: "phone", agentOnline: true, computerName: "MBP", serverTime: 1, minFrameMs: 125 },
+      { type: "auth-fail", reason: "no-window" },
+      { type: "presence", agentOnline: false, computerName: null },
+      { type: "unpaired", phoneFps: [FP] },
+      { type: "phones", connected: [{ phoneFp: FP, connId: "abc", name: "iPhone" }] },
+      { type: "pairings-sync", phones: [{ phoneFp: FP, ed25519Pub: new Uint8Array(32), name: "iPhone" }] },
+      { type: "pairing-open", gateHash: new Uint8Array(32), expiresAt: 123 },
+      { type: "pairing-close" },
+      { type: "pairing-request", phoneFp: FP, box },
+      { type: "pairing-response", phoneFp: FP, box },
+      { type: "pairing-reject", phoneFp: FP, reason: "declined" },
+      { type: "pairing-add", phoneFp: FP, ed25519Pub: new Uint8Array(32), name: "iPhone" },
+      { type: "unpair", phoneFp: FP },
+      { type: "push-token", token: "ExponentPushToken[x]", platform: "ios", enabled: true },
+      { type: "lease", ttlMs: 60000 },
+      { type: "notify", sessionId: "iterm2:1", kind: "prompt", exitCode: 0, durationMs: 12000 },
+      { type: "phone-connected", phoneFp: FP, connId: "abc", name: "iPhone" },
+      { type: "phone-disconnected", phoneFp: FP, connId: "abc" },
+      { type: "error", code: "x", message: "y" },
+    ];
+    for (const m of ok) expect(parseCtrl(m).type).toBe(m.type);
+  });
+  it("rejects unknown type, bad role, oversized lists", () => {
+    expect(() => parseCtrl({ type: "nope" })).toThrow(/malformed/);
+    expect(() => parseCtrl({ type: "auth", role: "god", fp: FP })).toThrow(/malformed/);
+    expect(() => parseCtrl({ type: "lease", ttlMs: 999999 })).toThrow(/malformed/);
+    expect(() => parseCtrl({ type: "pairings-sync", phones: Array(11).fill({ phoneFp: FP, ed25519Pub: new Uint8Array(32), name: "x" }) })).toThrow(/malformed/);
+  });
+});
+
+describe("inner messages", () => {
+  it("parses representative inner types", () => {
+    const line = { r: [{ t: "hi", fg: 2, b: true }, { t: "漢", n: 2 }] };
+    const caps = { subscribe: true, prompts: true, createSession: true, focus: true, history: true, absoluteLines: true };
+    const ok = [
+      { type: "conn.hello", n: new Uint8Array(16) },
+      { type: "hello", agentVersion: "0.1.0", backends: [{ name: "iterm2", capabilities: caps }], computerName: "MBP", accent: "emerald" },
+      { type: "sessions", list: [{ id: "iterm2:x", backend: "iterm2", title: "zsh", cols: 80, rows: 24, windowId: "iterm2:w1", windowNumber: 1, tabId: "iterm2:t1", tabIndex: 0, paneIndex: 0, isFocusedOnMac: true, state: "editing" }] },
+      { type: "screen.snapshot", sessionId: "iterm2:x", cols: 80, rows: 1, cursor: { x: 0, y: 0 }, lines: [line], scrollbackTotal: 0, gen: 1, reset: true, degraded: false },
+      { type: "screen.diff", sessionId: "iterm2:x", scroll: 1, changed: [{ i: 0, line }], cursor: { x: 0, y: 0 }, scrollbackTotal: 1, gen: 2 },
+      { type: "history", sessionId: "iterm2:x", before: 10, lines: [line], oldestAvailable: 0 },
+      { type: "event", sessionId: "iterm2:x", kind: "idle", durationMs: 5000, at: 1 },
+      { type: "ack", reqId: "r1", ok: true, sessionId: "iterm2:y" },
+      { type: "subscribe", sessionId: "iterm2:x" },
+      { type: "subscribe", sessionId: null },
+      { type: "input.line", reqId: "r2", sessionId: "iterm2:x", text: "ls" },
+      { type: "input.text", reqId: "r3", sessionId: "iterm2:x", text: "a" },
+      { type: "input.key", reqId: "r4", sessionId: "iterm2:x", key: "ctrl-c" },
+      { type: "history.get", reqId: "r5", sessionId: "iterm2:x", before: 10, count: 200 },
+      { type: "session.create", reqId: "r6", in: { kind: "tab", backend: "tmux" } },
+      { type: "session.create", reqId: "r7", in: { kind: "split", sessionId: "iterm2:x", direction: "vertical" } },
+      { type: "session.focus", reqId: "r8", sessionId: "iterm2:x" },
+      { type: "snapshot.get", reqId: "r9", sessionId: "iterm2:x" },
+    ];
+    for (const m of ok) expect(parseInner(m).type).toBe(m.type);
+  });
+  it("rejects a bad key name, count out of range, missing reqId, removed types", () => {
+    expect(() => parseInner({ type: "input.key", reqId: "r", sessionId: "x", key: "ctrl-alt-del" })).toThrow(/malformed/);
+    expect(() => parseInner({ type: "history.get", reqId: "r", sessionId: "x", before: 1, count: 201 })).toThrow(/malformed/);
+    expect(() => parseInner({ type: "input.line", sessionId: "x", text: "ls" })).toThrow(/malformed/);
+    expect(() => parseInner({ type: "session.rename", reqId: "r", sessionId: "x", title: "t" })).toThrow(/malformed/);
+    expect(() => parseInner({ type: "event", sessionId: "x", kind: "bell", at: 1 })).toThrow(/malformed/);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
+
+- [ ] **Step 3: Implement `ctrl.ts`**
+
+`packages/protocol/src/ctrl.ts`:
+```ts
+import { z } from "zod";
+import { ProtocolError } from "./codec.js";
+import { Bytes, E2EBodySchema, FpSchema } from "./envelope.js";
+
+export const MAX_PAIRINGS = 10;
+
+export const RoleSchema = z.enum(["agent", "phone", "pairing"]);
+export const EventKindSchema = z.enum(["prompt", "idle", "exit"]);
+export const AuthFailReasonSchema = z.enum(["bad-sig", "not-paired", "fp-mismatch", "no-agent", "no-window", "timeout"]);
+export const PairingRejectReasonSchema = z.enum(["bad-code", "declined", "window-closed", "no-agent", "too-many"]);
+
+const name = z.string().min(1).max(64);
+const connId = z.string().min(1).max(64);
+const PairingBox = E2EBodySchema;
+const PairedPhone = z.object({ phoneFp: FpSchema, ed25519Pub: Bytes(32), name });
+
+export const CtrlMessageSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("challenge"), nonce: Bytes(32), connId }),
+  z.object({
+    type: z.literal("auth"),
+    role: RoleSchema,
+    fp: FpSchema,
+    ed25519Pub: Bytes(32),
+    sig: Bytes(64),
+    name,
+    appVersion: z.string().max(32),
+    gate: Bytes(16).optional(),
+  }),
+  z.object({
+    type: z.literal("auth-ok"),
+    role: RoleSchema,
+    agentOnline: z.boolean(),
+    computerName: z.string().max(64).nullable(),
+    serverTime: z.number(),
+    minFrameMs: z.number().int().min(50).max(2000),
+  }),
+  z.object({ type: z.literal("auth-fail"), reason: AuthFailReasonSchema }),
+  z.object({ type: z.literal("presence"), agentOnline: z.boolean(), computerName: z.string().max(64).nullable() }),
+  z.object({ type: z.literal("unpaired"), phoneFps: z.array(FpSchema).max(MAX_PAIRINGS) }),
+  z.object({ type: z.literal("phones"), connected: z.array(z.object({ phoneFp: FpSchema, connId, name })).max(MAX_PAIRINGS) }),
+  z.object({ type: z.literal("pairings-sync"), phones: z.array(PairedPhone).max(MAX_PAIRINGS) }),
+  z.object({ type: z.literal("pairing-open"), gateHash: Bytes(32), expiresAt: z.number() }),
+  z.object({ type: z.literal("pairing-close") }),
+  z.object({ type: z.literal("pairing-request"), phoneFp: FpSchema, box: PairingBox }),
+  z.object({ type: z.literal("pairing-response"), phoneFp: FpSchema, box: PairingBox }),
+  z.object({ type: z.literal("pairing-reject"), phoneFp: FpSchema, reason: PairingRejectReasonSchema }),
+  z.object({ type: z.literal("pairing-add"), phoneFp: FpSchema, ed25519Pub: Bytes(32), name }),
+  z.object({ type: z.literal("unpair"), phoneFp: FpSchema }),
+  z.object({ type: z.literal("push-token"), token: z.string().min(1).max(256), platform: z.enum(["ios", "android"]), enabled: z.boolean() }),
+  z.object({ type: z.literal("lease"), ttlMs: z.number().int().min(0).max(120000) }),
+  z.object({
+    type: z.literal("notify"),
+    sessionId: z.string().min(1).max(128),
+    kind: z.enum(["prompt", "idle"]),
+    exitCode: z.number().int().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
+  }),
+  z.object({ type: z.literal("phone-connected"), phoneFp: FpSchema, connId, name }),
+  z.object({ type: z.literal("phone-disconnected"), phoneFp: FpSchema, connId }),
+  z.object({ type: z.literal("error"), code: z.string().max(64), message: z.string().max(512) }),
+]);
+export type CtrlMessage = z.infer<typeof CtrlMessageSchema>;
+export type CtrlMessageOf<T extends CtrlMessage["type"]> = Extract<CtrlMessage, { type: T }>;
+export type Role = z.infer<typeof RoleSchema>;
+export type EventKind = z.infer<typeof EventKindSchema>;
+
+export function parseCtrl(u: unknown): CtrlMessage {
+  const r = CtrlMessageSchema.safeParse(u);
+  if (!r.success) throw new ProtocolError("malformed", `ctrl: ${r.error.message}`);
+  return r.data;
+}
+```
+
+- [ ] **Step 4: Implement `inner.ts`**
+
+`packages/protocol/src/inner.ts`:
+```ts
+import { z } from "zod";
+import { ProtocolError } from "./codec.js";
+import { EventKindSchema } from "./ctrl.js";
+import { Bytes } from "./envelope.js";
+import { NamedKeySchema } from "./keys.js";
+
+export const BackendNameSchema = z.enum(["iterm2", "tmux"]);
+export type BackendName = z.infer<typeof BackendNameSchema>;
+
+const byte = z.number().int().min(0).max(255);
+export const ColorSchema = z.union([byte, z.tuple([byte, byte, byte])]);
+export const RunSchema = z.object({
+  t: z.string().max(4096),
+  fg: ColorSchema.optional(),
+  bg: ColorSchema.optional(),
+  b: z.boolean().optional(),
+  i: z.boolean().optional(),
+  u: z.boolean().optional(),
+  s: z.boolean().optional(),
+  f: z.boolean().optional(),
+  n: z.number().int().min(0).max(4096).optional(),
+});
+export const LineSchema = z.object({ r: z.array(RunSchema).max(2048), w: z.boolean().optional() });
+export const CursorSchema = z.object({ x: z.number().int(), y: z.number().int() });
+
+export const CapabilitiesSchema = z.object({
+  subscribe: z.boolean(),
+  prompts: z.boolean(),
+  createSession: z.boolean(),
+  focus: z.boolean(),
+  history: z.boolean(),
+  absoluteLines: z.boolean(),
+});
+export type Capabilities = z.infer<typeof CapabilitiesSchema>;
+
+const sid = z.string().min(1).max(128);
+const reqId = z.string().min(1).max(64);
+
+export const SessionInfoSchema = z.object({
+  id: sid,
+  backend: BackendNameSchema,
+  title: z.string().max(256),
+  cwd: z.string().max(1024).optional(),
+  cols: z.number().int().positive(),
+  rows: z.number().int().positive(),
+  windowId: z.string().max(128),
+  windowNumber: z.number().int(),
+  tabId: z.string().max(128),
+  tabIndex: z.number().int(),
+  paneIndex: z.number().int(),
+  isFocusedOnMac: z.boolean(),
+  state: z.enum(["unknown", "editing", "running", "finished"]),
+});
+export type SessionInfo = z.infer<typeof SessionInfoSchema>;
+
+export const CreateWhereSchema = z.union([
+  z.object({ kind: z.literal("tab"), backend: BackendNameSchema, windowId: z.string().max(128).optional() }),
+  z.object({ kind: z.literal("split"), sessionId: sid, direction: z.enum(["vertical", "horizontal"]) }),
+]);
+export type CreateWhere = z.infer<typeof CreateWhereSchema>;
+
+const screenCommon = {
+  sessionId: sid,
+  cursor: CursorSchema,
+  scrollbackTotal: z.number().int().nonnegative(),
+  gen: z.number().int().nonnegative(),
+};
+
+export const InnerMessageSchema = z.discriminatedUnion("type", [
+  // both directions
+  z.object({ type: z.literal("conn.hello"), n: Bytes(16) }),
+  // agent -> phone
+  z.object({
+    type: z.literal("hello"),
+    agentVersion: z.string().max(32),
+    backends: z.array(z.object({ name: BackendNameSchema, capabilities: CapabilitiesSchema })).max(4),
+    computerName: z.string().max(64),
+    accent: z.string().max(32),
+  }),
+  z.object({ type: z.literal("sessions"), list: z.array(SessionInfoSchema).max(500) }),
+  z.object({
+    type: z.literal("screen.snapshot"),
+    ...screenCommon,
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive(),
+    lines: z.array(LineSchema).max(1000),
+    reset: z.boolean().optional(),
+    degraded: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal("screen.diff"),
+    ...screenCommon,
+    scroll: z.number().int().nonnegative(),
+    changed: z.array(z.object({ i: z.number().int().nonnegative(), line: LineSchema })).max(1000),
+  }),
+  z.object({
+    type: z.literal("history"),
+    sessionId: sid,
+    before: z.number().int().nonnegative(),
+    lines: z.array(LineSchema).max(200),
+    oldestAvailable: z.number().int().nonnegative(),
+  }),
+  z.object({
+    type: z.literal("event"),
+    sessionId: sid,
+    kind: EventKindSchema,
+    exitCode: z.number().int().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
+    command: z.string().max(512).optional(),
+    at: z.number(),
+  }),
+  z.object({ type: z.literal("ack"), reqId, ok: z.boolean(), error: z.string().max(256).optional(), sessionId: sid.optional() }),
+  // phone -> agent (every one carries reqId except subscribe)
+  z.object({ type: z.literal("subscribe"), sessionId: sid.nullable() }),
+  z.object({ type: z.literal("input.line"), reqId, sessionId: sid, text: z.string().max(8192) }),
+  z.object({ type: z.literal("input.text"), reqId, sessionId: sid, text: z.string().max(65536) }),
+  z.object({ type: z.literal("input.key"), reqId, sessionId: sid, key: NamedKeySchema }),
+  z.object({ type: z.literal("history.get"), reqId, sessionId: sid, before: z.number().int().nonnegative(), count: z.number().int().min(1).max(200) }),
+  z.object({ type: z.literal("session.create"), reqId, in: CreateWhereSchema }),
+  z.object({ type: z.literal("session.focus"), reqId, sessionId: sid }),
+  z.object({ type: z.literal("snapshot.get"), reqId, sessionId: sid }),
+]);
+export type InnerMessage = z.infer<typeof InnerMessageSchema>;
+export type InnerMessageOf<T extends InnerMessage["type"]> = Extract<InnerMessage, { type: T }>;
+
+export function parseInner(u: unknown): InnerMessage {
+  const r = InnerMessageSchema.safeParse(u);
+  if (!r.success) throw new ProtocolError("malformed", `inner: ${r.error.message}`);
+  return r.data;
+}
+```
+
+Add to `src/index.ts`: `export * from "./ctrl.js"; export * from "./inner.js";`
+
+- [ ] **Step 5: Run tests to verify they pass** — `pnpm test`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/protocol
+git commit -m "feat(protocol): ctrl and inner message schemas"
+```
+
+---
+
+### Task 9: `crypto.ts` — identity, fingerprint, signatures, AEAD, KDFs (spec 6.1–6.7)
 
 **Files:**
 - Create: `packages/protocol/src/crypto.ts`, `packages/protocol/test/crypto.test.ts`
@@ -1832,23 +2028,20 @@ git commit -m "feat(protocol): named key table"
 
 **Interfaces:**
 - Produces:
-  - `interface Identity { ed25519: { pub: Uint8Array; priv: Uint8Array }; x25519: { pub: Uint8Array; priv: Uint8Array }; createdAt: string }`
-  - `generateIdentity(): Identity`, `identityToJson(id): IdentityJson`, `identityFromJson(j: unknown): Identity` (base64url fields)
-  - `fingerprint(ed25519Pub: Uint8Array): string`
-  - `sign(priv: Uint8Array, msg: string | Uint8Array): Uint8Array`, `verify(pub, msg, sig): boolean`
-  - `authMessage(connId: string, role: string, fp: string, nonce: Uint8Array): string`
-  - `interface Box { n: Uint8Array; c: Uint8Array }`, `seal(key: Uint8Array, plaintext: Uint8Array, ad: string): Box`, `open(key, box, ad): Uint8Array` (throws `ProtocolError("crypto")`)
-  - `derivePskKey(code: Uint8Array, computerFp: string): Uint8Array`
-  - `derivePairKey(myX25519Priv, theirX25519Pub, code, computerFp, phoneFp): Uint8Array`
-  - `deriveConnKey(kPair, nPhone, nAgent, computerFp, phoneFp): { kConn: Uint8Array; connTag: string }`
-  - `frameAd(from, to, connTag, seq): string`, `helloAd(from, to): string`, `pairingAd(kind: "request" | "response", computerFp, phoneFp): string`
-  - `randomBytes(n): Uint8Array` (re-export)
+  - `interface Identity { ed25519: { pub; priv }; x25519: { pub; priv }; createdAt: string }`
+  - `generateIdentity(): Identity`, `identityFromSeeds(edSeed: Uint8Array, xSeed: Uint8Array, createdAt): Identity` (for vectors), `identityToJson(id): IdentityJson`, `identityFromJson(j): Identity`
+  - `fingerprint(ed25519Pub): string`, `sha256(bytes): Uint8Array` (re-export)
+  - `sign(priv, msg: string | Uint8Array): Uint8Array`, `verify(pub, msg, sig): boolean`, `authMessage(connId, role, fp, nonce): string`
+  - `interface Box { n: Uint8Array; c: Uint8Array }`, `seal(key, plaintext, ad): Box`, `sealWithNonce(key, nonce, plaintext, ad): Box`, `open(key, box, ad): Uint8Array`
+  - `derivePskKey(code, computerFp)`, `derivePairKey(myX25519Priv, theirX25519Pub, code, computerFp, phoneFp)`, `deriveConnKey(kPair, nPhone, nAgent, computerFp, phoneFp): { kConn; connTag }`
+  - `frameAd(from, to, connTag, seq)`, `helloAd(from, to)`, `pairingAd(kind, computerFp, phoneFp)`, `randomBytes(n)`
 
 - [ ] **Step 1: Write the failing tests**
 
 `packages/protocol/test/crypto.test.ts`:
 ```ts
 import { describe, expect, it } from "vitest";
+import { utf8 } from "../src/bytes.js";
 import {
   authMessage,
   deriveConnKey,
@@ -1859,14 +2052,16 @@ import {
   generateIdentity,
   helloAd,
   identityFromJson,
+  identityFromSeeds,
   identityToJson,
   open,
+  pairingAd,
   randomBytes,
   seal,
+  sealWithNonce,
   sign,
   verify,
 } from "../src/crypto.js";
-import { utf8 } from "../src/bytes.js";
 
 describe("identity", () => {
   it("generates 32-byte keys and a 26-char fingerprint", () => {
@@ -1875,15 +2070,17 @@ describe("identity", () => {
     expect(id.x25519.priv.length).toBe(32);
     expect(fingerprint(id.ed25519.pub)).toMatch(/^[a-z2-7]{26}$/);
   });
+  it("is deterministic from seeds", () => {
+    const a = identityFromSeeds(new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), "2026-01-01T00:00:00Z");
+    const b = identityFromSeeds(new Uint8Array(32).fill(1), new Uint8Array(32).fill(2), "2026-01-01T00:00:00Z");
+    expect(a.ed25519.pub).toEqual(b.ed25519.pub);
+    expect(a.x25519.pub).toEqual(b.x25519.pub);
+  });
   it("round-trips through JSON", () => {
     const id = generateIdentity();
     const back = identityFromJson(JSON.parse(JSON.stringify(identityToJson(id))));
     expect(back.ed25519.priv).toEqual(id.ed25519.priv);
     expect(back.x25519.pub).toEqual(id.x25519.pub);
-  });
-  it("fingerprint is deterministic", () => {
-    const pub = new Uint8Array(32).fill(7);
-    expect(fingerprint(pub)).toBe(fingerprint(pub));
   });
 });
 
@@ -1909,6 +2106,11 @@ describe("aead", () => {
     expect(() => open(key, box, "ad2")).toThrow(/crypto/);
     expect(() => open(randomBytes(32), box, "ad1")).toThrow(/crypto/);
   });
+  it("sealWithNonce is deterministic", () => {
+    const key = new Uint8Array(32).fill(9);
+    const n = new Uint8Array(24).fill(3);
+    expect(sealWithNonce(key, n, utf8("x"), "ad")).toEqual(sealWithNonce(key, n, utf8("x"), "ad"));
+  });
 });
 
 describe("key derivation", () => {
@@ -1924,7 +2126,7 @@ describe("key derivation", () => {
     expect(derivePskKey(code, fpC)).not.toEqual(derivePskKey(code, fpP));
   });
 
-  it("both sides derive the same K_pair; a relay without the code cannot", () => {
+  it("both sides derive the same K_pair; without the code they cannot", () => {
     const kc = derivePairKey(c.x25519.priv, p.x25519.pub, code, fpC, fpP);
     const kp = derivePairKey(p.x25519.priv, c.x25519.pub, code, fpC, fpP);
     expect(kc).toEqual(kp);
@@ -1945,6 +2147,7 @@ describe("key derivation", () => {
   it("ad builders are the documented strings", () => {
     expect(frameAd("A", "B", "tag", 5)).toBe("1|A|B|tag|5");
     expect(helloAd("A", "B")).toBe("1|A|B|hello|0");
+    expect(pairingAd("request", "C", "P")).toBe("pairing-request|C|P");
   });
 });
 ```
@@ -1964,7 +2167,7 @@ import { z } from "zod";
 import { concat, fromBase64Url, toBase32Lower, toBase64Url, utf8 } from "./bytes.js";
 import { ProtocolError } from "./codec.js";
 
-export { randomBytes };
+export { randomBytes, sha256 };
 
 export interface Identity {
   ed25519: { pub: Uint8Array; priv: Uint8Array };
@@ -1973,12 +2176,17 @@ export interface Identity {
 }
 
 export function generateIdentity(): Identity {
-  const e = ed25519.keygen();
-  const x = x25519.keygen();
+  return identityFromSeeds(randomBytes(32), randomBytes(32), new Date().toISOString());
+}
+
+/** Deterministic construction used by golden vectors and tests. Seeds must be 32 bytes. */
+export function identityFromSeeds(edSeed: Uint8Array, xSeed: Uint8Array, createdAt: string): Identity {
+  const e = ed25519.keygen(edSeed);
+  const x = x25519.keygen(xSeed);
   return {
     ed25519: { pub: e.publicKey, priv: e.secretKey },
     x25519: { pub: x.publicKey, priv: x.secretKey },
-    createdAt: new Date().toISOString(),
+    createdAt,
   };
 }
 
@@ -2038,10 +2246,13 @@ export interface Box {
   c: Uint8Array;
 }
 
+export function sealWithNonce(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, ad: string): Box {
+  const c = xchacha20poly1305(key, nonce, utf8(ad)).encrypt(plaintext);
+  return { n: nonce, c };
+}
+
 export function seal(key: Uint8Array, plaintext: Uint8Array, ad: string): Box {
-  const n = randomBytes(24);
-  const c = xchacha20poly1305(key, n, utf8(ad)).encrypt(plaintext);
-  return { n, c };
+  return sealWithNonce(key, randomBytes(24), plaintext, ad);
 }
 
 export function open(key: Uint8Array, box: Box, ad: string): Uint8Array {
@@ -2096,7 +2307,7 @@ export function pairingAd(kind: "request" | "response", computerFp: string, phon
 
 Add `export * from "./crypto.js";` to `src/index.ts`.
 
-- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. Expected: PASS. If `ed25519.keygen` is not a function, the installed `@noble/curves` is not 2.4.0 — fix the version, do not change the code.
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. If `ed25519.keygen` does not accept a seed argument, the installed `@noble/curves` is not 2.4.0 — fix the version, do not change the code.
 
 - [ ] **Step 5: Commit**
 
@@ -2107,14 +2318,14 @@ git commit -m "feat(protocol): identity, signatures, AEAD, pairing and connectio
 
 ---
 
-### Task 9: `colors.ts` and `qr.ts` (spec 7.6, 10.5, 10.9)
+### Task 10: `colors.ts` and `qr.ts` (spec 7.6, 10.5, 10.9)
 
 **Files:**
 - Create: `packages/protocol/src/colors.ts`, `packages/protocol/src/qr.ts`, `packages/protocol/test/colors.test.ts`, `packages/protocol/test/qr.test.ts`
 - Modify: `packages/protocol/src/index.ts`
 
 **Interfaces:**
-- Produces: `TERMINAL16: readonly string[]` (16 hex strings), `xterm256Hex(index: number, theme16?: readonly string[]): string`, `colorToHex(c: Color | undefined, fallback: string, theme16?): string`; `QrPayloadSchema`, `type QrPayload = { v: 1; r: string; c: string; e: string; n: string; p: string }`, `encodeQr(p: QrPayload): string`, `parseQr(text: string, opts?: { allowInsecure?: boolean }): QrPayload` (throws `ProtocolError("malformed")`).
+- Produces: `TERMINAL16`, `xterm256Hex(index, theme16?)`, `colorToHex(c, fallback, theme16?)`; `QrPayloadSchema`, `type QrPayload = { v: 1; r; c; e; n; p; g }`, `encodeQr(p)`, `parseQr(text, opts?)`, `relayWsUrl(r: string, fp: string): string`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2147,21 +2358,33 @@ describe("colors", () => {
 import { describe, expect, it } from "vitest";
 import { toBase64Url } from "../src/bytes.js";
 import { fingerprint, generateIdentity } from "../src/crypto.js";
-import { encodeQr, parseQr } from "../src/qr.js";
+import { encodeQr, parseQr, relayWsUrl } from "../src/qr.js";
 
 describe("qr payload", () => {
   const id = generateIdentity();
-  const good = { v: 1 as const, r: "wss://relay.shellbell.app", c: fingerprint(id.ed25519.pub), e: toBase64Url(id.ed25519.pub), n: "MBP", p: toBase64Url(new Uint8Array(16)) };
+  const good = {
+    v: 1 as const,
+    r: "wss://relay.shellbell.app",
+    c: fingerprint(id.ed25519.pub),
+    e: toBase64Url(id.ed25519.pub),
+    n: "MBP",
+    p: toBase64Url(new Uint8Array(16)),
+    g: toBase64Url(new Uint8Array(16).fill(1)),
+  };
 
   it("round-trips", () => {
     expect(parseQr(encodeQr(good))).toEqual(good);
   });
-  it("rejects fp/e mismatch, non-wss, bad version", () => {
+  it("rejects fp/e mismatch, non-wss, bad version, trailing slash", () => {
     expect(() => parseQr(encodeQr({ ...good, c: "a".repeat(26) }))).toThrow(/malformed/);
     expect(() => parseQr(encodeQr({ ...good, r: "ws://relay" }))).toThrow(/malformed/);
     expect(parseQr(encodeQr({ ...good, r: "ws://localhost:8787" }), { allowInsecure: true }).r).toBe("ws://localhost:8787");
+    expect(() => parseQr(encodeQr({ ...good, r: "wss://relay.shellbell.app/" }))).toThrow(/malformed/);
     expect(() => parseQr(JSON.stringify({ ...good, v: 2 }))).toThrow(/malformed/);
     expect(() => parseQr("not json")).toThrow(/malformed/);
+  });
+  it("builds the socket url", () => {
+    expect(relayWsUrl("wss://relay.shellbell.app", good.c)).toBe(`wss://relay.shellbell.app/ws/${good.c}`);
   });
 });
 ```
@@ -2214,13 +2437,16 @@ import { ProtocolError } from "./codec.js";
 import { fingerprint } from "./crypto.js";
 import { FpSchema } from "./envelope.js";
 
+const b64u16 = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
+
 export const QrPayloadSchema = z.object({
   v: z.literal(1),
-  r: z.string().url(),
+  r: z.string().url().max(256),
   c: FpSchema,
   e: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   n: z.string().min(1).max(40),
-  p: z.string().regex(/^[A-Za-z0-9_-]{22}$/),
+  p: b64u16,
+  g: b64u16,
 });
 export type QrPayload = z.infer<typeof QrPayloadSchema>;
 
@@ -2238,12 +2464,20 @@ export function parseQr(text: string, opts: { allowInsecure?: boolean } = {}): Q
   const r = QrPayloadSchema.safeParse(raw);
   if (!r.success) throw new ProtocolError("malformed", `qr: ${r.error.message}`);
   const p = r.data;
-  const scheme = new URL(p.r).protocol;
-  if (scheme !== "wss:" && !(opts.allowInsecure && scheme === "ws:")) {
+  const url = new URL(p.r);
+  if (url.protocol !== "wss:" && !(opts.allowInsecure && url.protocol === "ws:")) {
     throw new ProtocolError("malformed", "qr: relay must be wss://");
+  }
+  if (p.r.endsWith("/") || url.pathname !== "/" || url.search || url.hash) {
+    throw new ProtocolError("malformed", "qr: relay url must be scheme://host[:port] with no path");
   }
   if (fingerprint(fromBase64Url(p.e)) !== p.c) throw new ProtocolError("malformed", "qr: fingerprint mismatch");
   return p;
+}
+
+/** `${r}/ws/${fp}` — r is validated to have no trailing slash. */
+export function relayWsUrl(r: string, fp: string): string {
+  return `${r}/ws/${fp}`;
 }
 ```
 
@@ -2255,12 +2489,156 @@ Add to `src/index.ts`: `export * from "./colors.js"; export * from "./qr.js";`
 
 ```bash
 git add packages/protocol
-git commit -m "feat(protocol): color palette and QR payload"
+git commit -m "feat(protocol): color palette, QR payload, relay url"
 ```
 
 ---
 
-### Task 10: `sgr.ts` — ANSI SGR line parser (spec 8.11.1)
+### Task 11: `width.ts` — terminal cell widths (spec 8.11.2)
+
+**Files:**
+- Create: `packages/protocol/src/width.ts`, `packages/protocol/test/width.test.ts`
+- Modify: `packages/protocol/src/index.ts`
+
+**Interfaces:**
+- Produces: `cellWidth(cp: number): 0 | 1 | 2`, `stringCells(s: string): number`.
+
+- [ ] **Step 1: Write the failing tests**
+
+`packages/protocol/test/width.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { cellWidth, stringCells } from "../src/width.js";
+
+describe("cell widths", () => {
+  it("ascii is 1", () => {
+    expect(cellWidth("a".codePointAt(0) as number)).toBe(1);
+    expect(stringCells("hello")).toBe(5);
+  });
+  it("CJK and fullwidth are 2", () => {
+    expect(stringCells("漢字")).toBe(4);
+    expect(stringCells("Ａ")).toBe(2);
+    expect(stringCells("한")).toBe(2);
+  });
+  it("emoji presentation is 2", () => {
+    expect(stringCells("🚀")).toBe(2);
+    expect(stringCells("✅")).toBe(2);
+  });
+  it("combining marks and variation selectors are 0", () => {
+    expect(stringCells("é")).toBe(1);
+    expect(stringCells("️")).toBe(0);
+    expect(stringCells("​")).toBe(0);
+  });
+  it("ZWJ sequence counts the widest element once", () => {
+    expect(stringCells("👨‍💻")).toBe(2);
+  });
+  it("box drawing and nerd font private-use glyphs are 1", () => {
+    expect(stringCells("├──")).toBe(3);
+    expect(stringCells("")).toBe(1);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
+
+- [ ] **Step 3: Implement `width.ts`**
+
+`packages/protocol/src/width.ts`:
+```ts
+/* Terminal cell widths after Markus Kuhn's wcwidth, trimmed to what terminals actually
+ * render at 2 cells (East Asian Wide/Fullwidth + emoji presentation) and 0 cells
+ * (combining marks, format characters). Ranges are inclusive [lo, hi]. */
+
+const ZERO: [number, number][] = [
+  [0x0300, 0x036f], [0x0483, 0x0489], [0x0591, 0x05bd], [0x05bf, 0x05bf], [0x05c1, 0x05c2], [0x05c4, 0x05c5],
+  [0x05c7, 0x05c7], [0x0610, 0x061a], [0x064b, 0x065f], [0x0670, 0x0670], [0x06d6, 0x06dc], [0x06df, 0x06e4],
+  [0x06e7, 0x06e8], [0x06ea, 0x06ed], [0x0711, 0x0711], [0x0730, 0x074a], [0x07a6, 0x07b0], [0x0816, 0x082d],
+  [0x0900, 0x0902], [0x093a, 0x093a], [0x093c, 0x093c], [0x0941, 0x0948], [0x094d, 0x094d], [0x0951, 0x0957],
+  [0x0962, 0x0963], [0x0e31, 0x0e31], [0x0e34, 0x0e3a], [0x0e47, 0x0e4e], [0x1ab0, 0x1aff], [0x1dc0, 0x1dff],
+  [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2064], [0x20d0, 0x20f0], [0xfe00, 0xfe0f], [0xfe20, 0xfe2f],
+  [0xfeff, 0xfeff], [0x1f3fb, 0x1f3ff], [0xe0100, 0xe01ef],
+];
+
+const WIDE: [number, number][] = [
+  [0x1100, 0x115f], [0x231a, 0x231b], [0x2329, 0x232a], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f], [0x2693, 0x2693], [0x26a1, 0x26a1],
+  [0x26aa, 0x26ab], [0x26bd, 0x26be], [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd], [0x2705, 0x2705], [0x270a, 0x270b],
+  [0x2728, 0x2728], [0x274c, 0x274c], [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50], [0x2b55, 0x2b55], [0x2e80, 0x303e],
+  [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f], [0xac00, 0xd7a3],
+  [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60], [0xffe0, 0xffe6], [0x16fe0, 0x16fe4],
+  [0x17000, 0x18aff], [0x1b000, 0x1b2ff], [0x1f004, 0x1f004], [0x1f0cf, 0x1f0cf], [0x1f18e, 0x1f18e],
+  [0x1f191, 0x1f19a], [0x1f200, 0x1f251], [0x1f300, 0x1f320], [0x1f32d, 0x1f335], [0x1f337, 0x1f37c],
+  [0x1f37e, 0x1f393], [0x1f3a0, 0x1f3ca], [0x1f3cf, 0x1f3d3], [0x1f3e0, 0x1f3f0], [0x1f3f4, 0x1f3f4],
+  [0x1f3f8, 0x1f43e], [0x1f440, 0x1f440], [0x1f442, 0x1f4fc], [0x1f4ff, 0x1f53d], [0x1f54b, 0x1f54e],
+  [0x1f550, 0x1f567], [0x1f57a, 0x1f57a], [0x1f595, 0x1f596], [0x1f5a4, 0x1f5a4], [0x1f5fb, 0x1f64f],
+  [0x1f680, 0x1f6c5], [0x1f6cc, 0x1f6cc], [0x1f6d0, 0x1f6d2], [0x1f6d5, 0x1f6d7], [0x1f6eb, 0x1f6ec],
+  [0x1f6f4, 0x1f6fc], [0x1f7e0, 0x1f7eb], [0x1f90c, 0x1f93a], [0x1f93c, 0x1f945], [0x1f947, 0x1f9ff],
+  [0x1fa70, 0x1faff], [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+];
+
+function inRanges(cp: number, ranges: [number, number][]): boolean {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = ranges[mid] as [number, number];
+    if (cp < r[0]) hi = mid - 1;
+    else if (cp > r[1]) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+
+export function cellWidth(cp: number): 0 | 1 | 2 {
+  if (cp === 0) return 0;
+  if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  if (inRanges(cp, ZERO)) return 0;
+  if (inRanges(cp, WIDE)) return 2;
+  return 1;
+}
+
+const ZWJ = 0x200d;
+
+/** Sum of cell widths; a ZWJ-joined sequence counts as its widest element. */
+export function stringCells(s: string): number {
+  let total = 0;
+  let joined = false;
+  let widest = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp === ZWJ) {
+      joined = true;
+      continue;
+    }
+    const w = cellWidth(cp);
+    if (joined) {
+      widest = Math.max(widest, w);
+      joined = false;
+      continue;
+    }
+    total += widest;
+    widest = w;
+  }
+  return total + widest;
+}
+```
+
+Add `export * from "./width.js";` to `src/index.ts`.
+
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. (`✅` U+2705 and `🚀` U+1F680 are in the WIDE table; `` is private-use and falls through to 1.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/protocol
+git commit -m "feat(protocol): terminal cell width table"
+```
+
+---
+
+### Task 12: `sgr.ts` — ANSI SGR line parser (spec 8.11.1)
 
 **Files:**
 - Create: `packages/protocol/src/sgr.ts`, `packages/protocol/test/sgr.test.ts`
@@ -2274,8 +2652,8 @@ git commit -m "feat(protocol): color palette and QR payload"
 `packages/protocol/test/sgr.test.ts`:
 ```ts
 import { describe, expect, it } from "vitest";
-import { parseSgrLine } from "../src/sgr.js";
 import type { Line } from "../src/screen.js";
+import { parseSgrLine } from "../src/sgr.js";
 
 const E = "\x1b[";
 const cases: [string, string, Line][] = [
@@ -2313,7 +2691,9 @@ const cases: [string, string, Line][] = [
   ["trailing spaces with bg kept", `hi${E}41m   `, { r: [{ t: "hi" }, { t: "   ", bg: 1 }] }],
   ["malformed csi emitted literally", "a\x1b[12", { r: [{ t: "a\x1b[12" }] }],
   ["unicode passes through", `${E}32m✓ done`, { r: [{ t: "✓ done", fg: 2 }] }],
-  ["emoji surrogate pair kept together", `${E}1m🚀${E}0mx`, { r: [{ t: "🚀", b: true }, { t: "x" }] }],
+  ["emoji surrogate pair kept together and gets n", `${E}1m🚀${E}0mx`, { r: [{ t: "🚀", b: true, n: 2 }, { t: "x" }] }],
+  ["CJK run gets n", "漢字ab", { r: [{ t: "漢字ab", n: 6 }] }],
+  ["combining mark reduces n", "éx", { r: [{ t: "éx", n: 2 }] }],
   ["faint", `${E}2mx`, { r: [{ t: "x", f: true }] }],
   ["strike", `${E}9mx`, { r: [{ t: "x", s: true }] }],
   ["italic", `${E}3mx`, { r: [{ t: "x", i: true }] }],
@@ -2335,7 +2715,8 @@ describe("parseSgrLine", () => {
 
 `packages/protocol/src/sgr.ts`:
 ```ts
-import { type Color, type Line, type Run, mergeRuns, trimTrailing } from "./screen.js";
+import { type Color, type Line, type Run, codePoints, mergeRuns, trimTrailing } from "./screen.js";
+import { stringCells } from "./width.js";
 
 const ESC = "\x1b";
 const MAX_CSI = 32;
@@ -2368,14 +2749,19 @@ function toRun(text: string, st: Style): Run {
   if (st.u) r.u = true;
   if (st.s) r.s = true;
   if (st.f) r.f = true;
+  const cells = stringCells(text);
+  if (cells !== codePoints(text)) r.n = cells;
   return r;
 }
 
-/** Parse one "38"/"48" extended color. Returns the color and how many groups were consumed after `k`. */
+function clamp(n: number): number {
+  return Math.max(0, Math.min(255, n | 0));
+}
+
+/** Parse one "38"/"48" extended color. Returns the color and how many extra groups were consumed. */
 function extendedColor(groups: number[][], k: number): { color?: Color; consumed: number } {
   const grp = groups[k] as number[];
   if (grp.length > 1) {
-    // colon form inside one group: 38:5:n  |  38:2:r:g:b  |  38:2::r:g:b
     const mode = grp[1];
     const args = grp.slice(2);
     if (mode === 5 && args.length >= 1) return { color: clamp(args[0] as number), consumed: 0 };
@@ -2394,10 +2780,6 @@ function extendedColor(groups: number[][], k: number): { color?: Color; consumed
     };
   }
   return { consumed: 0 };
-}
-
-function clamp(n: number): number {
-  return Math.max(0, Math.min(255, n | 0));
 }
 
 function applySgr(st: Style, params: string): Style {
@@ -2497,7 +2879,7 @@ export function parseSgrLine(text: string): Line {
       continue;
     }
     buf += ch;
-    if (code < 0xd800 || code > 0xdbff) col += 1; // count once per code point (high surrogate is not counted)
+    if (code < 0xd800 || code > 0xdbff) col += 1;
     i++;
   }
   flush();
@@ -2507,18 +2889,166 @@ export function parseSgrLine(text: string): Line {
 
 Add `export * from "./sgr.js";` to `src/index.ts`.
 
-- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. Expected: all 42 table cases pass. If "charset escape stripped" fails, check the `ESC (` handling consumes exactly three characters (`ESC`, `(`, `B`).
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. All 45 table cases must pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/protocol
-git commit -m "feat(protocol): ANSI SGR line parser"
+git commit -m "feat(protocol): ANSI SGR line parser with cell counts"
 ```
 
 ---
 
-### Task 11: CI workflow and typecheck across workspaces
+### Task 13: Golden vectors (spec 6.1, 15)
+
+**Files:**
+- Create: `packages/protocol/scripts/gen-vectors.ts`, `packages/protocol/test/vectors.json` (generated), `packages/protocol/test/vectors.test.ts`, `packages/protocol/src/vectors.ts`
+
+**Interfaces:**
+- Produces: `runVectorChecks(vectors: Vectors): { name: string; ok: boolean }[]` in `src/vectors.ts` — the same function the relay test and the app's self-test screen call; `type Vectors`.
+
+- [ ] **Step 1: Write the checker (used by the test and by the other runtimes)**
+
+`packages/protocol/src/vectors.ts`:
+```ts
+import { bytesToHex, hexToBytes, utf8 } from "./bytes.js";
+import {
+  deriveConnKey,
+  derivePairKey,
+  derivePskKey,
+  fingerprint,
+  frameAd,
+  identityFromSeeds,
+  open,
+  sealWithNonce,
+  sign,
+  verify,
+} from "./crypto.js";
+
+export interface Vectors {
+  v: 1;
+  computer: { edSeed: string; xSeed: string; fp: string };
+  phone: { edSeed: string; xSeed: string; fp: string };
+  code: string;
+  kPsk: string;
+  kPair: string;
+  nPhone: string;
+  nAgent: string;
+  connTag: string;
+  kConn: string;
+  frame: { nonce: string; plaintext: string; seq: number; ciphertext: string };
+  auth: { connId: string; nonce: string; role: string; sig: string };
+}
+
+export function runVectorChecks(vec: Vectors): { name: string; ok: boolean }[] {
+  const out: { name: string; ok: boolean }[] = [];
+  const check = (name: string, fn: () => boolean) => {
+    let ok = false;
+    try {
+      ok = fn();
+    } catch {
+      ok = false;
+    }
+    out.push({ name, ok });
+  };
+  const c = identityFromSeeds(hexToBytes(vec.computer.edSeed), hexToBytes(vec.computer.xSeed), "2026-01-01T00:00:00Z");
+  const p = identityFromSeeds(hexToBytes(vec.phone.edSeed), hexToBytes(vec.phone.xSeed), "2026-01-01T00:00:00Z");
+  const code = hexToBytes(vec.code);
+  check("fingerprint computer", () => fingerprint(c.ed25519.pub) === vec.computer.fp);
+  check("fingerprint phone", () => fingerprint(p.ed25519.pub) === vec.phone.fp);
+  check("kPsk", () => bytesToHex(derivePskKey(code, vec.computer.fp)) === vec.kPsk);
+  const kPair = derivePairKey(c.x25519.priv, p.x25519.pub, code, vec.computer.fp, vec.phone.fp);
+  check("kPair computer side", () => bytesToHex(kPair) === vec.kPair);
+  check("kPair phone side", () => bytesToHex(derivePairKey(p.x25519.priv, c.x25519.pub, code, vec.computer.fp, vec.phone.fp)) === vec.kPair);
+  const conn = deriveConnKey(kPair, hexToBytes(vec.nPhone), hexToBytes(vec.nAgent), vec.computer.fp, vec.phone.fp);
+  check("connTag", () => conn.connTag === vec.connTag);
+  check("kConn", () => bytesToHex(conn.kConn) === vec.kConn);
+  const ad = frameAd(vec.phone.fp, vec.computer.fp, vec.connTag, vec.frame.seq);
+  check("frame seal", () => bytesToHex(sealWithNonce(conn.kConn, hexToBytes(vec.frame.nonce), utf8(vec.frame.plaintext), ad).c) === vec.frame.ciphertext);
+  check("frame open", () => new TextDecoder().decode(open(conn.kConn, { n: hexToBytes(vec.frame.nonce), c: hexToBytes(vec.frame.ciphertext) }, ad)) === vec.frame.plaintext);
+  const authMsg = `shellbell-auth-v1|${vec.auth.connId}|${vec.auth.role}|${vec.phone.fp}|${vec.auth.nonce}`;
+  check("auth signature", () => bytesToHex(sign(p.ed25519.priv, authMsg)) === vec.auth.sig && verify(p.ed25519.pub, authMsg, hexToBytes(vec.auth.sig)));
+  return out;
+}
+```
+
+Add `export * from "./vectors.js";` to `src/index.ts`.
+
+- [ ] **Step 2: Write the generator**
+
+`packages/protocol/scripts/gen-vectors.ts`:
+```ts
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { bytesToHex, hexToBytes, toBase64Url, utf8 } from "../src/bytes.js";
+import { deriveConnKey, derivePairKey, derivePskKey, fingerprint, frameAd, identityFromSeeds, sealWithNonce, sign } from "../src/crypto.js";
+import type { Vectors } from "../src/vectors.js";
+
+const fixed = (fill: number) => bytesToHex(new Uint8Array(32).fill(fill));
+const c = identityFromSeeds(hexToBytes(fixed(0x11)), hexToBytes(fixed(0x22)), "2026-01-01T00:00:00Z");
+const p = identityFromSeeds(hexToBytes(fixed(0x33)), hexToBytes(fixed(0x44)), "2026-01-01T00:00:00Z");
+const fpC = fingerprint(c.ed25519.pub);
+const fpP = fingerprint(p.ed25519.pub);
+const code = new Uint8Array(16).fill(0x55);
+const nPhone = new Uint8Array(16).fill(0x66);
+const nAgent = new Uint8Array(16).fill(0x77);
+const kPair = derivePairKey(c.x25519.priv, p.x25519.pub, code, fpC, fpP);
+const conn = deriveConnKey(kPair, nPhone, nAgent, fpC, fpP);
+const frameNonce = new Uint8Array(24).fill(0x88);
+const plaintext = '{"type":"input.line","reqId":"r1","sessionId":"iterm2:x","text":"y"}';
+const frame = sealWithNonce(conn.kConn, frameNonce, utf8(plaintext), frameAd(fpP, fpC, conn.connTag, 1));
+const authNonce = toBase64Url(new Uint8Array(32).fill(0x99));
+const authMsg = `shellbell-auth-v1|conn-abc|phone|${fpP}|${authNonce}`;
+
+const vectors: Vectors = {
+  v: 1,
+  computer: { edSeed: fixed(0x11), xSeed: fixed(0x22), fp: fpC },
+  phone: { edSeed: fixed(0x33), xSeed: fixed(0x44), fp: fpP },
+  code: bytesToHex(code),
+  kPsk: bytesToHex(derivePskKey(code, fpC)),
+  kPair: bytesToHex(kPair),
+  nPhone: bytesToHex(nPhone),
+  nAgent: bytesToHex(nAgent),
+  connTag: conn.connTag,
+  kConn: bytesToHex(conn.kConn),
+  frame: { nonce: bytesToHex(frameNonce), plaintext, seq: 1, ciphertext: bytesToHex(frame.c) },
+  auth: { connId: "conn-abc", nonce: authNonce, role: "phone", sig: bytesToHex(sign(p.ed25519.priv, authMsg)) },
+};
+writeFileSync(join(import.meta.dirname, "..", "test", "vectors.json"), `${JSON.stringify(vectors, null, 2)}\n`);
+console.log("wrote test/vectors.json", fpC, fpP);
+```
+
+- [ ] **Step 3: Write the test**
+
+`packages/protocol/test/vectors.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { runVectorChecks, type Vectors } from "../src/vectors.js";
+import vectors from "./vectors.json" with { type: "json" };
+
+describe("golden vectors", () => {
+  it("all checks pass in Node", () => {
+    const results = runVectorChecks(vectors as Vectors);
+    expect(results.length).toBe(10);
+    expect(results.filter((r) => !r.ok)).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 4: Generate, run, commit**
+
+Run: `pnpm gen:vectors && pnpm test`
+Expected: `vectors.json` written; all tests pass. The generated file is committed and must never be regenerated casually — it is the interoperability contract (regenerating it after a deliberate crypto change is a protocol version bump).
+
+```bash
+git add packages/protocol
+git commit -m "feat(protocol): golden vectors and cross-runtime checker"
+```
+
+---
+
+### Task 14: CI workflow and full-repo verification
 
 **Files:**
 - Create: `.github/workflows/ci.yml`
@@ -2549,12 +3079,12 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 ```
-(macOS runner because the agent package is `os: ["darwin"]`; nothing in CI talks to iTerm2 — the live tests are env-gated.)
+(macOS runner because the agent package is `os: ["darwin"]`; nothing in CI talks to iTerm2 or tmux — the live tests are env-gated. Plan 05 adds an `expo-doctor` step.)
 
 - [ ] **Step 2: Run the same commands locally**
 
 Run: `pnpm lint && pnpm typecheck && pnpm test` from the repo root.
-Expected: all green. Fix any Biome complaints with `pnpm lint:fix` and re-run.
+Expected: all green. Fix Biome complaints with `pnpm lint:fix` and re-run.
 
 - [ ] **Step 3: Commit**
 
@@ -2567,6 +3097,6 @@ git commit -m "ci: lint, typecheck, test on push and PR"
 
 ## Plan self-review
 
-- **Spec coverage:** 5 (layout) → Tasks 1–3; 6.1–6.7 (crypto) → Task 8; 7.1–7.2 → Task 5; 7.3–7.4 → Task 6; 7.5 → Task 7; 7.6 → Task 9; 8.5.1–8.5.2 + 18.1 spike → Task 2; 8.6 hashing + 10.3 diff application → Task 4; 8.11.1 → Task 10; 10.9 palette → Task 9; 16 tooling/CI → Tasks 1, 11. Not in this plan (by design): relay (Plan 02), agent runtime (Plan 03), tmux (Plan 04), mobile (Plan 05), rings/release (Plan 06).
-- **Type consistency:** `Line`/`Run`/`Cursor` are defined once in `screen.ts` and mirrored by zod schemas in `inner.ts`; `NamedKeySchema` is imported by `inner.ts` from `keys.ts`; `Box` (crypto) has the same shape as `E2EBodySchema` (envelope). `ProtocolError` codes used: `malformed`, `crypto`.
-- **Placeholders:** none. The only values an implementer fills in are the spike's measured numbers and the FUNDING.yml handle.
+- **Spec coverage:** 5 (layout) → Tasks 1, 4; 6.1–6.7 (crypto, vectors) → Tasks 9, 13; 7.1–7.2 → Task 6; 7.3–7.4 → Task 8; 7.5 → Task 7; 7.6 → Task 10; 8.5.1–8.5.2 + 18.1 → Task 2; 8.11 spike + 18.10/18.11 → Task 3; 8.6/10.3 diff application → Task 5; 8.11.1 → Task 12; 8.11.2 → Task 11; 10.9 palette → Task 10; 16 tooling/CI → Tasks 1, 14. Not in this plan (by design): relay (Plan 02), agent runtime (Plan 03), tmux backend (Plan 04), mobile (Plan 05), rings/release (Plan 06).
+- **Type consistency:** `Line`/`Run`/`Cursor`/`ScreenSnapshot`/`ScreenDiff` are defined once in `screen.ts` and mirrored by zod schemas in `inner.ts` (`reset`/`degraded`/`n` present in both); `NamedKeySchema` is imported by `inner.ts`; `Box` (crypto) has the same shape as `E2EBodySchema`; `EventKindSchema` (`prompt|idle|exit`) is used by `inner.ts` while `notify` uses the narrower `prompt|idle`; `Capabilities` has six booleans in both the interface and the schema; `identityFromSeeds` is used by both the vectors checker and generator.
+- **Placeholders:** none. The only values an implementer fills in are the spikes' measured numbers and the FUNDING.yml handle.
