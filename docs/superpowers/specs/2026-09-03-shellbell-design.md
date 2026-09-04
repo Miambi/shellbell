@@ -387,9 +387,13 @@ failures close the window). On success it verifies `sha256(ed25519Pub)` → `fp_
 **Step 4 — key derivation.** Both sides compute:
 
 ```
-shared = X25519(X_priv_self, X_pub_other)                         // 32 bytes
+shared = X25519(X_priv_self, X_pub_other)                         // 32 bytes; abort pairing if all zero (low-order point)
 K_pair = HKDF(ikm = shared ‖ code, salt = "shellbell-pair-v1", info = fp_c + "|" + fp_p, len = 32)
 ```
+
+Both sides must check `shared` is not all zeros before deriving (`@noble/curves`
+throws on this already; the check is still written explicitly so the behaviour does
+not depend on the library version).
 
 Mixing `code` into the KDF means a relay that forwarded (or replaced) the X25519 keys
 still cannot derive `K_pair`, because it never saw `code`.
@@ -482,10 +486,12 @@ ct    = XChaCha20Poly1305(K_conn).seal(nonce, CBOR(innerMessage), ad)
 ### 7.1 Encoding
 
 All WebSocket frames are **binary** and contain one CBOR-encoded envelope, except the
-literal text frames `"ping"` and `"pong"` used for keepalive. Encoding uses `cbor-x`
-with `{ useRecords: false, mapsAsObjects: true }` so maps decode to plain objects and byte
-strings decode to `Uint8Array`. Every decoded object is validated with zod before use;
-invalid frames are dropped and logged.
+literal text frames `"ping"` and `"pong"` used for keepalive. Encoding uses `cborg`
+(pure JS, identical output in Node, Workers and React Native; maps decode to plain
+objects and byte strings to `Uint8Array`). Encoding always passes
+`{ ignoreUndefinedProperties: true }` (`packages/protocol/src/codec.ts` is the only
+place `cborg` is called) so optional fields never appear on the wire. Every decoded object is validated with zod
+before use; invalid frames are dropped and logged.
 
 ### 7.2 Envelope
 
@@ -808,9 +814,11 @@ Unknown fields are ignored by protobuf, so omitting fields we don't use is safe.
 1. `ListSessionsRequest` → for each `window` (ordered by `number`), each `tab` (in
    order, `tabIndex` = position), walk `root` depth-first; each `SessionSummary` leaf gets
    `paneIndex` = visit order within the tab.
-2. For each session, one `VariableRequest { session_id, get: ["session.name", "session.path"] }`
-   → `title` (fallback `SessionSummary.title`, fallback `"Session"`), `cwd`. Batch these
-   with `Promise.all`; cache titles and refresh them on `variable_changed_notification`
+2. For each session, two `VariableRequest { session_id, get: ["<name>"] }` calls — one
+   for `session.name`, one for `session.path` (`VariableResponse.Status` has
+   `MULTI_GET_DISALLOWED`, and the Python library fetches one name per request, so do
+   not batch names) → `title` (fallback `SessionSummary.title`, fallback `"Session"`),
+   `cwd`. Run the per-session calls with `Promise.all`; cache titles and refresh them on `variable_changed_notification`
    for `session.name` / `session.path`. Subscribe with
    `NotificationRequest { subscribe: true, notification_type: NOTIFY_ON_VARIABLE_CHANGE, variable_monitor_request: { name, scope: SESSION, identifier: <sessionId> } }`
    once per session per name (two subscriptions per session), added on discovery and
@@ -1008,8 +1016,9 @@ equal to the hostname, else `"<session_name>:<window_index>.<pane_index>"`. `isF
 `state` is always `"unknown"` (no prompt support in v1).
 
 **Screen** (`getScreen`): two calls, run in parallel:
-- `tmux capture-pane -p -e -t %N` → visible rows with SGR escapes (no `-J`, so one output
-  line per screen row; tmux pads to `pane_height` rows — if fewer lines come back, pad).
+- `tmux capture-pane -p -e -N -t %N` → visible rows with SGR escapes (`-e` escapes,
+  `-N` preserve trailing spaces so background-colored padding survives; no `-J`, so one
+  output line per screen row; if fewer than `pane_height` lines come back, pad).
 - `tmux display-message -p -t %N '#{cursor_x}\t#{cursor_y}\t#{history_size}\t#{pane_width}\t#{pane_height}'`.
 Each row goes through `sgr.parse(row)` (8.11.1). `scrollbackTotal` = `history_size`.
 
@@ -1652,6 +1661,25 @@ Keychain, forward secrecy (ratchet), universal links, Mac color-scheme import.
 
 ---
 
+## 19. External review log
+
+The draft was reviewed by two other models before being finalized. Dispositions:
+
+### 19.1 Gemini 3.1 Pro (via `agy`), 2026-09-03
+
+| Finding | Disposition |
+|---|---|
+| Relay-chosen `connId` in the AEAD AD lets a malicious relay replay captured frames (RCE) | **Accepted — high.** Replaced with the mutual-nonce `conn.hello` handshake and per-connection `K_conn` (6.6, 6.7). |
+| Row-index diffing degenerates to full snapshots whenever the screen scrolls | **Accepted — high.** Scroll-aligned diff with `scroll` field (7.4, 8.6) and phone-side history accumulation (10.3). |
+| Session title in plaintext `notify`/push leaks paths, hosts, commands | **Accepted — medium.** Removed; generic bodies (7.3, 9.2, 11.1). |
+| `CreateWhere` lacked `backend`; registry cannot route a new tab with no `windowId` | **Accepted.** Added (8.4, 8.12). |
+| Line-hash description was ambiguous (`JSON.stringify` vs manual string) | **Accepted.** Manual format mandated (8.6). |
+| Prepending history to a list jumps the viewport | **Accepted.** `maintainVisibleContentPosition` required (10.5). |
+| Raw mode via `onChangeText` diffing breaks under soft-keyboard composition | **Accepted — medium.** Mandated keyboard settings and diff rules; IME limitation documented (10.6). |
+| Cut scrollback history from v1 | **Rejected.** Reading the output that scrolled past is the stated core use; history is cheap on the iTerm2 side and the scroll diff makes it natural on the phone. |
+| Durable Objects are not on the free plan | **Rejected — stale.** Verified against Cloudflare's pricing page 2026-09-03: SQLite-backed DOs are on the Free plan (9.4). |
+| `expo-glass-effect` does not exist; "iOS 26" is wrong | **Rejected — stale.** `expo-glass-effect@57.0.1` is on npm (Appendix C); iOS 26 is Apple's current version naming. |
+
 ## Appendix A — iTerm2 API facts (verified 2026-09-03)
 
 Source: `gnachman/iTerm2` `master` — `proto/api.proto`, `api/library/python/iterm2/iterm2/connection.py`, `auth.py`.
@@ -1717,7 +1745,8 @@ Looked up on npm 2026-09-03; pin these (or newer patch) at project creation.
 | expo | 57.0.19 | | @bufbuild/protobuf | 2.14.1 |
 | expo-router | 57.0.18 | | @bufbuild/protoc-gen-es | 2.14.1 |
 | react-native | 0.87.1 | | @bufbuild/buf | 1.72.0 |
-| @shopify/flash-list | 2.3.2 | | cbor-x | 1.6.6 |
+| @shopify/flash-list | 2.3.2 | | cborg | 6.1.2 |
+| typescript | **5.9.3** (not 7.x — RN/Expo toolchains target 5.x) | | tsx | 4.23.13 |
 | react-native-reanimated | 4.6.0 | | @noble/curves | 2.4.0 |
 | react-native-gesture-handler | 3.2.1 | | @noble/ciphers | 2.4.0 |
 | expo-secure-store | 57.0.3 | | @noble/hashes | 2.4.0 |
