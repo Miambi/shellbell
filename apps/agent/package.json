@@ -1,0 +1,42 @@
+{
+  "name": "shellbell",
+  "version": "0.0.1",
+  "description": "Shellbell agent — mirrors your Mac's terminal sessions to your phone",
+  "type": "module",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "shellbell": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "proto:gen": "buf generate",
+    "prebuild": "pnpm proto:gen",
+    "pretest": "pnpm proto:gen",
+    "typecheck": "pnpm proto:gen && tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "spike:iterm2": "pnpm proto:gen && tsx scripts/spike-iterm2.ts",
+    "spike:tmux": "tsx scripts/spike-tmux.ts"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "2.14.1",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "1.72.0",
+    "@bufbuild/protoc-gen-es": "2.14.1",
+    "@types/node": "26.4.1",
+    "@types/ws": "8.18.1",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "5.0.0"
+  }
+}
