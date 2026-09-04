@@ -426,24 +426,54 @@ Every WebSocket connection to a `ComputerDO` begins:
 
 Unauthenticated sockets are closed after **10 seconds**.
 
-### 6.6 Frame encryption (`e2e` envelopes)
+### 6.6 Per-connection key handshake (replay protection)
+
+`K_pair` is long-lived, so frames must never be encrypted directly under it in a way a
+relay could replay. Every time a phone and the agent are both connected, they run a
+two-message handshake **inside** e2e envelopes and derive a fresh `K_conn`. The relay's
+`connId` is used for routing only and has **no security role** (an earlier draft used
+it in the AEAD associated data; a malicious relay could re-announce an old `connId` and
+replay captured frames — that design is rejected).
+
+1. Phone (after `auth-ok`) → agent: e2e envelope with `seq: 0`, body encrypted under
+   `K_pair`, nonce random, `ad = "1|" + fp_p + "|" + fp_c + "|hello|0"`, inner
+   `conn.hello { n: randomBytes(16) }`.
+2. Agent → phone: same shape, `ad = "1|" + fp_c + "|" + fp_p + "|hello|0"`, inner
+   `conn.hello { n: randomBytes(16) }` with its **own fresh** random `n_a`.
+3. Both compute:
+   ```
+   connTag = base64url( sha256( n_p ‖ n_a ) )[0..22]
+   K_conn  = HKDF( ikm = K_pair, salt = n_p ‖ n_a, info = "shellbell-conn-v1|" + fp_c + "|" + fp_p, len = 32 )
+   ```
+4. From here on, every frame between the two uses `K_conn` (6.7). The agent sends
+   `hello` / `sessions` only after step 2; the phone sends nothing but `conn.hello`
+   until it receives the agent's `conn.hello`.
+
+Why this is replay-safe: a captured frame was sealed under a `K_conn` that depends on
+the agent's random `n_a` for that connection. Replaying the phone's `conn.hello` makes
+the agent pick a new `n_a`, so no previously captured frame decrypts. Under `K_pair`
+only `conn.hello` is ever accepted; any other inner type under `K_pair` is dropped.
+If either side does not receive the peer's `conn.hello` within **10 s** it closes and
+reconnects. This is not forward secrecy (a stolen `K_pair` plus a captured transcript
+still decrypts); see 13.
+
+### 6.7 Frame encryption (`e2e` envelopes)
 
 ```
 nonce = randomBytes(24)
-ad    = utf8( "1|" + from + "|" + to + "|" + conn + "|" + seq )      // v=1
-ct    = XChaCha20Poly1305(K_pair).seal(nonce, CBOR(innerMessage), ad)
+ad    = utf8( "1|" + from + "|" + to + "|" + connTag + "|" + seq )   // v=1
+ct    = XChaCha20Poly1305(K_conn).seal(nonce, CBOR(innerMessage), ad)
 ```
 
-- `conn` is the **sender's** `connId` (from its own challenge). The relay stamps the
-  sender's `connId` into the envelope it forwards; the receiver uses the stamped value in
-  `ad`. A relay that alters `conn`, `from`, `to`, or `seq` causes AEAD failure and the
-  frame is dropped. Replay across connections is impossible (`conn` differs); replay
-  within a connection is rejected by the `seq` rule below.
-- `seq` starts at `0` on each new connection and increments by 1 per e2e frame sent to
-  that peer. Receivers keep `lastSeq[from][conn]` and drop any frame with `seq <= lastSeq`.
+- `connTag` comes from 6.6 and is not transmitted; both sides already know it. A relay
+  that alters `from`, `to`, or `seq` causes AEAD failure and the frame is dropped.
+- `seq` starts at `1` after the handshake (the `conn.hello` frames use `0`) and
+  increments by 1 per frame per direction. Receivers keep `lastSeq` per peer connection
+  and drop any frame with `seq <= lastSeq`.
 - Decryption failure → drop frame, log at `warn`, increment a counter; after **20
-  consecutive** failures from the same peer the receiver closes and reconnects (this is
-  the signal that `K_pair` is out of sync, e.g. the computer was unpaired and re-paired).
+  consecutive** failures from the same peer the receiver closes and reconnects. If the
+  failure is on `conn.hello` itself (wrong `K_pair`, e.g. the computer was unpaired and
+  re-paired), the phone shows "Re-pair this computer".
 
 ---
 
@@ -466,17 +496,16 @@ const bytes = (n?: number) => z.instanceof(Uint8Array).refine(b => n === undefin
 export const Envelope = z.object({
   v: z.literal(1),
   t: z.enum(["ctrl", "e2e"]),
-  from: z.string().length(26),          // sender fp ("relay" for relay-originated ctrl)
+  from: z.string(),                     // sender fp (26 chars) or the literal "relay"
   to: z.string().length(26).optional(), // required for e2e; omitted for most ctrl
-  conn: z.string().optional(),          // stamped by relay on forwarded frames
   seq: z.number().int().nonnegative(),  // e2e only; ctrl uses 0
   body: z.unknown(),                    // ctrl: CtrlMessage; e2e: { n: bytes(24), c: bytes }
 });
 ```
 
-The relay validates `Envelope`, then for `e2e` frames only: sets `conn` to the sender's
-`connId`, checks `from` equals the authenticated fp, and forwards to `to` if connected
-(else drops silently — the sender will learn via `presence`). It does not inspect `body`.
+The relay validates `Envelope`, then for `e2e` frames only: checks `from` equals the
+authenticated fp, and forwards to `to` if connected (else drops silently — the sender
+will learn via `presence`/`phone-disconnected`). It does not inspect `body`.
 
 ### 7.3 Ctrl messages (plaintext; `body.type` discriminates)
 
@@ -493,7 +522,7 @@ The relay validates `Envelope`, then for `e2e` frames only: sets `conn` to the s
 | `pairing-add` | agent → relay | `phoneFp`, `ed25519Pub`, `name` | DO upserts pairing |
 | `unpair` | agent → relay, or phone → relay | `phoneFp` | Agent may unpair any; a phone may only unpair itself. DO deletes the row and closes that phone's sockets (4004). Relay forwards to the agent when it came from a phone. |
 | `push-token` | phone → relay | `token: string`, `platform: "ios"|"android"` | Stored on the pairing row |
-| `notify` | agent → relay | `sessionId`, `title`, `kind`, `exitCode?`, `durationMs?` | Triggers push per 11.3 |
+| `notify` | agent → relay | `sessionId`, `kind`, `exitCode?`, `durationMs?` | Triggers push per 11.3. **No title, no content** — session titles often contain paths, hosts or commands, and this message is plaintext. |
 | `phones` | relay → agent | `connected: { phoneFp, connId, name }[]` | Sent right after the agent's `auth-ok` |
 | `phone-connected` | relay → agent | `phoneFp`, `connId`, `name` | When a paired phone authenticates |
 | `phone-disconnected` | relay → agent | `phoneFp`, `connId` | When its socket closes |
@@ -532,6 +561,12 @@ export const SessionInfo = z.object({
 });
 ```
 
+**Both directions**
+
+| Type | Fields | When |
+|---|---|---|
+| `conn.hello` | `n: bytes(16)` | The only message sealed under `K_pair`; see 6.6 |
+
 **Agent → phone**
 
 | Type | Fields | When |
@@ -539,7 +574,7 @@ export const SessionInfo = z.object({
 | `hello` | `agentVersion`, `backends: { name: "iterm2"\|"tmux", capabilities: { subscribe, prompts, createSession, focus, rename, close, history } }[]`, `computerName`, `accent` | Immediately after the phone's socket is authenticated (agent learns via `phone-connected` — see 8.7). `backends` lists only the ones currently connected. |
 | `sessions` | `list: SessionInfo[]` | On hello, and on every layout/title/focus change (debounced 100 ms) |
 | `screen.snapshot` | `sessionId`, `cols`, `rows`, `cursor`, `lines: Line[]` (length = rows), `scrollbackTotal: number`, `gen: number` | On subscribe, on resize, when a diff would exceed 60 % of rows |
-| `screen.diff` | `sessionId`, `changed: { i: number, line: Line }[]`, `cursor`, `scrollbackTotal`, `gen` | Otherwise; `gen` increments per frame per session so the phone can detect gaps and request a snapshot |
+| `screen.diff` | `sessionId`, `scroll: number` (≥ 0), `changed: { i: number, line: Line }[]`, `cursor`, `scrollbackTotal`, `gen` | Otherwise. `scroll` = rows the screen scrolled up since the last frame (the top `scroll` rows left the screen and became history). Apply order on the phone: shift, then `changed`. `gen` increments per frame per session so the phone can detect gaps and request a snapshot |
 | `history` | `sessionId`, `before: number`, `lines: Line[]` | Response to `history.get`; `lines[k]` is absolute line `before - lines.length + k` |
 | `event` | `sessionId`, `kind: "prompt"|"idle"|"bell"|"exit"`, `exitCode?`, `durationMs?`, `command?`, `at: number` | See 8.8 |
 | `ack` | `reqId`, `ok: boolean`, `error?: string`, `sessionId?` | Response to any phone message carrying `reqId` (create/close/rename/focus) |
@@ -668,7 +703,9 @@ export type Capabilities = {
   createSession: boolean; focus: boolean; rename: boolean; close: boolean; history: boolean;
 };
 export type Screen = { cols: number; rows: number; cursor: Cursor; lines: Line[]; scrollbackTotal: number };
-export type CreateWhere = { kind: "tab"; windowId?: string } | { kind: "split"; sessionId: string; direction: "vertical" | "horizontal" };
+export type CreateWhere =
+  | { kind: "tab"; backend: "iterm2" | "tmux"; windowId?: string }   // backend is required: with no windowId there is no id to route by
+  | { kind: "split"; sessionId: string; direction: "vertical" | "horizontal" };
 export type BackendEvent =
   | { type: "screen-changed"; sessionId: string }
   | { type: "layout-changed" }
@@ -747,7 +784,9 @@ only the messages we use, with identical names, field names and **field numbers*
 are protocol facts). Generated with `@bufbuild/buf` + `@bufbuild/protoc-gen-es` into
 `src/backends/iterm2/gen/` (gitignored; generated in `prebuild`). The subset:
 
-- Envelopes: `ClientOriginatedMessage { id=1; oneof: get_buffer_request=100, get_prompt_request=101, notification_request=103, list_sessions_request=106, send_text_request=107, create_tab_request=108, split_pane_request=109, set_property_request=111, activate_request=114, variable_request=115, focus_request=117, close_request=131 }` and `ServerOriginatedMessage { id=1; error=2; matching *_response=100…131; notification=1000 }`.
+- Envelopes: `ClientOriginatedMessage { id=1; oneof: get_buffer_request=100, get_prompt_request=101, notification_request=103, list_sessions_request=106, send_text_request=107, create_tab_request=108, split_pane_request=109, activate_request=114, variable_request=115, focus_request=117, close_request=131, invoke_function_request=132 }` and `ServerOriginatedMessage { id=1; error=2; matching *_response with the same numbers; notification=1000 }`.
+- `InvokeFunctionRequest { oneof context: method=7 (Method { receiver=1 }); invocation=5; timeout=6 }`, `InvokeFunctionResponse { oneof disposition: error=1 (Error { status=1; error_reason=2 }), success=2 (Success { json_result=1 }) }`.
+- `enum VariableScope { SESSION=1; TAB=2; WINDOW=3; APP=4 }`, `VariableMonitorRequest { name=1; scope=2; identifier=3 }`, `VariableChangedNotification { scope=1; identifier=2; name=3; json_new_value=4 }`.
 - `GetBufferRequest { session=1; line_range=2; include_styles=3 }`, `LineRange { screen_contents_only=1; trailing_lines=2; windowed_coord_range=3 }`, `GetBufferResponse { status=1; contents=3; cursor=4; windowed_coord_range=6 }`, `LineContents { text=1; code_points_per_cell=2; continuation=3; style=4 }`, `CodePointsPerCell { num_code_points=1; repeats=2 }`, `CellStyle { fgStandard=1; fgAlternate=2; fgRgb=3; bgStandard=5; bgAlternate=6; bgRgb=7; bold=9; faint=10; italic=11; blink=12; underline=13; strikethrough=14; invisible=15; inverse=16; repeats=22 }`, `RGBColor { red=1; green=2; blue=3 }`, `enum AlternateColor { DEFAULT=0; REVERSED_DEFAULT=3; SYSTEM_MESSAGE=4 }`, `Coord { x=1; y=2 }`, `CoordRange { start=1; end=2 }`, `Range { location=1; length=2 }`, `WindowedCoordRange { coord_range=1; columns=2 }`.
 - `ListSessionsRequest {}`, `ListSessionsResponse { windows=1 }`, nested `Window { tabs=1; window_id=2; frame=3; number=4 }`, `Tab { root=3; tab_id=2 }`, `SplitTreeNode { vertical=1; links=2 }`, `SplitTreeLink { oneof child: session=1, node=2 }`, `SessionSummary { unique_identifier=1; frame=2; grid_size=3; title=4 }`, `Frame { origin=1; size=2 }`, `Point { x=1; y=2 }`, `Size { width=1; height=2 }`.
 - `SendTextRequest { session=1; text=2; suppress_broadcast=3 }`, `SendTextResponse { status=1 }`.
@@ -772,8 +811,11 @@ Unknown fields are ignored by protobuf, so omitting fields we don't use is safe.
 2. For each session, one `VariableRequest { session_id, get: ["session.name", "session.path"] }`
    → `title` (fallback `SessionSummary.title`, fallback `"Session"`), `cwd`. Batch these
    with `Promise.all`; cache titles and refresh them on `variable_changed_notification`
-   for `session.name` / `session.path` (subscribe with `VariableMonitorRequest` for those
-   names at session scope, identifier `"all"`).
+   for `session.name` / `session.path`. Subscribe with
+   `NotificationRequest { subscribe: true, notification_type: NOTIFY_ON_VARIABLE_CHANGE, variable_monitor_request: { name, scope: SESSION, identifier: <sessionId> } }`
+   once per session per name (two subscriptions per session), added on discovery and
+   on `new_session_notification`. (Whether `identifier: "all"` is accepted here is
+   unverified; per-session subscriptions are the safe form.)
 3. `cols/rows` from `grid_size`. `isFocusedOnMac` from the last `FocusChangedNotification`
    (`session` field) seeded by a `FocusRequest` at connect.
 4. `state` from the prompt tracker (8.8): `editing`/`running`/`finished`/`unknown`.
@@ -844,10 +886,10 @@ committed under `apps/agent/test/fixtures/` as JSON.
   `createSession({kind:"split", sessionId, direction})` → `SplitPaneRequest { session: sessionId, split_direction: direction=="vertical"?VERTICAL:HORIZONTAL }` → `session_id[0]`.
 - `focus(sessionId)` → `ActivateRequest { session_id: sessionId, order_window_front: true, select_tab: true, select_session: true, activate_app: { raise_all_windows: false, ignoring_other_apps: false } }`.
 - `closeSession(sessionId)` → `CloseRequest { sessions: { session_ids: [sessionId] }, force: false }`; status `USER_DECLINED` → throw `UserDeclined`.
-- `rename(sessionId, title)` → `VariableRequest { session_id, set: [{ name: "session.name", value: JSON.stringify(title) }] }`.
-  If iTerm2 rejects (`INVALID_NAME`), fall back to `SendTextRequest` with the OSC title
-  sequence `"\x1b]1;" + title + "\x07"` **only if** `title` contains no `\x1b` or `\x07`
-  (strip those characters first).
+- `rename(sessionId, title)` → `InvokeFunctionRequest { method: { receiver: sessionId }, invocation: 'iterm2.set_name(name: ' + JSON.stringify(title) + ')', timeout: -1 }`
+  (this is exactly what the Python library's `Session.async_set_name` sends; the
+  argument is JSON-encoded, so a title containing quotes is safe). Response
+  `InvokeFunctionResponse.error` → throw with `error_reason`.
 
 ### 8.6 Screen tracker (`screen-tracker.ts`) — exact algorithm
 
@@ -864,14 +906,26 @@ State per session `S`:
 - On `screen-changed(S)`: `dirty = true`; also feed the idle heuristic (8.8).
 - **Flush loop**: `setInterval(125 ms)`. For each `S` with `dirty && subscribers.size > 0 && !inflight`:
   1. `inflight = true; dirty = false`; `screen = await backend.getScreen(S)`.
-  2. Hash each line: `hash = fnv1a32(JSON.stringify(line))` (deterministic key order:
-     build the string manually as `t|fg|bg|b|i|u|s|f` per run joined by `\x1f`).
-  3. If `cols/rows` changed, or `lastLines` empty, or changed rows > `0.6 * rows` →
-     **snapshot**; else **diff** with `changed = [{ i, line }]` for rows whose hash
-     differs.
-  4. `gen++`; send the frame to every subscriber (one encryption per phone).
-  5. `lastLines = hashes; inflight = false`. If `dirty` became true during the await,
-     the next tick handles it.
+  2. Hash each line with `lineHash(line)` from `packages/protocol/src/screen.ts`:
+     for each run build `t + "|" + colorKey(fg) + "|" + colorKey(bg) + "|" + flags` where
+     `colorKey` is `""` for undefined, the decimal index, or `"r,g,b"`, and `flags` is
+     the 5-char string of `b i u s f` as `1`/`0`; join runs with `\x1f`; hash the result
+     with FNV-1a 32-bit over UTF-8 bytes. (No `JSON.stringify` — key order would be
+     implementation-defined.)
+  3. **Scroll alignment.** `delta = screen.scrollbackTotal - lastScrollbackTotal`.
+     If `0 < delta < rows` and `cols/rows` unchanged, the screen scrolled up by `delta`
+     rows: compare new row `i` against old row `i + delta` (rows `≥ rows - delta` have no
+     old counterpart and count as changed). If `delta == 0` compare row-for-row. If
+     `delta < 0` (buffer cleared / session reset) or `delta >= rows` → snapshot.
+  4. If `cols/rows` changed, or `lastLines` empty, or changed rows > `0.6 * rows` →
+     **snapshot**; else **diff** `{ scroll: delta, changed: [{ i, line }] }` for rows
+     whose hash differs after alignment.
+  5. `gen++`; send the frame to every subscriber (one encryption per phone).
+  6. `lastLines = hashes; lastScrollbackTotal = screen.scrollbackTotal; inflight = false`.
+     If `dirty` became true during the await, the next tick handles it.
+
+  Tailing a log therefore costs one new line per frame, not a full snapshot. Alternate-
+  screen programs (vim, htop) never change `scrollbackTotal`, so they diff row-for-row.
 - **Global cap**: at most **40 frames per second per phone** across all sessions; if the
   cap is hit, skip lower-priority sessions this tick (priority = most recently
   subscribed first).
@@ -888,8 +942,9 @@ Line hashes are 32-bit; collisions cost a missed update, which the next change r
   successful `auth-ok`.
 - The agent learns which phones are connected from the relay's `phones` (after
   `auth-ok`), `phone-connected` and `phone-disconnected` ctrl messages (7.3). On
-  `phone-connected` the agent sends `hello` then `sessions` to that phone and resets
-  `lastSeq` for that phone's `connId`.
+  `phone-connected` it waits for that phone's `conn.hello`, answers it (6.6), and only
+  then sends `hello` and `sessions`. `phone-disconnected` discards that connection's
+  `K_conn`, `seq` state and subscriptions.
 - Outbound e2e frames to a phone are dropped locally if the phone is not connected
   (avoids useless encryption work).
 
@@ -912,9 +967,10 @@ are one long "running" command):
   `ring` **unless** a `prompt` event fired for this session in the last 5 s (dedupe) or
   `promptState == "editing"` (the shell is at a prompt; nothing is waiting).
 
-**`ring(S, kind, extra)`**: if `S` is muted for a phone, skip that phone; rate-limit
-per session **1 ring / 60 s** (`lastRingAt`); send ctrl `notify { sessionId, title, kind, exitCode?, durationMs? }`.
-The relay decides who actually gets a push (11.3).
+**`ring(S, kind, extra)`**: rate-limit per session **1 ring / 60 s** (`lastRingAt`);
+send ctrl `notify { sessionId, kind, exitCode?, durationMs? }` (no title — 11.1). Muting
+is per phone, so the agent includes `mutedFor: phoneFp[]` in `notify` and the relay
+excludes those phones. The relay decides who actually gets a push (11.3).
 
 **`exit`** event: emitted on `session-removed` (no ring).
 
@@ -941,12 +997,13 @@ of `list-sessions`), `tabId` = tmux window id (`@N`), `tabIndex` = `#{window_ind
 **Listing** (`cli.ts`): one process call
 
 ```
-tmux list-panes -a -F '#{pane_id}\t#{session_id}\t#{session_name}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_title}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{window_active}\t#{history_size}\t#{cursor_x}\t#{cursor_y}\t#{pane_dead}'
+tmux list-panes -a -F '#{pane_id}\t#{session_id}\t#{session_name}\t#{session_attached}\t#{window_id}\t#{window_index}\t#{window_name}\t#{pane_index}\t#{pane_title}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}\t#{window_active}\t#{history_size}\t#{cursor_x}\t#{cursor_y}\t#{pane_dead}\t#{pane_current_command}'
 ```
 
-Fields are tab-separated; titles may not contain tabs (tmux escapes them). `title` =
-`window_name` if it is not the default shell name, else `pane_title`, else
-`"<session_name>:<window_index>.<pane_index>"`. `isFocusedOnMac` =
+Fields are tab-separated; split on `\t` exactly (tmux does not emit tabs inside these
+values). `title` = `window_name` if it differs from `pane_current_command` (tmux's
+automatic window name is the running command), else `pane_title` if non-empty and not
+equal to the hostname, else `"<session_name>:<window_index>.<pane_index>"`. `isFocusedOnMac` =
 `pane_active && window_active && session is attached` (`#{session_attached}` > 0).
 `state` is always `"unknown"` (no prompt support in v1).
 
@@ -1033,6 +1090,9 @@ with colon syntax, bright colors, inverse of defaults, OSC stripping, and tab ex
 - **Ids:** the registry exposes a single `TerminalBackend`-shaped facade to the agent
   core. It prefixes every native id with `"<name>:"` on the way out and strips it on the
   way in, and routes calls to the owning backend. Unknown prefix → `SessionGone`.
+  `createSession` routes by `where.backend` for `kind: "tab"` and by the prefix of
+  `where.sessionId` for `kind: "split"`; a `windowId` is also prefixed (`"iterm2:w1"`,
+  `"tmux:$0"`) and must match `where.backend`, else `ack.ok=false, error:"bad-window"`.
 - **De-duplication with iTerm2's tmux integration:** when iTerm2 attaches to tmux with
   `tmux -CC`, the same panes exist in both backends. iTerm2's `ListSessionsResponse.Tab`
   carries `tmux_window_id` for such tabs. Rule: hide any tmux-backend session whose tmux
@@ -1097,17 +1157,19 @@ CREATE TABLE IF NOT EXISTS push_limits (
 - `webSocketMessage(ws, msg)`: if `typeof msg === "string"` ignore (only ping/pong are
   text and those are auto-handled). Decode CBOR → `Envelope`; on failure close `4400`.
   Dispatch by attachment state:
-  - `unauth`: only `auth` accepted → verify per 6.5 → on success re-serialize attachment
-    `{ state: "agent"|"phone"|"pairing", fp, connId, name }`, and **re-tag** by closing
-    and… (tags are immutable after accept) → instead, keep tags `["unauth"]` and rely on
-    the attachment for role; use `this.ctx.getWebSockets()` + attachment filtering for
-    fan-out. (Fan-out sizes are tiny: one agent, a handful of phones.)
+  - `unauth`: only `auth` accepted → verify per 6.5 → on success re-serialize the
+    attachment as `{ state: "agent"|"phone"|"pairing", fp, connId, name }`. Tags are
+    immutable after `acceptWebSocket`, so every socket is accepted with no tags and
+    role lookups iterate `this.ctx.getWebSockets()` filtering by
+    `deserializeAttachment().state`. Fan-out sizes are tiny (one agent, a handful of
+    phones), so this is fine. Helper: `socketsByState(state)`.
   - `agent`: accepts ctrl `pairing-add`, `pairing-response`, `pairing-reject`, `unpair`,
     `notify`; e2e frames with `to` = a connected phone.
   - `phone`: accepts ctrl `push-token`, `unpair` (self only); e2e frames with `to = computer fp`.
   - `pairing`: accepts exactly one `pairing-request`, forwarded to the agent socket;
     anything else → close `4403`.
-- On forwarding an e2e frame: set `envelope.conn = sender.connId`, re-encode, send.
+- On forwarding an e2e frame: verify `from` matches the socket's authenticated fp, then
+  forward the bytes unchanged (no re-encoding needed).
 - `webSocketClose/Error`: if agent → broadcast `presence { agentOnline: false }` to phones
   and send nothing else; if phone → send `phone-disconnected` to the agent.
 - Agent connect: if another agent socket is already open for this DO, close the **old**
@@ -1117,13 +1179,15 @@ CREATE TABLE IF NOT EXISTS push_limits (
 
 1. Rate-limit: `ring_limits[sessionId].last_ring_at` within 60 s → drop.
 2. Recipients: pairings with a `push_token` whose `phone_fp` has **no open authenticated
-   socket** right now.
+   socket** right now and is not in `notify.mutedFor`.
 3. Per-phone cap: **20 pushes per rolling hour** (`push_limits`); beyond that, drop.
 4. `POST https://exp.host/--/api/v2/push/send` with body
    `[{ to: token, title: computerName, body: <text>, data: { computerFp, sessionId, kind }, sound: "default", priority: "high", channelId: "rings", categoryId: "ring" }]`.
-   `body` text by kind: `prompt` → `"<title> finished (exit <code>) after <duration>"`;
-   `idle` → `"<title> went quiet — waiting for you?"`; `bell` → `"<title> rang the bell"`.
-   `<title>` is the session title from the agent, truncated to 40 chars.
+   `body` text by kind (generic on purpose — 11.1): `prompt` →
+   `"A command finished — exit <code> after <duration>"`; `idle` →
+   `"A session went quiet — waiting for you?"`; `bell` → `"A session rang the bell"`;
+   `<duration>` formatted as `43s` / `4m 12s` / `1h 03m`. The app shows the real session
+   title once opened.
 5. Response handling: a ticket with `details.error == "DeviceNotRegistered"` → clear that
    phone's token. Other errors → log; no retry (a missed ring is acceptable; a retry storm
    is not).
@@ -1151,11 +1215,15 @@ Self-hosters delete `routes` and use the `*.workers.dev` URL in their QR
 ### 9.4 Free-tier fit
 
 - Idle computers cost nothing: hibernated sockets, ping/pong auto-response.
-- Active viewing: ≤ 8 frames/s per viewed session, ≤ 40/s per phone. DO incoming
-  WebSocket messages are billed at 20:1 against requests, so one phone actively viewing
-  one busy session ≈ 0.4 req/s ≈ 1 440 req/hour. The free daily allowance supports on
-  the order of 70 phone-hours of *continuous busy viewing* per day per account; typical
-  use is a few minutes at a time.
+- Verified against Cloudflare's Durable Objects pricing page (2026-09-03): the Workers
+  **Free** plan includes SQLite-backed Durable Objects with 100 000 requests/day,
+  13 000 GB-s/day duration, 5 GB storage; "a 20:1 ratio is applied to incoming WebSocket
+  messages"; and "Durable Objects that are idle and eligible for hibernation are not
+  billed for duration". Our DO is SQLite-backed (9.3 `new_sqlite_classes`) as required.
+- Active viewing: ≤ 8 frames/s per viewed session, ≤ 40/s per phone. At 20:1, one phone
+  actively viewing one busy session ≈ 0.4 req/s ≈ 1 440 req/hour. The free daily
+  allowance supports on the order of 70 phone-hours of *continuous busy viewing* per day
+  per account; typical use is a few minutes at a time.
 - No KV, no queues, no cron. One Worker, one DO class.
 
 ---
@@ -1203,7 +1271,14 @@ useConnectionStore: {
 }
 ```
 
-Screen updates mutate `lines` in place via the diff and bump a per-line `key` so FlashList
+Applying a `screen.diff` (exact order): (1) if `scroll > 0`, remove the first `scroll`
+entries of `lines`, append them to `history` (if `history` is empty, set
+`historyFrom = previous scrollbackTotal`), and push `scroll` empty lines `{ r: [] }` at
+the end of `lines`; (2) replace `lines[i]` for each `changed` entry; (3) set `cursor`,
+`scrollbackTotal`, `gen`. If `gen !== previousGen + 1`, discard `history`, send
+`snapshot.get`, and ignore frames until a snapshot arrives. `history` is capped at
+5 000 lines (drop from the front, adjusting `historyFrom`). Each line carries a stable
+`key` (incrementing counter assigned when the line object is created) so FlashList
 re-renders only changed rows.
 
 ### 10.4 Connection manager (`src/net/`)
@@ -1212,8 +1287,12 @@ re-renders only changed rows.
 
 - `connect()`: open `wss://<relayUrl>/ws/<fp>`; on `challenge` respond `auth` with
   `role: "phone"`; on `auth-ok` set status `online`, send `push-token` (if permission
-  granted), then wait for `hello`.
-- Sends/receives e2e using `K_pair` from SecureStore; keeps `seq` and `lastSeq`.
+  granted); if `agentOnline`, send `conn.hello` (6.6) and wait for the agent's
+  `conn.hello` (10 s timeout → reconnect), derive `K_conn`, then wait for `hello`. If
+  `agentOnline` is false, wait for `presence { agentOnline: true }` and then do the
+  handshake.
+- Sends/receives e2e using `K_conn`; keeps `seq` and `lastSeq`; `K_pair` (from
+  SecureStore) is used only to seal/open `conn.hello`.
 - `"ping"` every 30 s while foregrounded.
 - Backoff same as the agent (1→30 s). `presence.agentOnline=false` sets `agentOnline`
   false but keeps the socket (the phone is still authenticated; the agent may come back).
@@ -1245,7 +1324,9 @@ re-renders only changed rows.
   up; a "↓ Jump to live" pill appears when not following.
 - **History**: when the list is scrolled to within 20 rows of the top and
   `historyFrom > 0`, send `history.get { before: historyFrom, count: 200 }` and prepend.
-  `history` is cleared when `scrollbackTotal` shrinks (session cleared).
+  The list must set `maintainVisibleContentPosition={{ minIndexForVisible: 0 }}` so
+  prepending does not jump the viewport. `history` is cleared when `scrollbackTotal`
+  shrinks (session cleared) or on a `gen` gap.
 - Colors: `packages/protocol/src/colors.ts` provides the 256-color palette; indices 0–15
   come from the theme (10.9), 16–231 the standard 6×6×6 cube, 232–255 the gray ramp.
   Default fg = theme `text`, default bg = transparent (black).
@@ -1263,9 +1344,16 @@ Bottom bar (glass on iOS), three rows:
      persisted), long-press the field's `↑` button to browse.
    - **Raw mode** (toggle `⌨︎`; remembered per session): every character typed is sent
      immediately as `input.text`; Backspace → `input.key backspace`; Return →
-     `input.key enter`; the field stays empty. Implemented by diffing `onChangeText`
-     against the previous value (RN has no reliable per-key event for soft keyboards)
-     and by `onKeyPress` for `Backspace`/`Enter`.
+     `input.key enter`; the field stays empty. Soft keyboards compose and predict words,
+     which would corrupt raw input, so the raw-mode `TextInput` **must** set
+     `autoCorrect={false}`, `autoCapitalize="none"`, `spellCheck={false}`,
+     `autoComplete="off"`, `keyboardType={Platform.OS === "ios" ? "ascii-capable" : "visible-password"}`
+     (the Android value disables suggestions), and `textContentType="none"`. Keystrokes
+     are derived by diffing `onChangeText` against the previous value — appended suffix →
+     `input.text`; shortened by `k` → `k × input.key backspace`; replaced middle → send
+     backspaces then the new suffix — plus `onKeyPress` for `Backspace`/`Enter`. After
+     each send the field is reset to empty. Known limitation (documented in-app): IME
+     composition (CJK) is not supported in raw mode; use line mode.
    - Paste → `input.text` with clipboard content (no trailing newline).
 - Haptics: `impactAsync(Light)` on every send; `notificationAsync(Success)` on pair;
   `notificationAsync(Warning)` when an `event` arrives for the session you are viewing.
@@ -1337,10 +1425,13 @@ architecture.
 
 ## 11. Notifications end to end
 
-### 11.1 What is sent through Apple/Google
+### 11.1 What is sent through Apple/Google (and seen by the relay)
 
-Only: computer name (title), session title + event kind (body), and `{ computerFp,
-sessionId, kind }` (data). Never terminal content, never commands, never input.
+Only: computer name (title), a **generic** body by event kind with exit code and
+duration, and `{ computerFp, sessionId, kind }` (data; `sessionId` is an opaque id).
+Never the session title (titles often embed paths, hosts, or the running command),
+never terminal content, never commands, never input. Showing the real title in the
+notification needs on-device decryption (an iOS Notification Service Extension) — v2.
 
 ### 11.2 Who decides what
 
@@ -1390,7 +1481,8 @@ too large · `4408` unauth timeout.
 |---|---|---|
 | Passive network / relay operator | read terminal data? | No — E2E with per-pair keys; relay sees only lengths and timing |
 | Malicious relay | inject input, impersonate a computer, add a phone? | No — inputs are AEAD-bound to `K_pair`; pairing requires `code` the relay never sees; `pairing-add` is only accepted on the agent's signed socket |
-| Malicious relay | deny service, replay frames, reorder? | DoS yes (accepted). Replay/reorder no — `conn`+`seq` in AD |
+| Malicious relay | deny service, replay frames, reorder? | DoS yes (accepted). Replay no — per-connection `K_conn` from mutual random nonces (6.6); reorder no — `seq` in AD |
+| Malicious relay | learn what you are working on from pushes? | Only that *a* session on *a* computer finished/went quiet, plus exit code and duration (11.1) |
 | Someone who photographs your QR | pair their phone? | Only during the 5-minute window and only if the agent accepts; the QR is shown in your terminal on your screen. Mitigation for shared screens: `shellbell pair --confirm` (v1.1) requires pressing Enter on the Mac for each pairing |
 | Someone with your unlocked phone | type into your shell? | Yes (same as any app). v1.1: optional Face ID gate on app open via `expo-local-authentication` |
 | Someone with your Mac user account | read keys? | Yes; same trust level as `~/.ssh`. Keychain in v2 |
@@ -1432,14 +1524,21 @@ The spike (18.1) measures `GetBuffer` latency for a 200×60 styled screen; if it
 - Codec round-trips for every message schema (property-style tests with fast-check are
   optional; at least one fixture per message type).
 - Crypto: seal/open symmetry; wrong key/nonce/AD fails; pairing derivation yields the
-  same `K_pair` on both sides; fingerprint is stable and 26 chars; signature verify.
+  same `K_pair` on both sides; `conn.hello` handshake yields the same `K_conn` and
+  `connTag` on both sides; a frame sealed under one connection's `K_conn` fails under
+  another's (replay test); fingerprint is stable and 26 chars; signature verify.
+- `lineHash` is deterministic and identical across Node/RN (fixture table).
 - Keys: every `NamedKey` maps to a non-empty byte string; table snapshot.
 - QR encode/decode and rejection cases.
 
 **`apps/agent`** (vitest, node):
 - `convert.ts` against committed real fixtures (see 8.5.5) — exact expected `Line[]`.
 - Screen tracker with a fake backend and fake timers: snapshot on subscribe; diff on
-  small change; snapshot when > 60 % changed; no frames when no subscribers; 40 fps cap.
+  small change; **scroll by 1 while tailing produces `scroll: 1` and one changed row**;
+  scroll by ≥ rows → snapshot; negative delta → snapshot; snapshot when > 60 % changed;
+  no frames when no subscribers; 40 fps cap.
+- Phone-side diff application (in `packages/protocol` as a pure `applyDiff(screen, diff)`
+  so both the app and tests share it): scroll moves rows into history; `gen` gap detected.
 - Events: prompt path (start/end → `prompt`, ring threshold), idle path (timing table),
   dedupe, mute, per-session rate limit.
 - Pairing: full agent-side flow against an in-memory "relay" double; bad code → reject;
@@ -1460,7 +1559,7 @@ The spike (18.1) measures `GetBuffer` latency for a 200×60 styled screen; if it
 **`apps/relay`** (vitest with `@cloudflare/vitest-pool-workers`):
 - Challenge/auth for each role including every failure reason.
 - Pairing socket: only one message, 60-s expiry, needs agent online.
-- Routing: agent→phone and phone→agent e2e, `conn` stamping, `from` spoof rejected.
+- Routing: agent→phone and phone→agent e2e forwarded byte-for-byte, `from` spoof rejected, frames to a disconnected peer dropped.
 - `unpair` closes sockets; `notify` → push only to disconnected phones; rate limits;
   `DeviceNotRegistered` clears token (mock `fetch`).
 - Duplicate agent supersedes.
