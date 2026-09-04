@@ -5,7 +5,7 @@ export class ProtocolError extends Error {
     public readonly code: "malformed" | "unsupported" | "crypto" | "replay",
     message?: string,
   ) {
-    super(message ?? code);
+    super(message ? `${code}: ${message}` : code);
     this.name = "ProtocolError";
   }
 }
@@ -19,6 +19,6 @@ export function decodeCbor(bytes: Uint8Array): unknown {
   try {
     return decode(bytes);
   } catch (err) {
-    throw new ProtocolError("malformed", `malformed: ${(err as Error).message}`);
+    throw new ProtocolError("malformed", (err as Error).message);
   }
 }

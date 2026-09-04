@@ -35,6 +35,6 @@ export function encodeEnvelope(e: Envelope): Uint8Array {
 export function decodeEnvelope(bytes: Uint8Array): Envelope {
   const raw = decodeCbor(bytes);
   const parsed = EnvelopeSchema.safeParse(raw);
-  if (!parsed.success) throw new ProtocolError("malformed", `malformed: ${parsed.error.message}`);
+  if (!parsed.success) throw new ProtocolError("malformed", z.prettifyError(parsed.error));
   return parsed.data;
 }
