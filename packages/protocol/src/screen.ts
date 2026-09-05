@@ -163,10 +163,11 @@ export function applyDiff(
   let history = state.history;
   let historyFrom = state.historyFrom;
   if (diff.scroll > 0) {
-    const out = lines.splice(0, Math.min(diff.scroll, lines.length));
+    const scrollAmt = Math.min(diff.scroll, lines.length);
+    const out = lines.splice(0, scrollAmt);
     if (history.length === 0) historyFrom = state.scrollbackTotal;
     history = history.concat(out);
-    for (let k = 0; k < diff.scroll; k++) lines.push(emptyLine());
+    for (let k = 0; k < scrollAmt; k++) lines.push(emptyLine());
     if (history.length > HISTORY_CAP) {
       const drop = history.length - HISTORY_CAP;
       history = history.slice(drop);

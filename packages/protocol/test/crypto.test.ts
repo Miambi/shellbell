@@ -63,6 +63,18 @@ describe("identity", () => {
     };
     expect(() => identityFromJson(invalidJson)).toThrow(/malformed/);
   });
+  it("identityFromJson rejects bad base64url with ProtocolError", () => {
+    const id = generateIdentity();
+    const json = identityToJson(id);
+    const invalidJson = {
+      ...json,
+      ed25519: {
+        ...json.ed25519,
+        pub: "not*valid",
+      },
+    };
+    expect(() => identityFromJson(invalidJson)).toThrow(/malformed/);
+  });
 });
 
 describe("signatures", () => {

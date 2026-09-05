@@ -40,7 +40,11 @@ export async function requestCookieAndKey(
     throw new ITerm2AuthError(msg.trim(), "unknown");
   }
   const [cookie, key] = out.trim().split(" ");
-  if (!cookie || !key) throw new ITerm2AuthError(`unexpected osascript output: ${out}`, "unknown");
+  if (!cookie || !key)
+    throw new ITerm2AuthError(
+      `unexpected osascript output (${out.trim().split(" ").length} token(s), ${out.length} chars)`,
+      "unknown",
+    );
   return { cookie, key };
 }
 

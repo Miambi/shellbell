@@ -8,7 +8,7 @@ const b64u16 = z.string().regex(/^[A-Za-z0-9_-]{22}$/);
 
 export const QrPayloadSchema = z.object({
   v: z.literal(1),
-  r: z.string().url().max(256),
+  r: z.url().max(256),
   c: FpSchema,
   e: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   n: z.string().min(1).max(40),

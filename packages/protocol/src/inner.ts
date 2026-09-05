@@ -100,7 +100,7 @@ export const InnerMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("screen.diff"),
     ...screenCommon,
-    scroll: z.number().int().nonnegative(),
+    scroll: z.number().int().nonnegative().max(1000),
     changed: z.array(z.object({ i: z.number().int().nonnegative(), line: LineSchema })).max(1000),
   }),
   z.object({

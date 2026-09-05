@@ -15,14 +15,16 @@ export const Bytes = (n?: number) =>
 
 export const FpSchema = z.string().regex(/^[a-z2-7]{26}$/, "fingerprint");
 
-export const EnvelopeSchema = z.object({
-  v: z.literal(1),
-  t: z.enum(["ctrl", "e2e"]),
-  from: z.union([FpSchema, z.literal("relay")]),
-  to: FpSchema.optional(),
-  seq: z.number().int().nonnegative(),
-  body: z.unknown(),
-});
+export const EnvelopeSchema = z
+  .object({
+    v: z.literal(1),
+    t: z.enum(["ctrl", "e2e"]),
+    from: z.union([FpSchema, z.literal("relay")]),
+    to: FpSchema.optional(),
+    seq: z.number().int().nonnegative(),
+    body: z.unknown(),
+  })
+  .refine((e) => e.t !== "e2e" || e.to !== undefined, { message: "e2e envelope needs to" });
 export type Envelope = z.infer<typeof EnvelopeSchema>;
 
 export const E2EBodySchema = z.object({ n: Bytes(24), c: Bytes() });

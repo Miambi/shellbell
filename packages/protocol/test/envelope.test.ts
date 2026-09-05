@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { decodeCbor, encodeCbor } from "../src/codec.js";
-import { decodeEnvelope, type Envelope, encodeEnvelope, FRAME_LIMITS } from "../src/envelope.js";
+import {
+  decodeEnvelope,
+  E2EBodySchema,
+  type Envelope,
+  encodeEnvelope,
+  FRAME_LIMITS,
+} from "../src/envelope.js";
 
 const FP_A = "a".repeat(26);
 const FP_B = "b".repeat(26);
@@ -53,5 +59,29 @@ describe("envelope", () => {
       e2eFromPhone: 65536,
       e2eFromAgent: 1048576,
     });
+  });
+  it("rejects an e2e envelope without to", () => {
+    expect(() =>
+      decodeEnvelope(
+        encodeCbor({
+          v: 1,
+          t: "e2e",
+          from: FP_A,
+          seq: 0,
+          body: { n: new Uint8Array(24), c: new Uint8Array([9]) },
+        }),
+      ),
+    ).toThrow(/malformed/);
+  });
+});
+
+describe("E2EBodySchema", () => {
+  it("requires a 24-byte nonce", () => {
+    expect(E2EBodySchema.safeParse({ n: new Uint8Array(23), c: new Uint8Array(1) }).success).toBe(
+      false,
+    );
+    expect(E2EBodySchema.safeParse({ n: new Uint8Array(24), c: new Uint8Array(1) }).success).toBe(
+      true,
+    );
   });
 });

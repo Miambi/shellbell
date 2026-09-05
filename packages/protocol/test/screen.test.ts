@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseInner } from "../src/inner.js";
 import {
   applyDiff,
   applySnapshot,
@@ -173,5 +174,31 @@ describe("applySnapshot / applyDiff", () => {
 
   it("emptyLine has no runs", () => {
     expect(emptyLine()).toEqual({ r: [] });
+  });
+
+  it("bounds scroll so lines.length never exceeds the original row count", () => {
+    const st = applySnapshot(undefined, { ...snap, rows: 2, lines: [L("a"), L("b")] });
+    const { state } = applyDiff(st, {
+      scroll: 5,
+      changed: [],
+      cursor: { x: 0, y: 0 },
+      scrollbackTotal: 101,
+      gen: 2,
+    });
+    expect(state.lines.length).toBe(2);
+  });
+
+  it("rejects scroll over 1000 in parseInner", () => {
+    expect(() =>
+      parseInner({
+        type: "screen.diff",
+        sessionId: "iterm2:x",
+        scroll: 1001,
+        changed: [],
+        cursor: { x: 0, y: 0 },
+        scrollbackTotal: 1,
+        gen: 2,
+      }),
+    ).toThrow(/malformed/);
   });
 });

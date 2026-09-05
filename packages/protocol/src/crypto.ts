@@ -55,10 +55,18 @@ export function identityFromJson(j: unknown): Identity {
   const r = IdentityJsonSchema.safeParse(j);
   if (!r.success) throw new ProtocolError("malformed", `identity: ${z.prettifyError(r.error)}`);
   const p = r.data;
-  const ed25519Pub = fromBase64Url(p.ed25519.pub);
-  const ed25519Priv = fromBase64Url(p.ed25519.priv);
-  const x25519Pub = fromBase64Url(p.x25519.pub);
-  const x25519Priv = fromBase64Url(p.x25519.priv);
+  let ed25519Pub: Uint8Array;
+  let ed25519Priv: Uint8Array;
+  let x25519Pub: Uint8Array;
+  let x25519Priv: Uint8Array;
+  try {
+    ed25519Pub = fromBase64Url(p.ed25519.pub);
+    ed25519Priv = fromBase64Url(p.ed25519.priv);
+    x25519Pub = fromBase64Url(p.x25519.pub);
+    x25519Priv = fromBase64Url(p.x25519.priv);
+  } catch {
+    throw new ProtocolError("malformed", "identity: bad base64url");
+  }
   if (
     ed25519Pub.length !== 32 ||
     ed25519Priv.length !== 32 ||

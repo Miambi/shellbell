@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { Line } from "../src/screen.js";
+import { codePoints, type Line } from "../src/screen.js";
 import { parseSgrLine } from "../src/sgr.js";
+import { stringCells } from "../src/width.js";
 
 const E = "\x1b[";
 const cases: [string, string, Line][] = [
@@ -39,9 +40,10 @@ const cases: [string, string, Line][] = [
   ["tab expands to next multiple of 8", "ab\tc", { r: [{ t: "ab      c" }] }],
   ["tab at column 8", "12345678\tx", { r: [{ t: "12345678        x" }] }],
   ["tab after wide char", "漢\tx", { r: [{ t: "漢      x", n: 9 }] }],
+  ["tab after emoji", "🚀\tx", { r: [{ t: "🚀      x", n: 9 }] }],
   ["trailing spaces trimmed", "hi   ", { r: [{ t: "hi" }] }],
   ["trailing spaces with bg kept", `hi${E}41m   `, { r: [{ t: "hi" }, { t: "   ", bg: 1 }] }],
-  ["malformed csi emitted literally", "a\x1b[12", { r: [{ t: "a\x1b[12" }] }],
+  ["malformed csi emitted literally", "a\x1b[12", { r: [{ t: "a\x1b[12", n: 4 }] }],
   ["unicode passes through", `${E}32m✓ done`, { r: [{ t: "✓ done", fg: 2 }] }],
   [
     "emoji surrogate pair kept together and gets n",
@@ -61,5 +63,11 @@ const cases: [string, string, Line][] = [
 describe("parseSgrLine", () => {
   it.each(cases)("%s", (_name, input, expected) => {
     expect(parseSgrLine(input)).toEqual(expected);
+  });
+
+  it.each(cases)("run cell-count invariant holds for %s", (_name, input) => {
+    for (const r of parseSgrLine(input).r) {
+      expect(stringCells(r.t)).toBe(r.n ?? codePoints(r.t));
+    }
   });
 });

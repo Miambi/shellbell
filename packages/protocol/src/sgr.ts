@@ -33,19 +33,7 @@ function toRun(text: string, st: Style): Run {
   if (st.s) r.s = true;
   if (st.f) r.f = true;
   const cells = stringCells(text);
-  const cp = codePoints(text);
-  if (cells !== cp) {
-    // Only the literal ESC from malformed-CSI fallback can reach here as a control char.
-    // Count it separately from combining marks to avoid spurious n when emitting malformed CSI.
-    let controlCharCount = 0;
-    for (const ch of text) {
-      const code = ch.charCodeAt(0);
-      // Only count actual control characters (0x00-0x1f, 0x7f), not combining marks or other zero-width chars
-      if ((code < 0x20 || code === 0x7f) && cellWidth(code) === 0) controlCharCount++;
-    }
-    // If cp - cells equals the number of control chars, the difference is entirely due to them
-    if (cp - cells !== controlCharCount) r.n = cells;
-  }
+  if (cells !== codePoints(text)) r.n = cells;
   return r;
 }
 
@@ -137,8 +125,8 @@ export function parseSgrLine(text: string): Line {
   };
   let i = 0;
   while (i < text.length) {
-    const ch = text[i] as string;
-    if (ch === ESC) {
+    const unit = text[i] as string;
+    if (unit === ESC) {
       const next = text[i + 1];
       if (next === "[") {
         let j = i + 2;
@@ -151,7 +139,7 @@ export function parseSgrLine(text: string): Line {
         }
         if (j >= text.length || j - (i + 2) >= MAX_CSI) {
           // Malformed CSI: emit ESC literally
-          buf += ch;
+          buf += unit;
           i++;
           continue;
         }
@@ -174,7 +162,7 @@ export function parseSgrLine(text: string): Line {
       continue;
     }
     const code = text.charCodeAt(i);
-    if (ch === "\t") {
+    if (unit === "\t") {
       const n = 8 - (col % 8);
       buf += " ".repeat(n);
       col += n;
@@ -185,9 +173,11 @@ export function parseSgrLine(text: string): Line {
       i++;
       continue;
     }
+    const cp = text.codePointAt(i) as number;
+    const ch = String.fromCodePoint(cp);
     buf += ch;
-    if (code < 0xd800 || code > 0xdbff) col += cellWidth(code);
-    i++;
+    col += cellWidth(cp);
+    i += cp > 0xffff ? 2 : 1;
   }
   flush();
   return { r: trimTrailing(mergeRuns(runs)) };

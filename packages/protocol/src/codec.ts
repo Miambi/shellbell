@@ -17,7 +17,7 @@ export function encodeCbor(value: unknown): Uint8Array {
 
 export function decodeCbor(bytes: Uint8Array): unknown {
   try {
-    return decode(bytes);
+    return decode(bytes, { rejectDuplicateMapKeys: true });
   } catch (err) {
     throw new ProtocolError("malformed", (err as Error).message);
   }
