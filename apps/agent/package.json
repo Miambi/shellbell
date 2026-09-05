@@ -20,9 +20,8 @@
   "scripts": {
     "proto:gen": "buf generate",
     "prebuild": "pnpm proto:gen",
-    "pretest": "pnpm proto:gen",
-    "typecheck": "pnpm proto:gen && tsc --noEmit -p tsconfig.json",
-    "test": "vitest run",
+    "typecheck": "buf generate && tsc --noEmit -p tsconfig.json",
+    "test": "buf generate && vitest run",
     "build": "tsdown",
     "dev": "tsx src/cli.ts",
     "spike:iterm2": "pnpm proto:gen && tsx scripts/spike-iterm2.ts",
