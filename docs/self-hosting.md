@@ -21,4 +21,11 @@ rate-limit counters. Storage for a computer is deleted 90 days after its agent l
 
 ## Multiple Cloudflare accounts
 
-Wrangler supports named profiles to manage multiple Cloudflare accounts. When you run `wrangler login` from a directory bound to a profile, it authenticates with that account. Use `wrangler whoami` to confirm which account is active; it prints `Active profile: <name>` or the default if none is set. This is useful if you manage the relay under a dedicated account or need to test deploys against different environments.
+Wrangler 4.1xx has experimental named auth profiles. Create one per account with
+`wrangler auth create <name>` (it opens the normal login flow), bind it to a directory with
+`wrangler auth activate <name> <dir>`, and every wrangler command run under that directory uses
+that account. `wrangler whoami` prints `Active profile: <name>` so you can confirm which account a
+deploy will hit; `wrangler auth list` shows all profiles, and `--profile <name>` selects one for a
+single command. Without profiles, `wrangler login` keeps one global session, or set
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` in the environment (that is what the deploy
+workflow does).
