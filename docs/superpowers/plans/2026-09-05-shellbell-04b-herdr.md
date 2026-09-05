@@ -8,7 +8,15 @@
 
 **Tech Stack:** Node 22, TypeScript 5.9, `@shellbell/protocol` (`parseSgrLine`, `stringCells`, `emptyLine`), vitest 5, `node:net` (no new runtime dependency). Herdr ≥ 0.7.2 on the user's machine — never installed by this plan.
 
-**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — **§8.13** (authority for this plan; revised 2026-09-05 after external review), plus §8.4 (`TerminalBackend`, `AgentState`, `setWatched?`, `connected?`), §8.6 (tracker), §8.8 (events and ringing), §8.12 (registry, `hello` on backend-set change, per-session capabilities), §7.3/§7.4 (wire protocol), §7.5 (named keys), §9.2/§11.3 (push bodies), §10.5 (badges, unknown enums are opaque), §15 (testing). Plan 03 is complete and shipped (through Task 11, commit `6bb2a53`); Plan 04 (tmux) is **not** required. The verified Herdr research report is `.superpowers/research/herdr-socket-api.md` — every JSON shape in this plan comes from it.
+**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — **§8.13** (authority for this plan; revised 2026-09-05 after external review), plus §8.4 (`TerminalBackend`, `AgentState`, `setWatched?`, `connected?`), §8.6 (tracker), §8.8 (events and ringing), §8.12 (registry, `hello` on backend-set change, per-session capabilities), §7.3/§7.4 (wire protocol), §7.5 (named keys), §9.2/§11.3 (push bodies), §10.5 (badges, unknown enums are opaque), §15 (testing). Plan 03 is complete and shipped **through commit `5601537`** (Task 11 landed at `6bb2a53`, followed by six fix/hardening commits: `9efd19a`, `d349b99`, `5e22a2c`, `0e11af5`, `b8b8b70`, `9ba0fc1`, `55c53bd`, `5601537`); Plan 04 (tmux) is **not** required. The verified Herdr research report is `.superpowers/research/herdr-socket-api.md` — every JSON shape in this plan comes from it.
+
+> **⚠ Read these shipped files before editing them** (they changed *after* this plan was first drafted, and the tasks below are written against `5601537`, not against the older snapshot):
+> - `apps/agent/src/cli.ts` — `buildAgent` now returns `releaseOutput` **and** `stopFirstConnect`; `start` destructures both; the SIGINT/SIGTERM handler carries a `shuttingDown` double-Ctrl-C guard and calls `shutdown(agent, control, process.exit, stopFirstConnect).catch(…)`; `onSuperseded` calls `shutdown(…, stopFirstConnect)`; every backend startup line goes through the buffered `print()` closure and is flushed by `releaseOutput()` so it cannot interleave with spec 8.1's exact-text header block. **Task 6 only inserts into this code; it never replaces it.**
+> - `apps/agent/src/screen-tracker.ts` — per-session `absoluteLines` **already shipped**: `processScreen` computes `this.opts.backend.capabilitiesOf?.(sessionId)?.absoluteLines ?? this.opts.backend.capabilities.absoluteLines`. Task 6 adds only the watched-set plumbing.
+> - `apps/agent/src/backends/types.ts` — `TerminalBackend` already has `capabilitiesOf?(sessionId): Capabilities | null`.
+> - `apps/agent/src/backends/registry.ts` — `BackendRegistry.capabilitiesOf(id)` already exists; only `splitId`, `listSessions`, `connected()` and the new `setWatched` change.
+> - `apps/agent/src/agent.ts` — the `safe()` wrapper, `refreshSessions`, `scheduleSessions` and the `hello`/`sessions` handshake broadcast are all shipped; Task 5 edits three specific spots and nothing else.
+> - `apps/agent/src/doctor.ts` (`Check` shape), `apps/agent/test/fakes/fake-backend.ts`, `apps/agent/test/{events,screen-tracker,registry,doctor}.test.ts` (existing helpers and describes).
 
 ## Global Constraints
 
@@ -46,7 +54,8 @@ apps/agent/
 │   ├── cli.ts              (modified) start the herdr detector; banner line; shutdown
 │   ├── doctor.ts           (modified) herdr check (absent = passing, optional)
 │   ├── events.ts           (modified) agent-state -> blocked/prompt rings
-│   ├── screen-tracker.ts   (modified) per-session absoluteLines; push the viewed set
+│   ├── screen-tracker.ts   (modified) push the viewed set via setWatched
+│   │                       (per-session absoluteLines ALREADY SHIPPED — do not re-add)
 │   └── backends/
 │       ├── types.ts        (modified) AgentState, agent-state event, setWatched?, connected?
 │       ├── registry.ts     (modified) herdr routing; connected() filter; setWatched fan-out
@@ -155,7 +164,9 @@ whole relay path, which no other test covers):
 ```ts
   it("pushes the blocked body for a blocked notify", async () => {
     const { sent } = installFetchStub();
-    const { mac, agent } = await pairedWithToken();
+    // `pairedWithToken()` leaves the phone connected with NO lease, and the DO only treats a phone
+    // as attentive while `leaseUntil > now` -- so this really is pushed.
+    const { mac, agent, p } = await pairedWithToken();
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "herdr:term_a", kind: "blocked" });
     await settle();
     expect(sent).toHaveLength(1);
@@ -163,6 +174,9 @@ whole relay path, which no other test covers):
       body: "An agent is waiting for you",
       data: { sessionId: "herdr:term_a", kind: "blocked" },
     });
+    // Close both sockets, exactly like every sibling test in this file.
+    agent.ws.close();
+    p.ws.close();
   });
 ```
 
@@ -305,10 +319,22 @@ export class FakeHerdr {
   connections = 0;
   /** What `pane.copy_motion` reports as `content_revision`; tests bump it. */
   revision = 2;
+  /**
+   * Events to write in the SAME buffer as the next `events.subscribe` ack. A real server can
+   * coalesce the ack and the first event lines into one TCP chunk; this is how a test reproduces
+   * that exactly, instead of writing them separately and calling it a coalesced chunk.
+   */
+  readonly ackRider: { event: string; data: Record<string, unknown> }[] = [];
   private readonly handlers = new Map<string, (params: Record<string, unknown>) => unknown>();
   private readonly failures = new Map<string, { code: string; message: string }>();
   private readonly silenced = new Set<string>();
   private readonly streams = new Set<Stream>();
+  /**
+   * EVERY accepted connection, not just the event streams. `stop()` must destroy all of them:
+   * `server.close()` only stops accepting and its callback fires when the last connection ends,
+   * so a connection the fake never answered (`silence()`) would otherwise wedge `stop()` forever.
+   */
+  private readonly sockets = new Set<Socket>();
   private server: Server | null = null;
 
   /** `path` lets a test bind a chosen socket file (one that does not exist yet, or a restart). */
@@ -373,6 +399,7 @@ export class FakeHerdr {
   start(): Promise<void> {
     const server = createServer((socket) => {
       this.connections++;
+      this.sockets.add(socket);
       let first = true;
       let buf = "";
       socket.on("error", () => {});
@@ -392,6 +419,7 @@ export class FakeHerdr {
         }
       });
       socket.on("close", () => {
+        this.sockets.delete(socket);
         for (const s of this.streams) if (s.socket === socket) this.streams.delete(s);
       });
     });
@@ -399,9 +427,18 @@ export class FakeHerdr {
     return new Promise((resolve) => server.listen(this.path, () => resolve()));
   }
 
-  /** Closes the listener and removes the socket file, exactly like a herdr server exiting. */
+  /**
+   * Closes the listener and removes the socket file, exactly like a herdr server exiting.
+   *
+   * Every accepted connection is destroyed first — not just the registered event streams. A
+   * connection parked by `silence()` was never added to `streams`, and `server.close()` waits for
+   * the last connection to end before firing its callback, so without this `stop()` never resolves
+   * and the test (plus its `afterEach`) hangs.
+   */
   stop(): Promise<void> {
     this.dropStreams();
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
     const server = this.server;
     this.server = null;
     if (!server) return Promise.resolve();
@@ -428,7 +465,12 @@ export class FakeHerdr {
     if (method === "events.subscribe") {
       const subscriptions = (params.subscriptions ?? []) as { type: string; pane_id?: string }[];
       this.streams.add({ socket, subscriptions });
-      socket.write(`${JSON.stringify({ id: msg.id, result: { type: "subscription_started" } })}\n`);
+      // NB: `events.subscribe` is handled HERE, before `this.handlers` is consulted, so a
+      // `reply("events.subscribe", …)` would be dead code. `fail("events.subscribe", …)` above
+      // still works, and `ackRider` is how a test makes the ack share a chunk with its events.
+      let out = `${JSON.stringify({ id: msg.id, result: { type: "subscription_started" } })}\n`;
+      for (const e of this.ackRider.splice(0)) out += `${JSON.stringify(e)}\n`;
+      socket.write(out); // ONE write: ack + riders land in the same chunk
       return;
     }
     const handler = this.handlers.get(method) ?? this.defaultHandler(method);
@@ -629,16 +671,18 @@ describe("HerdrClient.subscribe", () => {
   });
 
   it("delivers an ack and an event that arrive in one chunk", async () => {
-    // The ack and the first event can share a TCP chunk; the event must not be lost, and it must
-    // reach `onEvent` even though it fires before the caller's `await` resumes.
+    // The ack and the first event really do share ONE TCP chunk here (`ackRider` makes the fake
+    // emit them in a single `socket.write`). The event must not be lost, and it must reach
+    // `onEvent` even though `pipeLines` runs it before the caller's `await` below resumes --
+    // which is exactly why `subscribe`'s contract says the caller must arm its buffer first.
     const events: string[] = [];
-    herdr.reply("events.subscribe", () => ({ type: "subscription_started" }));
+    herdr.ackRider.push({ event: "pane_created", data: { pane_id: "w1:p9" } });
     const stream = await client().subscribe([{ type: "pane.created" }], {
       onEvent: (e) => events.push(e.event),
       onEnd: () => undefined,
     });
-    herdr.pushRaw(`${JSON.stringify({ event: "pane_created", data: {} })}\n`);
     await waitFor(() => events.length === 1);
+    expect(events).toEqual(["pane_created"]);
     stream.close();
   });
 
@@ -682,8 +726,10 @@ describe("HerdrClient.subscribe", () => {
     const started = Date.now();
     const p = c.subscribe([], { onEvent: () => undefined, onEnd: () => undefined });
     await waitFor(() => herdr.connections >= 1);
-    herdr.dropStreams();
-    // `silence` never registered a stream, so close the raw connection by stopping the server.
+    // `silence` accepted the connection and never answered, so it was never registered as a
+    // stream -- `dropStreams()` would miss it. `stop()` destroys EVERY accepted socket (see the
+    // fake's `sockets` set), which is both what kills this connection and what stops `stop()`
+    // itself from hanging on it. `afterEach`'s second `stop()` is a no-op.
     await herdr.stop();
     await expect(p).rejects.toMatchObject({ code: "closed" });
     expect(Date.now() - started).toBeLessThan(2000);
@@ -742,11 +788,34 @@ export type BackendEvent =
   | { type: "agent-state"; sessionId: string; state: AgentState; agent?: string; at: number };
 ```
 
+The complete interface after this edit — **no ellipsis; this is the whole declaration**, with the
+three new members appended after the shipped `capabilitiesOf?`:
+
 ```ts
 export interface TerminalBackend {
-  // … unchanged members …
+  readonly name: BackendName;
+  readonly capabilities: Capabilities;
+  connect(): Promise<void>;
+  close(): Promise<void>;
+  listSessions(): Promise<SessionInfo[]>;
+  getScreen(sessionId: string): Promise<Screen>;
+  getHistory(
+    sessionId: string,
+    before: number,
+    count: number,
+  ): Promise<{ lines: Line[]; oldestAvailable: number }>;
+  sendText(sessionId: string, text: string): Promise<void>;
+  createSession(where: CreateWhere): Promise<string>;
+  focus(sessionId: string): Promise<void>;
+  on(handler: (e: BackendEvent) => void): () => void;
   tmuxWindowIds?(): Set<string>;
   tmuxWindowIdOf?(nativeId: string): string | undefined;
+  /** SHIPPED — do not remove. Per-session capabilities, when this backend can distinguish (e.g.
+   * `BackendRegistry` fanning out to distinct member backends by id prefix). Optional: a
+   * single-backend implementation can omit it, and callers fall back to the aggregate
+   * `capabilities` getter above. `ScreenTracker.processScreen` already consults this for its
+   * per-session `absoluteLines` decision. */
+  capabilitiesOf?(sessionId: string): Capabilities | null;
   /**
    * Spec 8.13: the complete set of native session ids at least one phone is currently viewing.
    * A backend with no screen-change push (herdr) polls only these. `ScreenTracker` calls it
@@ -1009,8 +1078,17 @@ export function semverAtLeast(version: string, min: [number, number, number]): b
 /**
  * Spec 8.13: `$HERDR_SOCKET_PATH`, else — when `$HERDR_SESSION` names a session —
  * `<config>/herdr/sessions/<name>/herdr.sock`, else `<config>/herdr/herdr.sock`, where `<config>`
- * is `$XDG_CONFIG_HOME` or `~/.config`. Herdr uses the same layout on macOS and Linux: there is no
- * `~/Library/Application Support` special case (research §1 "Socket path").
+ * is `$XDG_CONFIG_HOME` or `~/.config`.
+ *
+ * ⚠ The macOS default is the one thing here that is READ FROM THE RUST SOURCE BUT NOT YET
+ * OBSERVED ON A MAC: research §1 shows the config dir resolving through `$XDG_CONFIG_HOME` →
+ * `~/.config` with no `~/Library/Application Support` branch, and spec 8.13 states that as fact,
+ * but the research's own spike checklist still lists it as unconfirmed. **Spike question 1 must
+ * print the socket path herdr actually created on macOS.** If it turns out to live under
+ * `~/Library/Application Support/herdr/`, this function needs a second candidate (probe both with
+ * `existsSync` and prefer the one that exists) — nothing else in the plan changes, because every
+ * caller already treats "no socket" as "herdr is not installed". Users are never stuck meanwhile:
+ * `$HERDR_SOCKET_PATH` overrides everything.
  */
 export function herdrSocketPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -1533,7 +1611,7 @@ git commit -m "feat(agent): herdr screen conversion (ANSI reads -> Line[])"
 | 2 | **`session.snapshot` is the only writer of pane membership.** Bootstrap = subscribe (ack) → snapshot → apply → *then* process the events buffered since the ack. Lifecycle events (`pane_created/closed/exited/moved/updated`, `tab.*`, `workspace.*`) only `scheduleSync("snapshot")` — one debounced, single-flight refresh. `pane_agent_status_changed` and `pane_scroll_changed` update values on an existing pane. Nothing a handler does can schedule the sync that produced it, so there is no loop. |
 | 3 | Losing the stream emits `session-removed` for **every** Herdr pane, clears the maps and flips `connected` to `false`. Reconnect re-adds them with `session-added` + an initial `agent-state`, which the engine sees as a first sighting → no adoption ring. |
 | 4 | Cursor `x` is clamped to `cols - 1`; `rows` come from the layout rect (fallback `scroll.viewport_rows`) and **both axes** update on `layout.updated`. |
-| 5 | `scrollbackTotal = scroll.max_offset_from_bottom`; `pane.scroll_changed` keeps it fresh (payload if usable, else a rate-limited `pane.get`); history arithmetic pages against that same number; `agent_not_idle` or a short read falls back to a visible read and sets `oldestAvailable`. |
+| 5 | `scrollbackTotal = scroll.max_offset_from_bottom`; `pane.scroll_changed` keeps it fresh. **The research documents that event as `{ pane_id }` with no scroll object, so the rate-limited `pane.get` refresh is the PRIMARY path** and reading numbers straight off the payload is an opportunistic shortcut for a build that sends them (spike item 8). History arithmetic pages against that same number; `agent_not_idle` or a short read falls back to a visible read and sets `oldestAvailable`. |
 | 7 | `\r`/`\n` → `pane.send_keys ["enter"]`, `\t` → `["tab"]`; a payload ending in a newline is `send_text(body)` + `send_keys ["enter"]` so `input.line` actually submits. |
 | 9 | Adaptive poller: 200 ms while changing → 500 ms after 5 s unchanged → 1000 ms cap; odd `content_revision` is skipped silently; probes run **sequentially** and re-check `closed`, watched membership and the pane generation after every await. |
 | 10 | Two-phase resubscribe: the new stream is opened **and acked** (and already buffering) before it replaces the old one; a snapshot failure closes the new stream and hands over to the reconnect poll. |
@@ -1805,9 +1883,20 @@ async function connect(overrides: Record<string, number> = {}): Promise<HerdrBac
   return b;
 }
 
+type AgentStateEvent = Extract<BackendEvent, { type: "agent-state" }>;
+
 const types = () => events.map((e) => e.type);
 const idsOf = (type: BackendEvent["type"]) =>
   events.filter((e) => e.type === type).map((e) => ("sessionId" in e ? e.sessionId : ""));
+/**
+ * An EXPLICIT type predicate, deliberately not `events.filter((e) => e.type === "agent-state")`:
+ * `Array.filter` with a bare boolean callback only narrows a discriminated union via TypeScript's
+ * inferred type predicates (5.5+), and `sessionId`/`state` do not exist on every `BackendEvent`
+ * member (`{ type: "layout-changed" }` has neither). Spelling the predicate out keeps this test
+ * compiling regardless of that inference.
+ */
+const agentStateEvents = (): AgentStateEvent[] =>
+  events.filter((e): e is AgentStateEvent => e.type === "agent-state");
 const paneSubs = (subs: { type: string; pane_id?: string }[], type: string) =>
   subs.filter((s) => s.type === type).map((s) => s.pane_id);
 
@@ -1874,11 +1963,7 @@ describe("HerdrBackend.connect", () => {
   it("announces every pane it discovered, with its initial agent state", async () => {
     await connect();
     expect(idsOf("session-added")).toEqual(["term_a", "term_b", "term_c"]);
-    expect(
-      events
-        .filter((e) => e.type === "agent-state")
-        .map((e) => [e.sessionId, e.type === "agent-state" ? e.state : ""]),
-    ).toEqual([
+    expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([
       ["term_a", "blocked"],
       ["term_b", "unknown"],
       ["term_c", "working"],
@@ -2266,7 +2351,13 @@ describe("HerdrBackend event handling", () => {
     expect(types()).toEqual(["focus-changed"]);
   });
 
-  it("tracks scroll growth from pane.scroll_changed", async () => {
+  // ⚠ UNVERIFIED PAYLOAD PATH (spike item 8). The research records the event as
+  // `pane.scroll_changed { pane_id }` — i.e. it very likely carries NO scroll object at all, and
+  // the `pane.get` refresh in the next test is the path production actually takes. This test
+  // exists only to pin the opportunistic shortcut we take *if* a build ever does send numbers;
+  // Task 8 either confirms it against the captured event or deletes it. Do not read a green run
+  // here as evidence that herdr sends scroll metrics on the event.
+  it("uses scroll numbers from pane.scroll_changed IF the payload carries them (unverified)", async () => {
     const b = await connect({ syncDebounceMs: 5000 });
     herdr.pushEvent("pane.scroll_changed", {
       pane_id: "w1:p1",
@@ -2274,9 +2365,13 @@ describe("HerdrBackend event handling", () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     expect((await b.getScreen("term_a")).scrollbackTotal).toBe(137);
+    expect(herdr.called("pane.get")).toHaveLength(0); // the shortcut skipped the refresh
   });
 
-  it("refreshes scroll metrics with pane.get when the event carries none", async () => {
+  // THE PRIMARY PATH: `pane.scroll_changed { pane_id }` with no numbers, which is what the
+  // research documents. The event only marks the pane stale; the next `getScreen` refreshes the
+  // metrics with one rate-limited `pane.get`.
+  it("refreshes scroll metrics with pane.get when the event carries none (primary path)", async () => {
     const b = await connect({ syncDebounceMs: 5000, scrollRefreshMs: 0 });
     herdr.reply("pane.get", (p) => ({
       type: "pane_info",
@@ -2310,8 +2405,16 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
       cursor: { row: 0, col: 0 },
       motion: "line_end",
     });
+    // Every "nothing happened" window below MUST be longer than one poll interval, or it proves
+    // nothing at all: after a probe, `nextAt = now + POLL_FAST_MS` (200 ms), so an 80 ms wait
+    // would simply mean no probe ran. `probed()` + the explicit growth assertions make each
+    // negative window state "a probe ran and chose not to emit", which is the actual rule.
+    const probed = () => herdr.called("pane.copy_motion").length;
+
     // The first probe only takes a baseline — the tracker already snapshots on view.
-    await new Promise((r) => setTimeout(r, 60));
+    const afterBaseline = probed();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(probed()).toBeGreaterThan(afterBaseline); // it really did keep polling
     expect(idsOf("screen-changed")).toEqual([]);
 
     events.length = 0;
@@ -2320,15 +2423,21 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
 
     // An odd revision means a write is in flight: no emit, and no baseline update either.
     events.length = 0;
+    const beforeOdd = probed();
     herdr.revision = 9;
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(probed()).toBeGreaterThan(beforeOdd); // at least one probe SAW the odd revision
     expect(idsOf("screen-changed")).toEqual([]);
+    // …and because the odd value never became the baseline, the next even one still reads as a
+    // change even though 10 differs from the skipped 9 by the same amount it differs from 8.
     herdr.revision = 10;
     await waitFor(() => idsOf("screen-changed").includes("term_a"));
 
     // Steady state: nothing more while the revision holds.
     events.length = 0;
-    await new Promise((r) => setTimeout(r, 80));
+    const beforeQuiet = probed();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(probed()).toBeGreaterThan(beforeQuiet);
     expect(idsOf("screen-changed")).toEqual([]);
   });
 
@@ -2338,7 +2447,9 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
     await waitFor(() => herdr.called("pane.copy_motion").length >= 2);
     b.setWatched([]);
     const after = herdr.called("pane.copy_motion").length;
-    await new Promise((r) => setTimeout(r, 80));
+    // > one poll interval (200 ms), so "unchanged" means "the timer is really off", not
+    // "the next tick had not come round yet".
+    await new Promise((r) => setTimeout(r, 300));
     expect(herdr.called("pane.copy_motion").length).toBe(after);
 
     b.setWatched(["term_b"]);
@@ -2346,7 +2457,7 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
     events.length = 0;
     await b.close();
     const atClose = herdr.called("pane.copy_motion").length;
-    await new Promise((r) => setTimeout(r, 80));
+    await new Promise((r) => setTimeout(r, 300));
     expect(herdr.called("pane.copy_motion").length).toBe(atClose);
     expect(idsOf("screen-changed")).toEqual([]);
     backend = null;
@@ -2359,7 +2470,10 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
     await waitFor(() => herdr.called("pane.copy_motion").length >= 2);
     expect(idsOf("screen-changed")).toEqual([]);
     herdr.fail("pane.copy_motion", "internal_error", "boom");
-    await new Promise((r) => setTimeout(r, 60));
+    const beforeFailures = herdr.called("pane.copy_motion").length;
+    await new Promise((r) => setTimeout(r, 300)); // > one poll interval: a failing probe DID run
+    expect(herdr.called("pane.copy_motion").length).toBeGreaterThan(beforeFailures);
+    expect(idsOf("screen-changed")).toEqual([]);
     expect(b.connected).toBe(true);
   });
 });
@@ -2403,9 +2517,7 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     await b.focus("term_a");
     expect(herdr.called("pane.focus").at(-1)?.params).toEqual({ pane_id: "w1:q1" });
     // A still-blocked agent is announced as an initial state again (the engine sees prev === null).
-    expect(
-      events.filter((e) => e.type === "agent-state").map((e) => e.sessionId),
-    ).toEqual(expect.arrayContaining(["term_a"]));
+    expect(agentStateEvents().map((e) => e.sessionId)).toEqual(expect.arrayContaining(["term_a"]));
   });
 });
 ```
@@ -2856,7 +2968,9 @@ export class HerdrBackend implements TerminalBackend {
     const pane = this.pane(sessionId);
     const whole = herdrKeyForBytes(text);
     if (whole) {
-      this.log.debug("herdr key", { key: whole });
+      // spec 8.10 / Global Constraints: NEVER log keys. A key name is still a keystroke, so this
+      // records only that one key was sent -- not which one.
+      this.log.debug("herdr key");
       await this.call(sessionId, "pane.send_keys", { pane_id: pane.paneId, keys: [whole] });
       return;
     }
@@ -3283,6 +3397,9 @@ export class HerdrBackend implements TerminalBackend {
         return;
       }
       case "pane_scroll_changed": {
+        // The research documents this event as `{ pane_id }` only, so the `pane.get` refresh
+        // below is the PRIMARY path and the payload branch is an opportunistic shortcut for a
+        // build that does send numbers. Both are cheap; neither is load-bearing on the other.
         const pane = this.paneByPaneId(str(data.pane_id));
         if (!pane) return;
         const scroll = scrollOf(data.scroll);
@@ -3734,10 +3851,16 @@ only once it actually knows something.
       this.broadcastHelloIfBackendsChanged();
       this.broadcast({ type: "sessions", list: this.sessions });
     } catch (err) {
-      this.log.warn("listSessions failed", { err: String(err) });
+      // Unchanged from the shipped code -- keep the error NAME, never `String(err)`: a backend's
+      // error message can quote a session title or a command line (spec 8.10, log names/lengths).
+      this.log.warn("listSessions failed", { err: err instanceof Error ? err.name : "unknown" });
     }
   }
 ```
+
+Only three things change in this method: the `state` merge, the `broadcastHelloIfBackendsChanged()`
+call, and the two comments. The `try`, the `await this.o.registry.listSessions()` and the `catch`
+body are byte-for-byte the shipped ones.
 
 **(c)** Spec 8.12: "changes trigger a new `hello`". Add the field and the method:
 
@@ -3799,17 +3922,22 @@ git commit -m "feat(agent): ring on herdr agent state (blocked and prompt)"
   `listSessions` iterates `BACKEND_ORDER = ["iterm2", "tmux", "herdr"]`; `connected()` **filters out
   members reporting `connected === false`** (ruling 3); new
   `BackendRegistry.setWatched(ids: string[]): void`.
-- `screen-tracker.ts`: new option `capabilitiesOf?: (sessionId: string) => Capabilities | null`, used
-  for the `absoluteLines` decision **per session** (ruling 8); pushes the watched set through
-  `backend.setWatched?.()` on every viewer change (and `[]` on `stop()`), de-duplicated.
+- `screen-tracker.ts`: pushes the watched set through `backend.setWatched?.()` on every viewer
+  change (and `[]` on `stop()`), de-duplicated. **Ruling 8 (per-session `absoluteLines`) needs no
+  work here — it already shipped**: `processScreen` reads
+  `this.opts.backend.capabilitiesOf?.(sessionId)?.absoluteLines ?? this.opts.backend.capabilities.absoluteLines`,
+  and `BackendRegistry.capabilitiesOf` is the registry method it resolves to. Do **not** add a
+  `capabilitiesOf` option to `ScreenTrackerOptions`.
 - `start.ts`: `interface HerdrCheck { name: string; ok: boolean; detail: string; fix?: string }`
   (structurally identical to `doctor.ts`'s `Check`), `checkHerdr(opts?): Promise<HerdrCheck>`,
   `startHerdrBackend(opts): { stop(): void }`.
 
-**Rulings this task pins:** 3 (`connected()` + `hello`), 8 (per-session `absoluteLines`),
+**Rulings this task pins:** 3 (`connected()` + `hello`),
 11 (`registry.add` **before** `connect()`, and the production startup path is tested end to end),
 14 (an absent Herdr is a **passing** doctor check), 22 (`startHerdrBackend`'s handle is wired into
-the CLI's `shutdown`).
+the CLI's `shutdown`). **Ruling 8 (per-session `absoluteLines`) is already satisfied by shipped
+code** (`screen-tracker.ts` + `BackendRegistry.capabilitiesOf`, with a dedicated describe block at
+the bottom of `test/screen-tracker.test.ts`); this task must not re-implement or re-test it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3893,32 +4021,13 @@ Add to `apps/agent/test/screen-tracker.test.ts`:
     tracker.sessionRemoved("T");
     expect(backend.watched.at(-1)).toEqual([]);
   });
-
-  it("uses the OWNING backend's absoluteLines, not an all-backends AND", async () => {
-    // spec 8.12 (ruling 8): registering herdr (absoluteLines:false) must not make the tracker
-    // treat an iTerm2 session as non-absolute. The overlap heuristic only runs for a session
-    // whose own backend lacks absolute line numbers.
-    const caps = { ...backend.capabilities, absoluteLines: false };
-    const t = new ScreenTracker({
-      backend,
-      sink: (conn, msg) => sent.push({ conn, msg }),
-      log,
-      capabilitiesOf: (id) => (id === "S" ? backend.capabilities : caps),
-    });
-    t.start();
-    t.setViewed("p1", "S");
-    await flush();
-    // Saturated history: `scrollbackTotal` stops growing, so an absoluteLines backend reports no
-    // scroll at all while a non-absolute one would recover it by row overlap.
-    backend.saturated = true;
-    backend.appendLine("S", "d");
-    await flush();
-    const diff = sent.at(-1)?.msg;
-    if (diff?.type !== "screen.diff") throw new Error("expected a diff");
-    expect(diff.scroll).toBe(0);
-    t.stop();
-  });
 ```
+
+That is the **only** test to add to `screen-tracker.test.ts`. Per-session `absoluteLines` is
+already covered by the shipped describe block at the bottom of that file
+(`describe("per-backend absoluteLines via BackendRegistry.capabilitiesOf …")`), which drives a real
+`BackendRegistry` with an iTerm2 (`absoluteLines: true`) and a tmux (`absoluteLines: false`) member
+and asserts the overlap heuristic runs for exactly one of them. Do not add a second, weaker copy.
 
 Create `apps/agent/test/herdr-start.test.ts`:
 
@@ -4260,42 +4369,32 @@ exactly as it is. It is only used for the registry-as-facade view; the tracker n
 
 - [ ] **Step 4: Implement the tracker changes**
 
-`apps/agent/src/screen-tracker.ts` — add the option:
+`apps/agent/src/screen-tracker.ts` — **watched-set plumbing only.**
 
-```ts
-export interface ScreenTrackerOptions {
-  backend: TerminalBackend;
-  sink: (connId: string, msg: InnerMessage) => void;
-  log: Logger;
-  intervalMs?: number;
-  maxFramesPerSecond?: number;
-  maxEncodedBytes?: number;
-  now?: () => number;
-  onSessionGone?: (sessionId: string) => void;
-  /**
-   * spec 8.12 (ruling 8): the capabilities of the backend that OWNS this session. Scroll detection
-   * depends on `absoluteLines`, and one backend without it (herdr) must not degrade another's
-   * (iTerm2's). Falls back to the facade's capabilities when not supplied.
-   */
-  capabilitiesOf?: (sessionId: string) => Capabilities | null;
-}
-```
+> **Do NOT touch `ScreenTrackerOptions`, `processScreen`, or `absoluteLines`.** Per-session
+> `absoluteLines` shipped in the final Plan 03 fix wave and is already correct:
+> ```ts
+> // screen-tracker.ts, inside processScreen -- SHIPPED, leave exactly as it is
+> const absoluteLines =
+>   this.opts.backend.capabilitiesOf?.(sessionId)?.absoluteLines ??
+>   this.opts.backend.capabilities.absoluteLines;
+> ```
+> The tracker's `backend` **is** the `BackendRegistry`, whose `capabilitiesOf(id)` resolves the
+> owning member by id prefix — so registering herdr (`absoluteLines: false`) already cannot degrade
+> an iTerm2 session. Adding a `capabilitiesOf` option, an `absoluteLinesFor()` helper, or rewriting
+> the `else if` would duplicate shipped logic **and** orphan the `absoluteLines` const above, which
+> fails `pnpm lint` (biome `noUnusedVariables`). No change to `agent.ts`'s `new ScreenTracker({…})`
+> call either.
 
-(add `Capabilities` to the `@shellbell/protocol` type import at the top of the file), a field next to
-`stopped`:
+Add one field next to `stopped`:
 
 ```ts
   /** Last watched set pushed to the backend, joined; guards against re-sending an equal set. */
   private watchedKey = "";
 ```
 
-the `absoluteLines` lookup inside `processScreen` (the only behavioural line that changes):
-
-```ts
-      } else if (!this.absoluteLinesFor(sessionId) && !forceSnapshotAll) {
-```
-
-rewrite `setViewed` so both branches end in one push:
+rewrite `setViewed` so both branches end in one push (this is the shipped body with the early
+`return` turned into an `if` block, plus the final `pushWatched()` — nothing else changes):
 
 ```ts
   setViewed(connId: string, sessionId: string | null): void {
@@ -4345,14 +4444,9 @@ and to `stop()`:
   }
 ```
 
-plus the two new private methods, next to `state`:
+plus **one** new private method, next to `state`:
 
 ```ts
-  private absoluteLinesFor(sessionId: string): boolean {
-    const caps = this.opts.capabilitiesOf?.(sessionId) ?? null;
-    return (caps ?? this.opts.backend.capabilities).absoluteLines;
-  }
-
   /**
    * Spec 8.13: tells the backend which sessions at least one phone is viewing. Backends that push
    * screen changes ignore it; the herdr backend polls exactly this set and nothing else. The full
@@ -4374,18 +4468,11 @@ plus the two new private methods, next to `state`:
   }
 ```
 
-Finally, in `apps/agent/src/agent.ts`, hand the tracker the per-session lookup:
-
-```ts
-    this.tracker = new ScreenTracker({
-      backend: o.registry,
-      sink: (conn, msg) => this.sendTo(conn, msg),
-      log: o.log,
-      // spec 8.12 (ruling 8): scroll detection asks the OWNING backend, not the facade.
-      capabilitiesOf: (id) => o.registry.capabilitiesOf(id),
-      onSessionGone: () => this.scheduleSessions(),
-    });
-```
+That is the whole tracker diff: one field, one rewritten `setViewed`, one line appended to
+`sessionRemoved`, the `stop()` addition, and `pushWatched()`. **`agent.ts` is not touched in this
+step** — its `new ScreenTracker({ backend: o.registry, sink, log, onSessionGone })` call is already
+correct, and the registry it passes is what makes `backend.capabilitiesOf` and
+`backend.setWatched` resolve to the right member.
 
 - [ ] **Step 5: Implement detection and the doctor check**
 
@@ -4526,54 +4613,169 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
 
 - [ ] **Step 6: Wire into the CLI and the doctor**
 
-`apps/agent/src/cli.ts` — add the import next to the iTerm2 ones:
+`apps/agent/src/cli.ts` — **six minimal insertions. This file is shipped and hardened; every edit
+below is an INSERT into existing code. Never replace `buildAgent`'s return object, `start`'s
+destructure, or the signal handler wholesale** — they carry Plan 03's `releaseOutput`,
+`stopFirstConnect`, double-Ctrl-C and `.catch` fixes (commits `5e22a2c` / `b8b8b70`). The shipped
+lines are quoted from `apps/agent/src/cli.ts` at **`5601537`**; find each one and edit exactly as
+shown.
+
+**(1) Import** — next to the iTerm2 ones (`import { ITerm2Backend } …`):
 
 ```ts
 import { startHerdrBackend } from "./backends/herdr/start.js";
 ```
 
-in `buildAgent`, immediately after `void firstConnect();`:
+**(2) `buildAgent` — start the detector.** Shipped anchor (`cli.ts:293`):
+
+```ts
+  void firstConnect();
+```
+
+Insert immediately **after** it. Note `print`, not `console.log`: `buildAgent` buffers every
+backend startup line through `print()` and flushes it with `releaseOutput()` precisely so a fast
+backend cannot interleave with spec 8.1's exact-text header block. `print` is already in scope
+here (declared ~35 lines above, next to `output`).
 
 ```ts
   // spec 8.12/8.13: herdr is optional and usually absent, so this never blocks startup and never
   // prints an error -- it registers the backend, retries every 10 s, and announces itself if and
-  // when it connects.
+  // when it connects. Buffered through `print` like the iTerm2 line, for the same reason.
   const herdr = startHerdrBackend({
     registry,
     log,
-    onConnected: (n) => console.log(`  herdr      connected · ${n} pane${n === 1 ? "" : "s"}`),
+    onConnected: (n) => print(`  herdr      connected · ${n} pane${n === 1 ? "" : "s"}`),
   });
 ```
 
-return the handle so the process can stop it (ruling 22) — change the final line of `buildAgent` to:
+**(3) `buildAgent` — one shared cleanup, so both exit paths stop the detector (ruling 22).**
+Shipped anchor (`cli.ts:297–300`):
 
 ```ts
-  return { agent, control: control.server, p, cfg, fp, herdr };
+  const stopFirstConnect = () => {
+    if (firstConnectTimer) clearTimeout(firstConnectTimer);
+    firstConnectTimer = null;
+  };
 ```
 
-In the `start` command, destructure it and shut it down with everything else:
+Insert **after** that block (it must come after insertion 2, which declares `herdr`):
 
 ```ts
-    const { agent, control, p, cfg, fp, herdr } = await buildAgent(log, opts.relay);
+  // `shutdown()`'s `cleanup` argument: cancel the iTerm2 first-connect retry AND stop the herdr
+  // detector. Passed wherever `stopFirstConnect` used to be passed, so no exit path leaks either.
+  const stopBackendDetectors = () => {
+    stopFirstConnect();
+    herdr.stop();
+  };
 ```
 
+**(4) `buildAgent` — `onSuperseded`.** Shipped anchor (`cli.ts:319–326`) — change **one argument**:
+
 ```ts
+    onSuperseded: () => {
+      console.log("  another shellbell agent took over; exiting");
+      if (control.server) {
+        void shutdown(agent, control.server, () => process.exit(0), stopFirstConnect).catch(() =>
+          process.exit(1),
+        );
+      } else process.exit(0);
+    },
+```
+
+becomes … `stopFirstConnect` → `stopBackendDetectors`:
+
+```ts
+        void shutdown(agent, control.server, () => process.exit(0), stopBackendDetectors).catch(
+          () => process.exit(1),
+        );
+```
+
+**(5) `buildAgent` — return.** Shipped anchor (`cli.ts:329`):
+
+```ts
+  return { agent, control: control.server, p, cfg, fp, releaseOutput, stopFirstConnect };
+```
+
+becomes — **`releaseOutput` and `stopFirstConnect` stay**; `stopBackendDetectors` is added and
+`herdr` is exposed for tests/hosts:
+
+```ts
+  return {
+    agent,
+    control: control.server,
+    p,
+    cfg,
+    fp,
+    releaseOutput,
+    stopFirstConnect,
+    stopBackendDetectors,
+    herdr,
+  };
+```
+
+**(6) `start` — destructure and use the combined cleanup.** Shipped anchor (`cli.ts:338–341`):
+
+```ts
+    const { agent, control, p, cfg, fp, releaseOutput, stopFirstConnect } = await buildAgent(
+      log,
+      opts.relay,
+    );
+```
+
+becomes (`releaseOutput` is still called at `cli.ts:364`; `stopFirstConnect` is simply superseded
+by the combined cleanup here, so drop it from *this* destructure only):
+
+```ts
+    const { agent, control, p, cfg, fp, releaseOutput, stopBackendDetectors } = await buildAgent(
+      log,
+      opts.relay,
+    );
+```
+
+**(7) `start` — the signal handler.** Shipped anchor (`cli.ts:371–383`) — **keep the comment, the
+`shuttingDown` guard, the `process.exit` argument and the `.catch`**; only the fourth argument
+changes:
+
+```ts
+    // Minor: a second Ctrl-C while shutdown is already in flight forces an immediate exit rather
+    // than leaving the process to wait out a hung `control.stop()` -- shutdown() also carries its
+    // own 5 s hard deadline, so this is belt-and-braces for an impatient human.
+    let shuttingDown = false;
     const onSignal = () => {
-      herdr.stop();
-      void shutdown(agent, control);
+      if (shuttingDown) {
+        console.error("  forcing exit");
+        process.exit(130);
+        return;
+      }
+      shuttingDown = true;
+      void shutdown(agent, control, process.exit, stopBackendDetectors).catch(() => process.exit(1));
     };
 ```
 
-(the `pair` command keeps destructuring `{ agent, control }` and ignores `herdr`: its own exit path
-calls `shutdown`, and `startHerdrBackend`'s timers plus every timer inside `HerdrBackend` are
-`unref`'d, so an un-stopped detector can never hold the event loop open.)
+(the only edited token on that last line is `stopFirstConnect` → `stopBackendDetectors`).
 
-In the `start` banner, add a herdr line next to the tmux one:
+**(8) `pair` — same one-token change.** Shipped anchors (`cli.ts:400–406` and `:418–424`): the
+in-process fallback destructures
+`{ agent, control, cfg: agentCfg, fp: agentFp, releaseOutput, stopFirstConnect }` and its 5-minute
+timer calls `shutdown(agent, control, () => process.exit(0), stopFirstConnect)`. Swap
+`stopFirstConnect` for `stopBackendDetectors` in both places (destructure and call), and change
+nothing else — `printPairHeader`, `printQr` and `releaseOutput()` all stay exactly as they are.
+
+**(9) `start` banner — one line.** Shipped anchor (`cli.ts:361`):
 
 ```ts
     console.log("  tmux       not running"); // Plan 04 adds the tmux backend.
-    console.log("  herdr      detecting…"); // replaced in place by startHerdrBackend's onConnected
 ```
+
+Insert **after** it, still **before** the `releaseOutput()` call three lines below, so the header
+block stays contiguous and any queued backend line lands underneath it:
+
+```ts
+    console.log("  herdr      detecting…"); // followed up by startHerdrBackend's onConnected line
+```
+
+**Nothing else in `cli.ts` changes.** `shutdown()`'s own signature
+(`shutdown(agent, control, exit = process.exit, cleanup?)`, `cli.ts:187`) is untouched.
 
 `apps/agent/src/doctor.ts` — add the import:
 
@@ -4591,7 +4793,16 @@ and push the check in `runDoctor`, right after the tmux `try/catch` block:
 
 - [ ] **Step 7: Documentation**
 
-`README.md` — replace the description paragraph with:
+`README.md` — replace **exactly these three shipped lines** (`README.md:5–7`, the paragraph
+directly under `Your terminal rings. You answer.` and directly above the `Status: pre-alpha.` line):
+
+```md
+Shellbell mirrors your Mac's terminal sessions (iTerm2 natively, everything else via
+tmux) to your phone, pings you when a command finishes or a program is waiting, and lets
+you reply — from anywhere, end-to-end encrypted, no accounts.
+```
+
+with:
 
 ```md
 Shellbell mirrors your Mac's terminal sessions (iTerm2 natively, everything else via tmux, and
@@ -4600,7 +4811,8 @@ finishes, when a program goes quiet, or when an agent is blocked waiting on you,
 reply — from anywhere, end-to-end encrypted, no accounts.
 ```
 
-`docs/self-hosting.md` — add one paragraph after the numbered list:
+`docs/self-hosting.md` — add one paragraph after the numbered list (i.e. after step `6.` on
+`docs/self-hosting.md:13`, before the `## Multiple Cloudflare accounts` heading on line 22):
 
 ```md
 Shellbell also works with [Herdr](https://herdr.dev) 0.7.2 or newer: if a Herdr server is running
@@ -4658,7 +4870,7 @@ the only place Herdr is ever installed or started.**
  * Read-only by default. Set HERDR_SPIKE_KEYS=1 to also probe `pane.send_keys` — that TYPES INTO A
  * REAL PANE, so only do it against a scratch pane you created for the spike.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -4720,6 +4932,19 @@ function twoRequestsOnOneConnection(path: string): Promise<string[]> {
 async function main(): Promise<void> {
   const path = herdrSocketPath();
   console.log("socket:", path, "HERDR_SESSION:", process.env.HERDR_SESSION ?? "(unset)");
+  // Spike question 1 is blocking: the macOS default (`~/.config/herdr/…`, no
+  // `~/Library/Application Support` branch) is read from the Rust source but never observed on a
+  // Mac. Say so loudly rather than dying with a bare ENOENT that reads like "herdr isn't running".
+  if (!existsSync(path)) {
+    console.error(
+      `\n!! No socket at ${path}\n` +
+        "!! If a herdr server IS running, herdrSocketPath() is WRONG for this platform.\n" +
+        '!! Check: ls -l ~/.config/herdr/ "$HOME/Library/Application Support/herdr/"\n' +
+        "!! Record the real path as errata (spike question 1) — Task 6's detector and the doctor\n" +
+        "!! check will both silently report \"not installed\" until herdrSocketPath() is fixed.\n" +
+        "!! Workaround for the rest of this spike: HERDR_SOCKET_PATH=<real path> pnpm -F shellbell spike:herdr\n",
+    );
+  }
 
   const pong = await timed("ping", 5, () =>
     client.request<{ version?: string; protocol?: number }>("ping", {}),
@@ -4869,8 +5094,15 @@ hundred lines (→ `pane.scroll_changed`).
 
 Then write `docs/spike-herdr.md` in the style of `docs/spike-tmux.md`, answering with evidence:
 
-1. Socket path actually used, its mode, whether `HERDR_SESSION` produces the documented per-session
-   path, and whether a `-client.sock` sibling exists.
+1. **Socket path actually used on macOS**, its mode, whether `HERDR_SESSION` produces the
+   documented per-session path, and whether a `-client.sock` sibling exists.
+   **This is a blocking answer, not a nice-to-have:** `herdrSocketPath()` defaults to
+   `~/.config/herdr/herdr.sock` on macOS with no `~/Library/Application Support` branch. Run
+   `herdr` and then `ls -l ~/.config/herdr/ "$HOME/Library/Application Support/herdr/" 2>&1` and
+   record which one exists. The spike script prints the path it resolved on its first line; if
+   that file does not exist while a herdr server is running, **stop and record it as errata** —
+   `herdrSocketPath` needs a second `existsSync` candidate before Task 6's detector can ever find
+   a real Herdr on a Mac, and every doctor check will silently read "not installed (optional)".
 2. `ping`: version, protocol, capabilities. **Does the semver gate accept it, and is `protocol`
    really unrelated to JSON-API compatibility (compare two builds if possible)?**
 3. One request per connection: how many responses came back for two pipelined requests?
@@ -4988,7 +5220,9 @@ import type { BackendEvent } from "../src/backends/types.js";
 import { createLogger } from "../src/log.js";
 import type { SessionSnapshotResult, TabCreatedResult } from "../src/backends/herdr/types.js";
 
-const live = process.env.SHELLBELL_LIVE === "1";
+// Same gate shape as the shipped `test/live-iterm2.test.ts` (`describe.skipIf(!process.env.…)`),
+// so one `SHELLBELL_LIVE=1` opts into both live suites.
+const live = Boolean(process.env.SHELLBELL_LIVE);
 const log = createLogger({ stdout: true, verbose: true });
 
 describe.skipIf(!live)("live herdr", () => {
@@ -5060,8 +5294,14 @@ describe.skipIf(!live)("live herdr", () => {
 Herdr server (which this plan never installs) and it creates and closes a Herdr tab.
 
 ```bash
-SHELLBELL_LIVE=1 perl -e 'alarm 300; exec @ARGV' -- pnpm -F shellbell vitest run test/live-herdr.test.ts
+SHELLBELL_LIVE=1 perl -e 'alarm 300; exec @ARGV' -- \
+  pnpm -F shellbell exec vitest run test/live-herdr.test.ts
 ```
+(`exec`, not a bare `pnpm -F shellbell vitest …`: `vitest` is not a script in
+`apps/agent/package.json` — its scripts are `test`, `typecheck`, `build`, `dev`, `proto:gen`,
+`spike:iterm2`, `spike:tmux`, `spike:herdr`. Plan 03's equivalent step is
+`SHELLBELL_LIVE=1 pnpm vitest run test/live-iterm2.test.ts` run from inside `apps/agent`, which
+also works.)
 Expected: PASS, a scratch tab appears and disappears, and `shellbell-herdr-live-ok` is echoed in it.
 Without `SHELLBELL_LIVE` the suite is skipped, so `pnpm test` in CI is unaffected.
 
@@ -5101,7 +5341,8 @@ git commit -m "test(agent): env-gated live herdr integration"
 | Create: `tab.create {focus:false}`, `pane.split right/down`, `BadWindow` | Task 4 (three tests) |
 | `pane.focus` only from a user action; stale pane target → snapshot refresh | Task 4 (`focus`, `call`) |
 | Absent Herdr → `BackendUnavailable` + hint; `doctor` passes when absent, fails when broken | Task 2, Task 6 (`checkHerdr`, four tests) |
-| Per-session `absoluteLines`; `hello` on backend-set change | Task 6 (tracker + registry + agent, three tests) |
+| Per-session `absoluteLines` | **Already shipped** (`screen-tracker.ts` `processScreen` + `BackendRegistry.capabilitiesOf`, with its own describe block in `test/screen-tracker.test.ts`). No task re-implements it. |
+| `hello` on backend-set change | Task 5 (`broadcastHelloIfBackendsChanged`) + Task 6 (`connected()` filter, two tests) |
 | Licensing / "works with Herdr" | Global Constraints, Task 6 docs |
 
 **Type consistency:**
@@ -5142,7 +5383,8 @@ single resubscribe, removal reconciliation, `pane_moved` with stable terminal id
 title, both-axis resize, scroll from event and via `pane.get`, poller adaptivity/odd revisions/
 cancellation/failure, real restart with socket removal and a pane deleted during downtime); engine
 (five ring rules incl. restart adoption); notifier (`blocked` + 60 s limit); registry (herdr routing,
-`setWatched` fan-out, `connected()` filter); tracker (watched set, per-session `absoluteLines`);
+`setWatched` fan-out, `connected()` filter); tracker (watched set — per-session `absoluteLines` is
+covered by its own shipped describe block, not re-tested here);
 start/doctor (register-before-connect, retry, absent = pass, old = fail, no-snapshot = fail);
 agent-level integration (initial blocked visible but not rung, ring → `notify`, disconnect drops
 sessions and `hello`, reconnect re-adopts silently); relay (`blocked` push body end to end); and one
@@ -5155,11 +5397,18 @@ env-gated live test.
 Each one has a documented fallback in the code, so the plan is executable before the spike; Task 8
 replaces the guess with the measurement.
 
-1. **`pane.scroll_changed` payload.** The plan uses `data.scroll.{max_offset_from_bottom,
-   viewport_rows}` when present and otherwise marks the pane stale and refreshes with `pane.get` at
-   most once a second. Unverified: whether the event carries scroll numbers at all, and how often it
-   fires while a pane streams output. *If it carries nothing and fires per line,* the `pane.get`
-   fallback is what keeps the cost bounded — measure it (spike item 8).
+1. **`pane.scroll_changed` payload — assume it carries NOTHING.** The research catalogue records
+   this event as **`pane.scroll_changed { pane_id }`**, with no `scroll` object, so the plan treats
+   the rate-limited `pane.get` refresh (at most 1/s per pane, triggered lazily by the next
+   `getScreen`) as the **primary** mechanism for keeping `scrollbackTotal` fresh. Reading
+   `data.scroll.{max_offset_from_bottom, viewport_rows}` straight off the payload is an
+   opportunistic shortcut that costs nothing when absent. Unverified and to be measured in
+   **spike item 8**: (a) whether any build sends scroll numbers on the event; (b) how often it
+   fires while a pane streams output, i.e. whether the 1/s `pane.get` cap is enough.
+   *Task 8 action:* if the captured event carries no `scroll`, delete the "unverified payload
+   path" test in `herdr-backend.test.ts` and keep the `pane.get` one; if it does carry numbers,
+   promote the shortcut and say so in the errata. Either way the production behaviour is already
+   correct — only the dead branch and one test change.
 2. **`layout.updated` rect fields and units.** Assumed `panes[].rect.{x,y,width,height}` in **cells**
    on both the snapshot and the event. *Fallback:* `rows` prefers the rect but falls back to
    `scroll.viewport_rows`, and a missing rect yields 80×24. If the units are pixels, `cols` needs
@@ -5186,7 +5435,18 @@ replaces the guess with the measurement.
    semver parser cannot read (spike item 2).
 10. **Named Herdr sessions.** Discovery honours `HERDR_SESSION`, but the agent still connects to
     exactly one socket. Enumerating several is out of scope.
-11. **Deferred by the spec, not unknown:** true cursor and TUI-exact fidelity via
+11. **The macOS socket directory (blocking — spike question 1).** `herdrSocketPath()` resolves
+    `<config>` as `$XDG_CONFIG_HOME` else `~/.config` on **both** platforms, with no
+    `~/Library/Application Support` branch. That comes from the Rust source quoted in research §1
+    and is stated as fact in spec 8.13, but the research's own checklist still lists it as
+    unconfirmed on a Mac — and this plan's whole automated suite talks to a fake server on a temp
+    socket, so nothing here can catch it. *Fallback:* `$HERDR_SOCKET_PATH` always wins, and every
+    caller degrades to "not installed (optional)" rather than failing, so a wrong default is
+    invisible-but-harmless until the spike. *If the spike shows a different directory,* give
+    `herdrSocketPath` a second candidate (probe both with `existsSync`, prefer the one that
+    exists) and update spec 8.13's "same layout on macOS and Linux" sentence. The spike script
+    prints an explicit multi-line warning when the resolved path does not exist.
+12. **Deferred by the spec, not unknown:** true cursor and TUI-exact fidelity via
     `herdr terminal session observe` + a headless VT emulator (spec 8.13 "Deferred"). The faked
     cursor and the polled screen are v1.
 
@@ -5348,3 +5608,110 @@ why. Where a review's suggestion conflicted with a ruling, the ruling won (noted
   asks per session. Changing the facade would alter `hello` semantics for existing backends.
 - The `herdr terminal session observe` path (a real cursor, exact TUI fidelity) stays deferred to
   Plan 06 per spec §8.13.
+
+---
+
+## Pre-flight scan corrections (2026-09-05, second pass)
+
+A read-only pre-flight scan against the **shipped tree at `5601537`** found that the corrections
+above were applied without re-reading the agent code, so several of them had drifted from what Plan
+03 actually shipped in its final fix wave. Full report:
+`.superpowers/sdd/2026-09-05-shellbell-04b-herdr/preflight-scan.md`. Every row below is now fixed in
+the plan text above.
+
+**Drift against shipped code (the plan had been written against the pre-`b8b8b70` `cli.ts`):**
+
+- **Header SHA corrected to `5601537`** and a "read these shipped files first" box added, naming the
+  six files whose current contents the tasks depend on. The old text claimed Plan 03 shipped at
+  `6bb2a53`, which is eight commits stale and is the root cause of every row below. *(PF-1.8)*
+- **Task 6's `cli.ts` edits rewritten as nine minimal, anchored insertions.** They previously
+  *replaced* `buildAgent`'s return object, `start`'s destructure and the whole signal handler,
+  which would have (a) failed to compile — `releaseOutput` and `stopFirstConnect` are used at
+  `cli.ts:364`, `:382`, `:400–406` and `:420` — and (b) silently reverted three shipped fixes: the
+  buffered `print()`/`releaseOutput()` output ordering, the double-Ctrl-C `shuttingDown` guard, and
+  `shutdown`'s `exit`/`cleanup` arguments plus its `.catch`. Every shipped anchor line is now quoted
+  verbatim. *(PF-1.1, 1.2, 1.3)*
+- **The herdr detector is now stopped on every exit path**, not just SIGINT: `buildAgent` gains one
+  `stopBackendDetectors = () => { stopFirstConnect(); herdr.stop(); }` cleanup, passed wherever
+  `stopFirstConnect` was passed — the signal handler, `onSuperseded`, and `pair`'s 5-minute timer.
+  *(PF-1.4)*
+- **The herdr startup banner goes through `print()`, not `console.log`**, so it cannot interleave
+  with spec 8.1's exact-text header block — the same defect `b8b8b70` fixed for the iTerm2 line.
+  *(PF-1.7)*
+- **Task 6's tracker/agent `absoluteLines` work deleted: it already shipped.**
+  `ScreenTracker.processScreen` already reads
+  `backend.capabilitiesOf?.(sessionId)?.absoluteLines ?? backend.capabilities.absoluteLines`, and
+  `BackendRegistry.capabilitiesOf` already exists. The plan's `capabilitiesOf` tracker option,
+  `absoluteLinesFor()` helper, `else if` rewrite and `agent.ts` change were duplicate logic that
+  would also have orphaned the shipped `absoluteLines` const and failed `pnpm lint`
+  (`noUnusedVariables`). Task 6's interface list, rulings list, file-structure entry and the
+  self-review coverage table were updated to say ruling 8 is already satisfied. *(PF-1.5, 5.1)*
+- **The duplicate tracker test was dropped.** `test/screen-tracker.test.ts` already ends with
+  `describe("per-backend absoluteLines via BackendRegistry.capabilitiesOf …")`, which drives a real
+  registry with an iTerm2 and a tmux member; the plan's replacement passed `absoluteLines: true` for
+  the session under test and so asserted nothing the shipped code did not already do. *(PF-5.2)*
+- **Task 5's `refreshSessions` rewrite no longer changes the `catch` body.** It had silently swapped
+  the shipped `{ err: err instanceof Error ? err.name : "unknown" }` for `{ err: String(err) }`,
+  widening the log to full error messages against spec 8.10. *(PF-1.6)*
+- **Task 2's `TerminalBackend` diff is now the complete interface, with no `// … unchanged members
+  …` ellipsis** and including the shipped `capabilitiesOf?`, which the ellipsis had hidden. This also
+  removes the one real counter-example to the plan's own "Placeholder scan: none". *(PF-1.9)*
+
+**Test defects:**
+
+- **`FakeHerdr.stop()` now destroys every accepted socket, not just registered event streams.** The
+  "rejects immediately when the socket dies before the ack" test parks a connection with
+  `silence()`, which never enters `streams`; `server.close()`'s callback waits for the last
+  connection to end, so `await herdr.stop()` never resolved and the test — plus its `afterEach` —
+  hung. *(PF-3.3)*
+- **The "ack and event in one chunk" test now really coalesces them.** It called
+  `reply("events.subscribe", …)`, which is dead code (the fake handles that method before consulting
+  `handlers`), and then wrote the ack and the event in two separate `socket.write` calls. The fake
+  gained an `ackRider` queue that emits both in a single write. *(PF-3.4)*
+- **Explicit type predicate for `agent-state` filtering.** Two assertions used
+  `events.filter((e) => e.type === "agent-state").map((e) => e.sessionId)`, which only compiles
+  through TypeScript's inferred type predicates (5.5+) — `sessionId`/`state` do not exist on
+  `{ type: "layout-changed" }`. Replaced with one `agentStateEvents()` helper carrying an explicit
+  `e is Extract<BackendEvent, { type: "agent-state" }>`. *(PF-3.9)*
+- **Every poller "nothing happened" window widened from 60–80 ms to 300 ms, with an explicit
+  probe-count growth assertion.** One poll interval is `POLL_FAST_MS` (200 ms), so the odd-revision
+  and steady-state checks were passing vacuously — no probe ran at all inside the window, proving
+  nothing about the skip rule. Applied to the odd-revision, baseline, unwatch, close and
+  probe-failure windows. *(PF-3.10)*
+- **Task 9's live command fixed to `pnpm -F shellbell exec vitest run …`** — `vitest` is not a script
+  in `apps/agent/package.json`, so the old form could not run. The gate also matches the shipped
+  `live-iterm2.test.ts` shape (`Boolean(process.env.SHELLBELL_LIVE)`). *(PF-3.22, 6.6)*
+- **Task 1's new relay push test closes `agent.ws` and `p.ws`**, like every sibling test in
+  `push.test.ts`. *(PF-3.1)*
+
+**Rubric and honesty:**
+
+- **`sendText` no longer logs the key name.** `this.log.debug("herdr key", { key: whole })` became
+  `this.log.debug("herdr key")`: a key name is still a keystroke, and both spec 8.10 and this plan's
+  own Global Constraints say never log keys. *(PF-5.5)*
+- **The `pane.scroll_changed` payload test is relabelled as the unverified path.** The research
+  records the event as `{ pane_id }` with no `scroll` object, so the rate-limited `pane.get` refresh
+  is the **primary** mechanism and reading numbers off the payload is an opportunistic shortcut. The
+  rules table, the handler comment, both test names and known-unknown 1 now say so, and
+  known-unknown 1 carries an explicit Task 8 action (delete the shortcut test, or promote it).
+  *(PF-3.11, 4.3)*
+- **The macOS socket path is called out as a blocking spike answer.** `herdrSocketPath()`'s
+  `~/.config` default on macOS is read from the Rust source but never observed on a Mac. Spike
+  question 1 now demands the real path with a concrete `ls` command, the spike script prints a
+  multi-line warning when the resolved path does not exist, and a new known-unknown (11) records the
+  fallback (a second `existsSync` candidate) if it turns out to be wrong. *(PF-4.4)*
+- **README/self-hosting edits are now anchored to exact shipped lines** (`README.md:5–7`, quoted
+  verbatim; `docs/self-hosting.md` after step 6 on line 13, before the heading on line 22) instead
+  of the prose "replace the description paragraph". *(PF-3.21)*
+
+**Confirmed correct by the scan, left alone:** all 20 `events.subscribe` types exist in the
+research's 27-variant `Subscription` oneOf; the `HERDR_KEYS` table matches Herdr's documented key
+grammar and `\r`/`\n`/`\t` correctly pre-empt the `ctrl-m`/`ctrl-j`/`ctrl-i` aliases; the
+`getHistory` depth/`want`/`end`/`start`/`oldestAvailable` arithmetic and the `convert.ts` cursor and
+fit arithmetic re-derived by hand; `pane.split`/`tab.create`/`pane.copy_motion`/`pane.get`/
+`pane.read` params and results match the research verbatim; fixture filenames are identical across
+Tasks 3, 4, 7 and 8; no new runtime dependency and exactly one new script (`spike:herdr`); every test
+command is `alarm`-bounded; `Agent`'s existing `hello` handshake cannot double-fire, because
+`registry.add` runs before `new Agent(...)` in `agent.integration.test.ts` and the `first` guard
+absorbs the initial `backendsKey`; and only Task 7 Step 3 and Task 9 Step 2 — both Human-run only —
+ever touch a real Herdr socket.
