@@ -94,7 +94,8 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
     };
     rl.on("line", (line) => {
       if (line.startsWith("%begin")) {
-        this.current = { lines: [], num: line.split(" ")[1] ?? "" };
+        // `%begin <time> <number> <flags>` -- the command number (index 2) correlates a block.
+        this.current = { lines: [], num: line.split(" ")[2] ?? "" };
         this.currentPending = this.started ? (this.queue.shift() ?? null) : null;
         return;
       }
@@ -106,7 +107,7 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
         // spec 8.10: %begin/%end/%error share one sequence number per reply block. A mismatch
         // means the stream desynced (e.g. a dropped or reordered line) -- worth a warn, but the
         // FIFO queue is still the best correlation we have, so the pending command still resolves.
-        const endNum = line.split(" ")[1] ?? "";
+        const endNum = line.split(" ")[2] ?? "";
         if (block && block.num !== endNum) {
           this.log.warn("tmux %begin/%end number mismatch", { begin: block.num, end: endNum });
         }

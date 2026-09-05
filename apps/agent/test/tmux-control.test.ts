@@ -95,11 +95,12 @@ describe("TmuxControl", () => {
 
     const p = c.command("list-panes -a");
     await flush();
-    // The reply's %end carries a different sequence number than its %begin -- a desync, not a
-    // dropped reply -- so the command still resolves via the FIFO queue, but a warn is logged.
-    stdout.write("%begin 2 1 0\n%3\tmain\n%end 3 1 0\n");
+    // The reply's %end carries a different command number (field 2; field 1 is the time) than
+    // its %begin -- a desync, not a dropped reply -- so the command still resolves via the FIFO
+    // queue, but a warn is logged.
+    stdout.write("%begin 1700000000 7 0\n%3\tmain\n%end 1700000001 8 0\n");
     expect(await p).toEqual(["%3\tmain"]);
-    expect(warns).toEqual([["tmux %begin/%end number mismatch", { begin: "2", end: "3" }]]);
+    expect(warns).toEqual([["tmux %begin/%end number mismatch", { begin: "7", end: "8" }]]);
     c.stop();
   });
 
