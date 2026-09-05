@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import {
   authMessage,
   type CtrlMessage,
+  type CtrlMessageOf,
   decodeEnvelope,
   type Envelope,
   encodeEnvelope,
@@ -21,6 +22,11 @@ interface Peer {
   connId: string;
 }
 
+export interface FakeRelayOptions {
+  /** Forwarded to `WebSocketServer` — set false to simulate a peer that never answers pings. */
+  autoPong?: boolean;
+}
+
 /** Minimal in-process relay double: one computer, any number of phones. */
 export class FakeRelay {
   private server: Server | null = null;
@@ -31,14 +37,32 @@ export class FakeRelay {
   pairing = new Map<string, Peer>();
   received: { from: Peer; env: Envelope }[] = [];
   ctrlFromAgent: CtrlMessage[] = [];
+  /** Total sockets ever accepted, including ones that never completed auth. */
+  connections = 0;
+  connectionTimes: number[] = [];
+  /** One-shot fault injection: next agent auth attempt gets this auth-fail reason instead of the real check. */
+  nextAuthFailReason: CtrlMessageOf<"auth-fail">["reason"] | null = null;
+  /** While set, every newly accepted connection is closed immediately with this code, before any challenge. */
+  rejectCode: number | null = null;
+  rejectReason = "";
   private waiters: ((m: CtrlMessage) => void)[] = [];
+  private ctrlBuffer: CtrlMessage[] = [];
 
-  constructor(private readonly computerFp: string) {}
+  constructor(
+    private readonly computerFp: string,
+    private readonly opts: FakeRelayOptions = {},
+  ) {}
 
   async start(): Promise<void> {
     this.server = createServer();
-    this.wss = new WebSocketServer({ server: this.server });
+    this.wss = new WebSocketServer({ server: this.server, autoPong: this.opts.autoPong });
     this.wss.on("connection", (ws, req) => {
+      this.connections++;
+      this.connectionTimes.push(Date.now());
+      if (this.rejectCode !== null) {
+        ws.close(this.rejectCode, this.rejectReason);
+        return;
+      }
       const fpInUrl = (req.url ?? "").split("/").pop();
       if (fpInUrl !== this.computerFp) {
         ws.close(4001, "unknown computer");
@@ -54,6 +78,12 @@ export class FakeRelay {
         if (!peer) {
           const msg = parseCtrl(env.body);
           if (msg.type !== "auth") return ws.close(4403);
+          if (msg.role === "agent" && this.nextAuthFailReason) {
+            const reason = this.nextAuthFailReason;
+            this.nextAuthFailReason = null;
+            this.sendCtrl(ws, { type: "auth-fail", reason });
+            return ws.close(4001);
+          }
           const ok =
             fingerprint(msg.ed25519Pub) === msg.fp &&
             verify(msg.ed25519Pub, authMessage(connId, msg.role, msg.fp, nonce), msg.sig);
@@ -75,7 +105,7 @@ export class FakeRelay {
             minFrameMs: 125,
           };
           if (msg.role === "agent") {
-            this.agent?.ws.close(4005);
+            this.agent?.ws.close(4005, "superseded");
             this.agent = peer;
             this.sendCtrl(ws, okMsg);
             this.sendCtrl(ws, { type: "unpaired", phoneFps: [] });
@@ -108,7 +138,9 @@ export class FakeRelay {
           const msg = parseCtrl(env.body);
           if (peer.role === "agent") {
             this.ctrlFromAgent.push(msg);
-            this.waiters.shift()?.(msg);
+            const waiter = this.waiters.shift();
+            if (waiter) waiter(msg);
+            else this.ctrlBuffer.push(msg);
             if (msg.type === "pairing-response" || msg.type === "pairing-reject") {
               const target = this.pairing.get(msg.phoneFp);
               if (target) this.sendCtrl(target.ws, msg);
@@ -149,7 +181,14 @@ export class FakeRelay {
     if (this.agent) this.sendCtrl(this.agent.ws, body);
   }
 
+  /** Force-close the current agent socket with an arbitrary close code (e.g. 4413/4429). */
+  closeAgent(code: number, reason = ""): void {
+    this.agent?.ws.close(code, reason);
+  }
+
   nextCtrlFromAgent(timeoutMs = 2000): Promise<CtrlMessage> {
+    const buffered = this.ctrlBuffer.shift();
+    if (buffered !== undefined) return Promise.resolve(buffered);
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("timeout waiting for agent ctrl")), timeoutMs);
       this.waiters.push((m) => {
