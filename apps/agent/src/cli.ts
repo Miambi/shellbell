@@ -178,51 +178,126 @@ export function chooseConfirm(
 
 /** One shutdown path for `start`: stops the agent and the control server (which removes
  * `agent.sock` and `agent.pid`), then exits. Shared by SIGINT/SIGTERM and `onSuperseded` so
- * neither leaves stale files behind. */
+ * neither leaves stale files behind.
+ *
+ * A hard 5 s deadline guarantees `exit` is always called even if `control.stop()` hangs (e.g. a
+ * socket that never emits `close`) -- Ctrl-C must never leave the process unkillable. `cleanup`,
+ * when given, runs synchronously first (e.g. cancelling `buildAgent`'s first-connect retry timer).
+ */
 export async function shutdown(
   agent: Agent,
   control: ControlServer,
   exit: (code: number) => void = process.exit,
+  cleanup?: () => void,
 ): Promise<void> {
-  agent.stop();
-  await control.stop();
-  exit(0);
+  cleanup?.();
+  let exited = false;
+  const onceExit = (code: number) => {
+    if (exited) return;
+    exited = true;
+    exit(code);
+  };
+  const hardDeadline = setTimeout(() => onceExit(1), 5000);
+  if (typeof hardDeadline.unref === "function") hardDeadline.unref();
+  try {
+    agent.stop();
+    await control.stop();
+    onceExit(0);
+  } finally {
+    clearTimeout(hardDeadline);
+  }
+}
+
+/**
+ * Pure: resolves the explicit `--relay <url>` flag against the loaded config. Unlike
+ * `config set relay`, `ws://` is always accepted here (no `--insecure` needed) since the flag
+ * only steers a single foreground run and is documented as LAN-dev-only (spec §15's
+ * `--relay ws://localhost:8787` local e2e flow) -- but it still fails closed on a genuinely bad
+ * URL (I2). Returns the config unchanged, with a `warning` to print, when no override is given.
+ */
+export function resolveRelayOverride(
+  cfg: AgentConfig,
+  relayOverride: string | undefined,
+): { error: string } | { cfg: AgentConfig; warning?: string } {
+  if (relayOverride === undefined) return { cfg };
+  const err = validateRelayUrl(relayOverride, true);
+  if (err) return { error: err };
+  const insecure = new URL(relayOverride).protocol === "ws:";
+  return {
+    cfg: { ...cfg, relayUrl: relayOverride },
+    warning: insecure ? "insecure relay URL; for local testing only" : undefined,
+  };
 }
 
 async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
   const p = paths();
-  const cfg = loadConfig(p);
+  let cfg = loadConfig(p);
+  if (relayOverride !== undefined) {
+    // I2: --relay must steer BOTH the agent's own socket and the pairing QR (the QR's `r`), or a
+    // scanned QR dials a relay the agent never connected to. Routing it into `cfg.relayUrl` here
+    // (rather than the test-only `relayUrlOverride` seam) makes PairingManager and RelayClient
+    // agree, exactly like `config set relay` already does for a persisted override.
+    const resolved = resolveRelayOverride(cfg, relayOverride);
+    if ("error" in resolved) {
+      console.error(`  --relay ${relayOverride}: ${resolved.error}`);
+      process.exit(1);
+    }
+    if (resolved.warning) console.error(`  warning: ${resolved.warning}`);
+    cfg = resolved.cfg;
+  }
   const { identity, fp } = loadOrCreateIdentity(p);
   const registry = new BackendRegistry(log);
   const client = new ITerm2Client({ log });
   const iterm = new ITerm2Backend(client, log);
+  // Minor: `firstConnect` below can otherwise print its backend line before the caller's own
+  // spec 8.1 header block (both `start` and `pair` print a header only after `buildAgent()`
+  // returns) if iTerm2 answers fast -- buffer stdout lines here and let the caller release them
+  // once its header is up, so the two can never interleave.
+  const output: { ready: boolean; queue: string[] } = { ready: false, queue: [] };
+  const print = (line: string) => {
+    if (output.ready) console.log(line);
+    else output.queue.push(line);
+  };
+  const releaseOutput = () => {
+    output.ready = true;
+    for (const line of output.queue) console.log(line);
+    output.queue = [];
+  };
   // ITerm2Backend owns reconnect once it has connected at least once (1 s -> 30 s, spec 8.5.1).
   // The CLI only retries the FIRST connect, which is what fails while iTerm2 is closed or its
   // Python API is off — spec 8.12 says re-detect every 10 s while a backend is absent.
+  let firstConnectTimer: NodeJS.Timeout | null = null;
   const firstConnect = async () => {
     try {
       await iterm.connect();
       registry.add(iterm);
       const sessions = await iterm.listSessions().catch(() => []);
-      console.log(
+      print(
         `  iTerm2     connected · ${sessions.length} session${sessions.length === 1 ? "" : "s"}`,
       );
       log.info("iTerm2 connected");
     } catch (err) {
       if (err instanceof BackendUnavailable) {
         // spec 8.1's exact text for a disabled Python API.
-        console.log(
+        print(
           "\n  iTerm2's Python API is off. Turn it on:\n  iTerm2 → Settings → General → Magic → ✓ Enable Python API\n  then run `shellbell` again.\n",
         );
         log.warn(`iTerm2 unavailable: ${err.message}`, { hint: err.hint });
       } else {
-        console.log("  iTerm2     unavailable — connect failed");
-        log.warn("iTerm2 connect failed", { err: String(err) });
+        print("  iTerm2     unavailable — connect failed");
+        log.warn("iTerm2 connect failed", { err: err instanceof Error ? err.name : "unknown" });
       }
-      setTimeout(() => void firstConnect(), 10_000);
+      firstConnectTimer = setTimeout(() => void firstConnect(), 10_000);
     }
   };
   void firstConnect();
+  // Minor: without this, the retry timer above outlives `stop()`/`shutdown()` -- harmless for the
+  // CLI (every shutdown path calls `process.exit`) but it means `buildAgent` can't be reused in a
+  // long-lived host. `shutdown()` calls this as its `cleanup` step.
+  const stopFirstConnect = () => {
+    if (firstConnectTimer) clearTimeout(firstConnectTimer);
+    firstConnectTimer = null;
+  };
   const control: { server: ControlServer | null } = { server: null };
   let agent: Agent;
   agent = new Agent({
@@ -233,19 +308,25 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     registry,
     log,
     appVersion: VERSION,
-    relayUrlOverride: relayOverride,
+    // relayUrlOverride intentionally omitted: cfg.relayUrl above (possibly overridden by --relay)
+    // already steers both the socket and the pairing QR via PairingManager. relayUrlOverride
+    // remains a genuinely test-only seam (agent.integration.test.ts) for pointing the socket at a
+    // FakeRelay without disturbing a wss:// config the QR round-trip validation expects.
     confirm: chooseConfirm(control, yes, (phoneFp, name) =>
       askYesNo(`\n  Pair "${name}" (fp ${fpShort(phoneFp)})?  [y/N]  (60 s) `, 60_000),
     ),
     onPairingClosed: () => control.server?.notifyClosed(),
     onSuperseded: () => {
       console.log("  another shellbell agent took over; exiting");
-      if (control.server) void shutdown(agent, control.server, () => process.exit(0));
-      else process.exit(0);
+      if (control.server) {
+        void shutdown(agent, control.server, () => process.exit(0), stopFirstConnect).catch(() =>
+          process.exit(1),
+        );
+      } else process.exit(0);
     },
   });
   control.server = new ControlServer(p.sock, agent, log, p.pid);
-  return { agent, control: control.server, p, cfg, fp };
+  return { agent, control: control.server, p, cfg, fp, releaseOutput, stopFirstConnect };
 }
 
 program
@@ -254,7 +335,10 @@ program
   .option("--service", "running under launchd")
   .action(async (o: { service?: boolean }) => {
     const { opts, log } = ctx();
-    const { agent, control, p, cfg, fp } = await buildAgent(log, opts.relay);
+    const { agent, control, p, cfg, fp, releaseOutput, stopFirstConnect } = await buildAgent(
+      log,
+      opts.relay,
+    );
     try {
       await control.start();
     } catch (err) {
@@ -275,13 +359,28 @@ program
     agent.relay.on("auth-ok", () => console.log(`  Relay      ${cfg.relayUrl}   connected`));
     agent.relay.on("down", () => console.log(`  Relay      ${cfg.relayUrl}   connecting…`));
     console.log("  tmux       not running"); // Plan 04 adds the tmux backend.
+    // The header above is up: any iTerm2 line `buildAgent`'s firstConnect() queued while it was
+    // still connecting can now be printed without interleaving spec 8.1's exact-text block.
+    releaseOutput();
 
     if (agent.pairingList.length === 0 && !o.service && process.stdin.isTTY) {
       console.log("\n  No phones paired yet. Scan this with the Shellbell app:\n");
       const { qrText, expiresAt } = agent.openPairing();
       printQr(qrText, expiresAt);
     }
-    const onSignal = () => void shutdown(agent, control);
+    // Minor: a second Ctrl-C while shutdown is already in flight forces an immediate exit rather
+    // than leaving the process to wait out a hung `control.stop()` -- shutdown() also carries its
+    // own 5 s hard deadline, so this is belt-and-braces for an impatient human.
+    let shuttingDown = false;
+    const onSignal = () => {
+      if (shuttingDown) {
+        console.error("  forcing exit");
+        process.exit(130);
+        return;
+      }
+      shuttingDown = true;
+      void shutdown(agent, control, process.exit, stopFirstConnect).catch(() => process.exit(1));
+    };
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
   });
@@ -295,7 +394,16 @@ program
     const { fp } = loadOrCreateIdentity(p);
 
     const startInProcess = async () => {
-      const { agent, control } = await buildAgent(log, opts.relay, o.yes);
+      // I2: destructure this call's own (possibly --relay-overridden) cfg/fp rather than the
+      // outer `ctx()` ones, so the printed header's "Relay" line always matches the QR it prints.
+      const {
+        agent,
+        control,
+        cfg: agentCfg,
+        fp: agentFp,
+        releaseOutput,
+        stopFirstConnect,
+      } = await buildAgent(log, opts.relay, o.yes);
       try {
         await control.start();
       } catch (err) {
@@ -304,9 +412,16 @@ program
       }
       agent.start();
       const { qrText, expiresAt } = agent.openPairing();
-      printPairHeader(cfg, fp);
+      printPairHeader(agentCfg, agentFp);
       printQr(qrText, expiresAt);
-      setTimeout(() => void shutdown(agent, control, () => process.exit(0)), 5 * 60_000 + 1000);
+      releaseOutput();
+      setTimeout(
+        () =>
+          void shutdown(agent, control, () => process.exit(0), stopFirstConnect).catch(() =>
+            process.exit(1),
+          ),
+        5 * 60_000 + 1000,
+      );
     };
 
     // spec 8.1: talks to a running agent's control socket; a dead/stale socket falls back to an

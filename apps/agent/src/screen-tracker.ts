@@ -169,11 +169,9 @@ export class ScreenTracker {
       if (!s.dirty || s.inflight || s.viewers.size === 0) continue;
       s.inflight = true;
       s.dirty = false;
+      let screen: Screen;
       try {
-        const screen = await this.opts.backend.getScreen(sessionId);
-        // A `stop()` may have landed while `getScreen` was in flight: never reach the sink after it.
-        if (this.stopped) continue;
-        this.processScreen(sessionId, s, screen);
+        screen = await this.opts.backend.getScreen(sessionId);
       } catch (err) {
         if (err instanceof SessionGone) {
           this.log.warn("getScreen: session gone; dropping", { session: sessionId.slice(0, 12) });
@@ -188,6 +186,26 @@ export class ScreenTracker {
           for (const v of s.viewers.values()) v.forceSnapshot = true;
           s.dirty = true;
         }
+        s.inflight = false;
+        continue;
+      }
+      // A `stop()` may have landed while `getScreen` was in flight: never reach the sink after it.
+      if (this.stopped) {
+        s.inflight = false;
+        continue;
+      }
+      try {
+        this.processScreen(sessionId, s, screen);
+      } catch (err) {
+        // Minor: distinct from a getScreen failure -- getScreen already succeeded by this point,
+        // so a throw here is a bug in the diffing/sink path itself, not a transient backend
+        // hiccup. Recover the same way (resync every viewer next tick) but diagnose it correctly.
+        this.log.error("processScreen threw; will resync every viewer next tick", {
+          session: sessionId.slice(0, 12),
+          err: err instanceof Error ? err.name : "unknown",
+        });
+        for (const v of s.viewers.values()) v.forceSnapshot = true;
+        s.dirty = true;
       } finally {
         s.inflight = false;
       }
@@ -195,6 +213,16 @@ export class ScreenTracker {
   }
 
   private processScreen(sessionId: string, s: SessionState, screen: Screen): void {
+    // A `subscribe(null)` can remove the very last viewer while `getScreen` above was still in
+    // flight; without this guard `n` below is 0 and `s.rrOffset % n` is a permanent NaN.
+    if (s.viewers.size === 0) return;
+    // Per-backend, not the registry-wide AND of every connected backend's capability (minor: a
+    // second backend with `absoluteLines: false`, e.g. tmux, must not make an iTerm2 session run
+    // overlap detection meant for backends without absolute line numbering). Falls back to the
+    // aggregate facade capability for a backend that has no per-session notion of it at all.
+    const absoluteLines =
+      this.opts.backend.capabilitiesOf?.(sessionId)?.absoluteLines ??
+      this.opts.backend.capabilities.absoluteLines;
     const keys = screen.lines.map(lineKey);
     const rows = screen.rows;
     let delta = 0;
@@ -216,7 +244,7 @@ export class ScreenTracker {
       } else if (backendDelta > 0) {
         delta = backendDelta;
         s.reported += backendDelta;
-      } else if (!this.opts.backend.capabilities.absoluteLines && !forceSnapshotAll) {
+      } else if (!absoluteLines && !forceSnapshotAll) {
         const changedRowForRow = countChanged(keys, s.lastKeys, 0);
         if (changedRowForRow > SNAPSHOT_RATIO * rows) {
           const k = detectOverlap(keys, s.lastKeys, rows);

@@ -27,7 +27,10 @@ export interface PairingManagerOptions {
   computerName: string;
   accent: string;
   relayUrl: string;
-  sendCtrl: (m: CtrlMessage) => void;
+  /** Returns whether the message actually reached the relay (false while unauthenticated/offline)
+   * -- `openWindow()`/`readvertise()` log this at debug so a dropped `pairing-open` is diagnosable
+   * without ever logging the code/gate itself. */
+  sendCtrl: (m: CtrlMessage) => boolean;
   savePairing: (p: Pairing) => void;
   confirm: (phoneFp: string, name: string) => Promise<boolean>;
   /** Number of pairings already persisted for this computer; checked against MAX_PAIRINGS. */
@@ -90,13 +93,41 @@ export class PairingManager {
       g: toBase64Url(gate),
     });
     // Round-trip validation: throws if relayUrl/computerName/etc. don't satisfy the QR
-    // schema (wss:// scheme, no trailing slash, non-empty name, ...), before anything is
-    // sent or any state is mutated.
-    parseQr(qrText);
+    // schema (no trailing slash, non-empty name, ...), before anything is sent or any state
+    // is mutated. `allowInsecure` here only widens the accepted *scheme* to include ws://;
+    // whether ws:// is actually allowed for this relayUrl was already decided upstream (CLI
+    // `--relay` / `config set relay --insecure`) before it ever reached this class.
+    parseQr(qrText, { allowInsecure: true });
     this.window = { code, gate, expiresAt, failures: 0 };
-    this.opts.sendCtrl({ type: "pairing-open", gateHash: sha256(gate), expiresAt });
+    // C1/I1: on first run the relay socket has not authenticated yet (this send is dropped), and
+    // a mid-window reconnect drops it again -- `readvertise()` is what actually gets the window
+    // to the relay in both cases. This send is still worth attempting: it is a no-op cost when it
+    // fails, and it means a window opened *while already authenticated* reaches the relay
+    // immediately rather than waiting for the next `auth-ok`.
+    const sent = this.opts.sendCtrl({ type: "pairing-open", gateHash: sha256(gate), expiresAt });
+    this.log.debug(
+      sent
+        ? "pairing-open sent"
+        : "pairing-open not sent yet; will re-advertise once authenticated",
+    );
     this.log.info("pairing window opened");
     return { qrText, expiresAt };
+  }
+
+  /**
+   * Re-sends `pairing-open` for the current window, if any is open and unexpired -- called after
+   * every `auth-ok` (C1: first connect; I1: a reconnect mid-window) so the relay's window row
+   * always matches what the printed QR promises. No-op when there is no window, or it has already
+   * expired (the next `tick()` will close it locally).
+   */
+  readvertise(): void {
+    if (!this.window || this.now() >= this.window.expiresAt) return;
+    const sent = this.opts.sendCtrl({
+      type: "pairing-open",
+      gateHash: sha256(this.window.gate),
+      expiresAt: this.window.expiresAt,
+    });
+    this.log.debug(sent ? "pairing window re-advertised" : "pairing window re-advertise dropped");
   }
 
   closeWindow(): void {

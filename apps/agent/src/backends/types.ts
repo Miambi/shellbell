@@ -75,4 +75,8 @@ export interface TerminalBackend {
   on(handler: (e: BackendEvent) => void): () => void;
   tmuxWindowIds?(): Set<string>;
   tmuxWindowIdOf?(nativeId: string): string | undefined;
+  /** Per-session capabilities, when this backend can distinguish (e.g. `BackendRegistry` fanning
+   * out to distinct member backends by id prefix). Optional: a single-backend implementation can
+   * omit it, and callers fall back to the aggregate `capabilities` getter above. */
+  capabilitiesOf?(sessionId: string): Capabilities | null;
 }

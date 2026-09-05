@@ -30,13 +30,18 @@ function setup(
   const sent: CtrlMessage[] = [];
   const saved: Pairing[] = [];
   let t = 0;
+  /** Simulates `RelayClient.sendCtrl`'s return value: false while "unauthenticated"/offline. */
+  let sendOk = true;
   const pm = new PairingManager({
     identity,
     fp,
     computerName: "MBP",
     accent: "emerald",
     relayUrl: "wss://relay.test",
-    sendCtrl: (m) => sent.push(m),
+    sendCtrl: (m) => {
+      sent.push(m);
+      return sendOk;
+    },
     savePairing: (p) => saved.push(p),
     confirm,
     pairingCount: () => 0,
@@ -53,6 +58,9 @@ function setup(
     advance: (ms: number) => {
       t += ms;
       pm.tick();
+    },
+    setSendOk: (ok: boolean) => {
+      sendOk = ok;
     },
   };
 }
@@ -268,5 +276,63 @@ describe("PairingManager", () => {
   it("openWindow() throws if the built QR payload does not round-trip (bad relay URL)", () => {
     const { pm } = setup(async () => true, { relayUrl: "http://relay.test" });
     expect(() => pm.openWindow()).toThrow();
+  });
+
+  it("openWindow() accepts a ws:// relayUrl (dev override) and the QR carries it (I2)", () => {
+    const { pm, sent } = setup(async () => true, { relayUrl: "ws://localhost:8787" });
+    const { qrText } = pm.openWindow();
+    expect(parseQr(qrText, { allowInsecure: true }).r).toBe("ws://localhost:8787");
+    expect(sent[0]).toMatchObject({ type: "pairing-open" });
+  });
+
+  describe("readvertise() (C1/I1: pairing window survives auth/reconnect)", () => {
+    it("re-sends pairing-open for the still-open window once sendCtrl can succeed", () => {
+      const { pm, sent, setSendOk } = setup(async () => true);
+      // Simulate the relay socket not being authenticated yet: openWindow()'s own send is
+      // dropped, exactly like RelayClient.sendCtrl returning false pre-auth.
+      setSendOk(false);
+      const { qrText, expiresAt } = pm.openWindow();
+      const qr = parseQr(qrText);
+      expect(sent).toHaveLength(1); // the dropped attempt was still made once
+      // Now the relay authenticates -- Agent's auth-ok handler calls readvertise().
+      setSendOk(true);
+      pm.readvertise();
+      const opened = sent.filter((m) => m.type === "pairing-open");
+      expect(opened).toHaveLength(2);
+      const last = opened.at(-1);
+      if (last?.type !== "pairing-open") throw new Error();
+      expect(last.gateHash).toEqual(sha256(fromBase64Url(qr.g)));
+      expect(last.expiresAt).toBe(expiresAt);
+      expect(pm.isOpen).toBe(true);
+    });
+
+    it("readvertising after a reconnect still lets a phone pair (regression for I1)", async () => {
+      const { pm, sent, setSendOk } = setup(async () => true);
+      const { qrText } = pm.openWindow();
+      // A mid-window reconnect: the socket drops (nothing more sent) and comes back.
+      setSendOk(false);
+      setSendOk(true);
+      pm.readvertise();
+      expect(sent.filter((m) => m.type === "pairing-open")).toHaveLength(2);
+      const req = phoneRequest(qrText);
+      await pm.handleRequest(req.msg);
+      expect(sent.some((m) => m.type === "pairing-response")).toBe(true);
+    });
+
+    it("does not re-send once the window has expired", () => {
+      const { pm, sent, advance } = setup(async () => true);
+      pm.openWindow();
+      advance(300_001);
+      expect(pm.isOpen).toBe(false);
+      const before = sent.length;
+      pm.readvertise();
+      expect(sent).toHaveLength(before); // no additional pairing-open
+    });
+
+    it("is a no-op when no window has ever been opened", () => {
+      const { pm, sent } = setup(async () => true);
+      pm.readvertise();
+      expect(sent).toHaveLength(0);
+    });
   });
 });

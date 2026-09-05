@@ -2,10 +2,12 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fingerprint, generateIdentity, parseQr } from "@shellbell/protocol";
 import { describe, expect, it, vi } from "vitest";
 import {
   chooseConfirm,
   resolveConfigSet,
+  resolveRelayOverride,
   shutdown,
   socketAlive,
   tailFile,
@@ -14,6 +16,7 @@ import {
 import { loadConfig, paths } from "../src/config.js";
 import { ControlServer, controlPairSession } from "../src/control.js";
 import { createLogger } from "../src/log.js";
+import { PairingManager } from "../src/pairing.js";
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "sb-cli-"));
@@ -72,6 +75,58 @@ describe("validateRelayUrl", () => {
   });
   it("rejects unparseable urls", () => {
     expect(validateRelayUrl("not a url", false)).toMatch(/valid URL/);
+  });
+});
+
+describe("resolveRelayOverride (I2: --relay must steer both the socket and the QR)", () => {
+  const cfg = loadConfig(paths(tmpDir()));
+
+  it("passes the config through unchanged when no override is given", () => {
+    const r = resolveRelayOverride(cfg, undefined);
+    expect("cfg" in r && r.cfg).toBe(cfg);
+    expect("cfg" in r && r.warning).toBeUndefined();
+  });
+
+  it("accepts a wss:// override with no warning", () => {
+    const r = resolveRelayOverride(cfg, "wss://relay.example.com");
+    expect("cfg" in r && r.cfg.relayUrl).toBe("wss://relay.example.com");
+    expect("cfg" in r && r.warning).toBeUndefined();
+  });
+
+  it("accepts a ws:// override (unlike `config set relay`, no --insecure needed) with a warning", () => {
+    const r = resolveRelayOverride(cfg, "ws://localhost:8787");
+    expect("cfg" in r && r.cfg.relayUrl).toBe("ws://localhost:8787");
+    expect("cfg" in r && r.warning).toMatch(/insecure relay URL; for local testing only/);
+  });
+
+  it("rejects a URL with a scheme other than ws(s)://", () => {
+    const r = resolveRelayOverride(cfg, "http://relay.example.com");
+    expect("error" in r && r.error).toMatch(/wss:\/\//);
+  });
+
+  it("rejects an unparseable URL", () => {
+    const r = resolveRelayOverride(cfg, "not a url");
+    expect("error" in r && r.error).toMatch(/valid URL/);
+  });
+
+  it("the resolved cfg.relayUrl is what the printed QR's `r` actually carries (I2 regression)", () => {
+    const r = resolveRelayOverride(cfg, "ws://localhost:8787");
+    if (!("cfg" in r)) throw new Error();
+    const identity = generateIdentity();
+    const pm = new PairingManager({
+      identity,
+      fp: fingerprint(identity.ed25519.pub),
+      computerName: "MBP",
+      accent: "emerald",
+      relayUrl: r.cfg.relayUrl, // exactly what `buildAgent` passes to `Agent`'s PairingManager
+      sendCtrl: () => true,
+      savePairing: () => {},
+      confirm: async () => true,
+      pairingCount: () => 0,
+      log: createLogger({ stdout: false }),
+    });
+    const { qrText } = pm.openWindow();
+    expect(parseQr(qrText, { allowInsecure: true }).r).toBe("ws://localhost:8787");
   });
 });
 
@@ -238,5 +293,35 @@ describe("shutdown", () => {
     expect(existsSync(sock)).toBe(false);
     expect(existsSync(pid)).toBe(false);
     expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it("runs the optional cleanup callback (e.g. cancelling buildAgent's first-connect retry timer)", async () => {
+    const dir = tmpDir();
+    const agent = fakeAgent();
+    const server = new ControlServer(
+      join(dir, "agent.sock"),
+      agent as never,
+      createLogger({ stdout: false }),
+    );
+    await server.start();
+    const cleanup = vi.fn();
+    const exit = vi.fn();
+    await shutdown(agent as never, server, exit, cleanup);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it("minor: force-exits after a 5s hard deadline if control.stop() never settles, so Ctrl-C can't hang forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const agent = fakeAgent();
+      const hangingControl = { stop: () => new Promise<void>(() => {}) };
+      const exit = vi.fn();
+      void shutdown(agent as never, hangingControl as never, exit);
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(exit).toHaveBeenCalledWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

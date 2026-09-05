@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
   authMessage,
+  bytesEqual,
   type CtrlMessage,
   type CtrlMessageOf,
   decodeEnvelope,
@@ -10,10 +11,16 @@ import {
   fingerprint,
   parseCtrl,
   randomBytes,
+  sha256,
   toBase64Url,
   verify,
 } from "@shellbell/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
+
+interface PairingWindow {
+  gateHash: Uint8Array;
+  expiresAt: number;
+}
 
 interface Peer {
   ws: WebSocket;
@@ -37,6 +44,11 @@ export class FakeRelay {
   pairing = new Map<string, Peer>();
   received: { from: Peer; env: Envelope }[] = [];
   ctrlFromAgent: CtrlMessage[] = [];
+  /** Mirrors the shipped relay's `pairing_window` row (computer-do.ts onAuth's pairing branch):
+   * set by the agent's `pairing-open`, cleared by `pairing-close`. A `role:"pairing"` auth is
+   * gated on this exactly like the real relay -- this is what catches a `pairing-open` that never
+   * reached the relay (C1) instead of admitting every pairing socket unconditionally. */
+  window: PairingWindow | null = null;
   /** Total sockets ever accepted, including ones that never completed auth. */
   connections = 0;
   connectionTimes: number[] = [];
@@ -129,6 +141,20 @@ export class FakeRelay {
                 name: msg.name,
               });
           } else {
+            // pairing: mirror apps/relay/src/computer-do.ts onAuth's pairing branch -- admit only
+            // a socket that presents the gate for the currently open, unexpired window. This is
+            // the exact gate C1 needed: a `pairing-open` that never reached the relay (or reached
+            // a stale window) must fail here instead of silently admitting the phone.
+            const win = this.window;
+            const gateOk =
+              win !== null &&
+              Date.now() < win.expiresAt &&
+              msg.gate !== undefined &&
+              bytesEqual(sha256(msg.gate), win.gateHash);
+            if (!gateOk) {
+              this.sendCtrl(ws, { type: "auth-fail", reason: "no-window" });
+              return ws.close(4001, "no-window");
+            }
             this.pairing.set(msg.fp, peer);
             this.sendCtrl(ws, okMsg);
           }
@@ -141,7 +167,11 @@ export class FakeRelay {
             const waiter = this.waiters.shift();
             if (waiter) waiter(msg);
             else this.ctrlBuffer.push(msg);
-            if (msg.type === "pairing-response" || msg.type === "pairing-reject") {
+            if (msg.type === "pairing-open") {
+              this.window = { gateHash: msg.gateHash, expiresAt: msg.expiresAt };
+            } else if (msg.type === "pairing-close") {
+              this.window = null;
+            } else if (msg.type === "pairing-response" || msg.type === "pairing-reject") {
               const target = this.pairing.get(msg.phoneFp);
               if (target) this.sendCtrl(target.ws, msg);
             }
@@ -156,7 +186,13 @@ export class FakeRelay {
       });
       ws.on("close", () => {
         if (!peer) return;
-        if (peer.role === "agent" && this.agent === peer) this.agent = null;
+        if (peer.role === "agent" && this.agent === peer) {
+          this.agent = null;
+          // Mirrors apps/relay/src/computer-do.ts webSocketClose: "Agent offline -> pairing
+          // window closed" (spec §12). Without this, the I1 regression test below would pass
+          // even without `readvertise()`, since the stale window would simply survive the drop.
+          this.window = null;
+        }
         if (peer.role === "phone" && this.phones.get(peer.fp) === peer) {
           this.phones.delete(peer.fp);
           if (this.agent)

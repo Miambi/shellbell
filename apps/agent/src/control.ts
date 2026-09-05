@@ -92,11 +92,20 @@ export class ControlServer {
     }
     if (existsSync(this.sockPath)) unlinkSync(this.sockPath);
     this.server = createServer((socket) => this.handle(socket));
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(this.sockPath, () => resolve());
-    });
-    // §8.2: agent.sock must be 0600. `listen()` creates it as 0777 & ~umask.
+    // §8.2: agent.sock must be 0600. `listen()` creates it as 0777 & ~umask, then `chmodSync`
+    // below narrows it -- but that leaves a window where the socket is momentarily
+    // world-connectable. Tightening the process umask around the call closes that window too
+    // (belt as well as the `chmodSync` brace below; fully mitigated regardless by `~/.shellbell`
+    // already being 0700).
+    const prevUmask = process.umask(0o177);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.server?.once("error", reject);
+        this.server?.listen(this.sockPath, () => resolve());
+      });
+    } finally {
+      process.umask(prevUmask);
+    }
     chmodSync(this.sockPath, 0o600);
   }
 
@@ -264,7 +273,10 @@ export function controlPairSession(
           socket.write(
             `${JSON.stringify({ cmd: "confirm", args: { phoneFp: m.phoneFp, accept } })}\n`,
           ),
-        );
+        )
+        // `askYesNo` never rejects today, but `socket.write` on an already-destroyed socket
+        // throws -- without this the rejection would escape as an unhandled rejection.
+        .catch((e) => handlers.onError(e as Error));
     } else if (m.event === "closed") {
       handlers.onClose();
     } else if (m.ok && m.data?.qrText) handlers.onOpen(m.data.qrText, m.data.expiresAt);

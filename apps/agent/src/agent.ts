@@ -6,6 +6,7 @@ import {
   type Identity,
   type InnerMessage,
   type InnerMessageOf,
+  MAX_PAIRINGS,
   type SessionInfo,
 } from "@shellbell/protocol";
 import type { BackendRegistry } from "./backends/registry.js";
@@ -24,6 +25,9 @@ import { PairingManager } from "./pairing.js";
 import { PhoneLink } from "./phone-link.js";
 import { RelayClient } from "./relay-client.js";
 import { ScreenTracker } from "./screen-tracker.js";
+
+/** Minimum interval between `pairings.json` writes triggered purely by `lastSeenAt` churn. */
+const LAST_SEEN_SAVE_THROTTLE_MS = 60_000;
 
 export interface AgentOptions {
   paths: Paths;
@@ -66,6 +70,10 @@ export class Agent {
    * ack cache, which resends without ever reaching this map.
    */
   private readonly pendingAcks = new Map<string, Promise<InnerMessageOf<"ack"> | null>>();
+  /** Last time each phone's `lastSeenAt` was actually persisted (ms epoch); throttles the
+   * `savePairings` disk write in `attach()` so a phone stuck in a reconnect loop cannot rewrite
+   * `pairings.json` on every attempt. */
+  private readonly lastSeenSavedAt = new Map<string, number>();
   private readonly log: Logger;
 
   constructor(private readonly o: AgentOptions) {
@@ -117,6 +125,11 @@ export class Agent {
         // spec 4.2/8.6: the relay advertises its minimum frame interval; the flush loop must
         // honour it.
         this.tracker.setIntervalMs(Math.max(125, m.minFrameMs));
+        // C1/I1: the relay's own pairing-window row does not survive a fresh connection (first
+        // run: this socket was never authenticated when `openPairing()` first sent it) or a
+        // reconnect mid-window (the relay drops the row when the agent socket closes). Re-send it
+        // every time we (re-)authenticate so the printed QR never silently goes stale.
+        this.pairing.readvertise();
       });
     });
     this.relay.on("ctrl", (m) => this.safe("ctrl", () => this.onCtrl(m)));
@@ -251,6 +264,7 @@ export class Agent {
     savePairings(this.o.paths, this.pairings);
     this.relay.sendCtrl({ type: "unpair", phoneFp: p.phoneFp });
     this.dropLinkFor(p.phoneFp);
+    this.lastSeenSavedAt.delete(p.phoneFp);
     return true;
   }
 
@@ -273,6 +287,7 @@ export class Agent {
     this.pairings = this.pairings.filter((x) => x.phoneFp !== phoneFp);
     if (this.pairings.length !== before) savePairings(this.o.paths, this.pairings);
     this.dropLinkFor(phoneFp);
+    this.lastSeenSavedAt.delete(phoneFp);
   }
 
   // ---- relay ctrl ----
@@ -290,7 +305,7 @@ export class Agent {
         // so the tombstones MUST already be applied to `this.pairings` before this send.
         this.relay.sendCtrl({
           type: "pairings-sync",
-          phones: this.pairings.slice(0, 10).map((p) => ({
+          phones: this.pairings.slice(0, MAX_PAIRINGS).map((p) => ({
             phoneFp: p.phoneFp,
             ed25519Pub: fromBase64Url(p.ed25519Pub),
             name: p.name,
@@ -355,7 +370,15 @@ export class Agent {
     this.links.set(connId, link);
     this.connByFp.set(phoneFp, connId);
     pairing.lastSeenAt = new Date().toISOString();
-    savePairings(this.o.paths, this.pairings);
+    // Minor: a phone stuck reconnecting would otherwise rewrite pairings.json on every attempt.
+    // `lastSeenAt` is best-effort telemetry, not correctness-critical, so throttling its persist
+    // is safe -- the in-memory value above is always fresh even when the write is skipped.
+    const now = Date.now();
+    const lastSaved = this.lastSeenSavedAt.get(phoneFp) ?? 0;
+    if (now - lastSaved >= LAST_SEEN_SAVE_THROTTLE_MS) {
+      this.lastSeenSavedAt.set(phoneFp, now);
+      savePairings(this.o.paths, this.pairings);
+    }
   }
 
   // ---- e2e ----
@@ -492,7 +515,11 @@ export class Agent {
             : err instanceof BadWindow
               ? "bad-window"
               : "failed";
-      this.log.warn("inner message failed", { type: msg.type, error, err: String(err) });
+      this.log.warn("inner message failed", {
+        type: msg.type,
+        error,
+        err: err instanceof Error ? err.name : "unknown",
+      });
       return "reqId" in msg ? errAck(msg.reqId, error) : null;
     }
   }
@@ -548,7 +575,7 @@ export class Agent {
       this.sessions = list.map((s) => ({ ...s, state: this.events.stateOf(s.id) }));
       this.broadcast({ type: "sessions", list: this.sessions });
     } catch (err) {
-      this.log.warn("listSessions failed", { err: String(err) });
+      this.log.warn("listSessions failed", { err: err instanceof Error ? err.name : "unknown" });
     }
   }
 }

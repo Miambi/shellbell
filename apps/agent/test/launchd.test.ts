@@ -1,5 +1,12 @@
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isGlobalInstall, LABEL, plistFor } from "../src/launchd.js";
+import { isGlobalInstall, LABEL, plistFor, prepareLogFile } from "../src/launchd.js";
+
+function tmpDir(): string {
+  return mkdtempSync(join(tmpdir(), "sb-launchd-"));
+}
 
 describe("plistFor", () => {
   it("emits a launchd plist with the label, argv, PATH and log paths", () => {
@@ -45,5 +52,22 @@ describe("isGlobalInstall", () => {
   it("is false when run through npx's cache", () => {
     process.argv[1] = "/Users/x/.npm/_npx/abc123/node_modules/shellbell/dist/cli.js";
     expect(isGlobalInstall()).toBe(false);
+  });
+});
+
+describe("prepareLogFile (minor: launchd would otherwise create agent.log under the default umask)", () => {
+  it("creates a missing log file as 0600", () => {
+    const log = join(tmpDir(), "agent.log");
+    prepareLogFile(log);
+    expect(existsSync(log)).toBe(true);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+  });
+
+  it("chmods an existing, looser-mode log file to 0600 without touching its content", () => {
+    const log = join(tmpDir(), "agent.log");
+    writeFileSync(log, "existing log content\n", { mode: 0o644 });
+    prepareLogFile(log);
+    expect(statSync(log).mode & 0o777).toBe(0o600);
+    expect(readFileSync(log, "utf8")).toBe("existing log content\n");
   });
 });

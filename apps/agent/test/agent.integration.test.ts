@@ -145,8 +145,12 @@ interface PairTarget {
  */
 async function pairAndConnect(
   target: PairTarget = { agent, relay, computerFp },
+  /** When given, pair against this already-opened window instead of calling `openPairing()`
+   * again -- lets a test prove that a window opened earlier (e.g. before auth, or before a
+   * reconnect) is the one a phone actually pairs against. */
+  preOpened?: { qrText: string },
 ): Promise<ConnectedPhone> {
-  const { qrText } = target.agent.openPairing();
+  const { qrText } = preOpened ?? target.agent.openPairing();
   const qr = parseQr(qrText, { allowInsecure: true });
   const pairSock = new PhoneSocket();
   await pairSock.connect(target.relay.url, target.computerFp, "pairing", fromBase64Url(qr.g));
@@ -623,5 +627,99 @@ describe("Agent end to end (fake relay, fake backend)", () => {
       agent2.stop();
       await relay2.stop();
     }
+  });
+
+  it(
+    "C1: a window opened before the relay authenticates is silently dropped, then re-advertised " +
+      "by readvertise() on auth-ok -- a phone can still pair against it",
+    async () => {
+      const p2 = paths(mkdtempSync(join(tmpdir(), "sb-agent-c1-")));
+      const { identity: id2, fp: fp2 } = loadOrCreateIdentity(p2);
+      const relay2 = new FakeRelay(fp2);
+      await relay2.start();
+      const registry2 = new BackendRegistry(log);
+      registry2.add(new FakeBackend());
+      const config2 = { ...loadConfig(p2), computerName: "MBP2" };
+      const agent2 = new Agent({
+        paths: p2,
+        config: config2,
+        identity: id2,
+        fp: fp2,
+        registry: registry2,
+        log,
+        confirm: async () => true,
+        appVersion: "0.0.1-test",
+        relayUrlOverride: relay2.url,
+      });
+      try {
+        // The exact race C1 fixes: `start()` kicks off a not-yet-authenticated relay connection,
+        // and `openPairing()` runs synchronously in the same tick -- its own `pairing-open` send
+        // is dropped (RelayClient.sendCtrl returns false pre-auth).
+        agent2.start();
+        const { qrText } = agent2.openPairing();
+        expect(relay2.window).toBeNull(); // proves the race: nothing has reached the relay yet
+
+        await waitFor(() => agent2.relayOnline);
+        // Agent's auth-ok handler calls pairing.readvertise(); the relay should see the window
+        // without anyone calling openPairing() a second time.
+        await waitFor(() => relay2.window !== null);
+
+        const ph = await pairAndConnect(
+          { agent: agent2, relay: relay2, computerFp: fp2 },
+          { qrText },
+        );
+        expect(agent2.pairingList.map((p) => p.phoneFp)).toContain(ph.fp);
+        ph.ws.close();
+      } finally {
+        agent2.stop();
+        await relay2.stop();
+      }
+    },
+  );
+
+  it(
+    "I1: the relay drops the agent mid-window; on reconnect the window is re-advertised and " +
+      "pairing still succeeds against the original QR",
+    async () => {
+      const { qrText } = agent.openPairing();
+      await waitFor(() => relay.window !== null);
+
+      relay.dropAgent();
+      await waitFor(() => !agent.relayOnline);
+      // FakeRelay mirrors the shipped relay: an agent disconnect closes the window row.
+      await waitFor(() => relay.window === null);
+
+      // RelayClient reconnects on its own backoff (default ~1s + jitter).
+      await waitFor(() => agent.relayOnline, 8000);
+      await waitFor(() => relay.window !== null, 8000);
+
+      const ph = await pairAndConnect(undefined, { qrText });
+      expect(agent.pairingList.map((p) => p.phoneFp)).toContain(ph.fp);
+      ph.ws.close();
+    },
+  );
+
+  it("throttles the lastSeenAt-only savePairings write across a fast phone reconnect loop (minor)", async () => {
+    const ph = await pairAndConnect();
+    const spy = vi.spyOn(configModule, "savePairings");
+    spy.mockClear();
+    // Simulate a phone stuck reconnecting: the relay announces the same phoneFp connecting again
+    // under a fresh connId, twice in immediate succession -- well within the throttle window that
+    // the just-completed real connect above already started.
+    relay.sendToAgent({
+      type: "phone-connected",
+      phoneFp: ph.fp,
+      connId: "retry-1",
+      name: "iPhone",
+    });
+    relay.sendToAgent({
+      type: "phone-connected",
+      phoneFp: ph.fp,
+      connId: "retry-2",
+      name: "iPhone",
+    });
+    await waitFor(() => agent.linkForPhone(ph.fp)?.connId === "retry-2");
+    expect(spy).not.toHaveBeenCalled();
+    ph.ws.close();
   });
 });

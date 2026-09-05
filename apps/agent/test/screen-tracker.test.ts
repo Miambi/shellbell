@@ -1,5 +1,6 @@
 import { applyDiff, applySnapshot, type InnerMessage, type ScreenState } from "@shellbell/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BackendRegistry } from "../src/backends/registry.js";
 import { SessionGone } from "../src/backends/types.js";
 import { createLogger, type Logger } from "../src/log.js";
 import { ScreenTracker } from "../src/screen-tracker.js";
@@ -408,5 +409,86 @@ describe("ScreenTracker", () => {
       const screen = await backend.getScreen("S");
       expect(state.lines).toEqual(screen.lines);
     });
+  });
+});
+
+describe("processScreen guards the last viewer unsubscribing mid-getScreen (minor: rrOffset NaN)", () => {
+  it("does not corrupt rrOffset when the only viewer leaves while getScreen is still in flight", async () => {
+    let releaseGate: () => void = () => {};
+    backend.getScreenGate = new Promise((r) => {
+      releaseGate = r;
+    });
+    tracker.setViewed("p1", "S");
+    // Drive tick() directly rather than racing vitest's fake-timer flushing against the gated
+    // getScreen promise below -- deterministic regardless of how advanceTimersByTimeAsync
+    // schedules microtasks.
+    const tickPromise = (tracker as unknown as { tick: () => Promise<void> }).tick();
+    tracker.setViewed("p1", null); // the only viewer unsubscribes mid-`getScreen`
+    releaseGate();
+    await tickPromise;
+    // processScreen must have bailed out before touching rrOffset: nothing to send, no viewers.
+    expect(sent).toHaveLength(0);
+    // A NaN rrOffset (the pre-fix bug) would wedge the round-robin math forever; a fresh viewer
+    // must still get a normal snapshot on the very next tick.
+    tracker.setViewed("p2", "S");
+    await flush();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.msg.type).toBe("screen.snapshot");
+  });
+});
+
+describe("per-backend absoluteLines via BackendRegistry.capabilitiesOf (minor: was AND-ed across all backends)", () => {
+  it("runs overlap detection only for the backend whose own capability says absoluteLines: false", async () => {
+    const iterm = new FakeBackend("iterm2");
+    iterm.addSession("A", { rows: 3, lines: ["a", "b", "c"], scrollbackTotal: 10 });
+    const tmux = new FakeBackend("tmux");
+    tmux.capabilities = { ...tmux.capabilities, absoluteLines: false };
+    tmux.addSession("B", { rows: 3, lines: ["a", "b", "c"], scrollbackTotal: 10 });
+
+    const registry = new BackendRegistry(log);
+    registry.add(iterm);
+    registry.add(tmux);
+    // Sanity: the old facade-wide AND would report `false` for every session once any backend
+    // (tmux) lacks absoluteLines -- exactly the bug this fix removes from the tracker's path.
+    expect(registry.capabilities.absoluteLines).toBe(false);
+    expect(registry.capabilitiesOf("iterm2:A")?.absoluteLines).toBe(true);
+    expect(registry.capabilitiesOf("tmux:B")?.absoluteLines).toBe(false);
+
+    const localSent: { conn: string; msg: InnerMessage }[] = [];
+    const t = new ScreenTracker({
+      backend: registry,
+      sink: (conn, msg) => localSent.push({ conn, msg }),
+      log,
+      now: () => Date.now(),
+    });
+    t.start();
+    try {
+      t.setViewed("v-iterm", "iterm2:A");
+      t.setViewed("v-tmux", "tmux:B");
+      await vi.advanceTimersByTimeAsync(130);
+      localSent.length = 0;
+
+      // Saturated: scrollbackTotal stays flat while content shifts by one row. A real iTerm2
+      // session never actually looks like this (its absolute counter keeps climbing), but forcing
+      // it here isolates which code path processScreen took for each session.
+      iterm.saturated = true;
+      tmux.saturated = true;
+      iterm.appendLine("A", "d");
+      tmux.appendLine("B", "d");
+      t.markDirty("iterm2:A");
+      t.markDirty("tmux:B");
+      await vi.advanceTimersByTimeAsync(130);
+
+      const itermMsg = localSent.find((s) => s.conn === "v-iterm")?.msg;
+      const tmuxMsg = localSent.find((s) => s.conn === "v-tmux")?.msg;
+      // iterm2 (absoluteLines: true): overlap detection is skipped, so the tracker can't tell
+      // this is just a scroll -- it falls back to a full re-snapshot.
+      expect(itermMsg?.type).toBe("screen.snapshot");
+      // tmux (absoluteLines: false): overlap detection runs and finds the one-row shift.
+      if (tmuxMsg?.type !== "screen.diff") throw new Error(`expected diff, got ${tmuxMsg?.type}`);
+      expect(tmuxMsg.scroll).toBe(1);
+    } finally {
+      t.stop();
+    }
   });
 });
