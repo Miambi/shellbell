@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { bytesToHex, hexToBytes, toBase64Url, utf8 } from "../src/bytes.js";
 import {
+  authMessage,
   deriveConnKey,
   derivePairKey,
   derivePskKey,
@@ -39,8 +40,9 @@ const frame = sealWithNonce(
   utf8(plaintext),
   frameAd(fpP, fpC, conn.connTag, 1),
 );
-const authNonce = toBase64Url(new Uint8Array(32).fill(0x99));
-const authMsg = `shellbell-auth-v1|conn-abc|phone|${fpP}|${authNonce}`;
+const nonceBytes = new Uint8Array(32).fill(0x99);
+const authNonce = toBase64Url(nonceBytes);
+const authMsg = authMessage("conn-abc", "phone", fpP, nonceBytes);
 
 const vectors: Vectors = {
   v: 1,

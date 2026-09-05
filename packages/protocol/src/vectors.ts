@@ -1,5 +1,6 @@
-import { bytesToHex, hexToBytes, utf8 } from "./bytes.js";
+import { bytesToHex, fromBase64Url, hexToBytes, utf8 } from "./bytes.js";
 import {
+  authMessage,
   deriveConnKey,
   derivePairKey,
   derivePskKey,
@@ -89,7 +90,12 @@ export function runVectorChecks(vec: Vectors): { name: string; ok: boolean }[] {
         ),
       ) === vec.frame.plaintext,
   );
-  const authMsg = `shellbell-auth-v1|${vec.auth.connId}|${vec.auth.role}|${vec.phone.fp}|${vec.auth.nonce}`;
+  const authMsg = authMessage(
+    vec.auth.connId,
+    vec.auth.role,
+    vec.phone.fp,
+    fromBase64Url(vec.auth.nonce),
+  );
   check(
     "auth signature",
     () =>
