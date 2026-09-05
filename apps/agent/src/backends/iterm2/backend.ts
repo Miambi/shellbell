@@ -27,6 +27,7 @@ import {
   PromptMonitorMode,
   PromptMonitorRequestSchema,
   SendTextRequestSchema,
+  SendTextResponse_Status,
   SplitPaneRequest_SplitDirection,
   SplitPaneRequestSchema,
   type SplitTreeNode,
@@ -50,6 +51,13 @@ interface Native {
   tmuxWindowId?: string;
 }
 
+const UNAVAILABLE_HINT =
+  "iTerm2 → Settings → General → Magic → ✓ Enable Python API, then run `shellbell` again.";
+
+function errName(err: unknown): string {
+  return err instanceof Error ? err.name : "unknown";
+}
+
 export class ITerm2Backend implements TerminalBackend {
   readonly name = "iterm2" as const;
   readonly capabilities: Capabilities = {
@@ -70,6 +78,13 @@ export class ITerm2Backend implements TerminalBackend {
   private attempt = 0;
   private retryTimer: NodeJS.Timeout | null = null;
   private closed = false;
+
+  // Single-flight layout refresh: at most one `runApplyLayout` executes at a time. A layout
+  // that arrives while one is in flight replaces `layoutDirty` (only the latest is kept) and
+  // is picked up as exactly one more refresh once the current one completes.
+  private layoutBusy = false;
+  private layoutDirty: ListSessionsResponse | null = null;
+  private layoutRefresh: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly client: ITerm2Client,
@@ -98,7 +113,7 @@ export class ITerm2Backend implements TerminalBackend {
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       void this.connect().catch((err) => {
-        this.log.warn("iTerm2 reconnect failed", { err: String(err) });
+        this.log.warn("iTerm2 reconnect failed", { error: errName(err) });
         this.scheduleReconnect();
       });
     }, delay);
@@ -110,37 +125,43 @@ export class ITerm2Backend implements TerminalBackend {
       try {
         await this.client.connect();
       } catch (err) {
-        throw new BackendUnavailable(
-          String(err),
-          "iTerm2 → Settings → General → Magic → ✓ Enable Python API, then run `shellbell` again.",
-        );
+        throw new BackendUnavailable(String(err), UNAVAILABLE_HINT);
       }
     }
-    this.attempt = 0;
-    for (const t of [
-      NotificationType.NOTIFY_ON_LAYOUT_CHANGE,
-      NotificationType.NOTIFY_ON_NEW_SESSION,
-      NotificationType.NOTIFY_ON_TERMINATE_SESSION,
-      NotificationType.NOTIFY_ON_FOCUS_CHANGE,
-    ]) {
-      await this.client.request({
-        case: "notificationRequest",
-        value: create(NotificationRequestSchema, { subscribe: true, notificationType: t }),
+    // The socket handshake succeeding does not mean iTerm2's API is actually usable (the
+    // Python API toggle can still reject every RPC) -- `attempt` is only reset once the full
+    // post-handshake sequence below succeeds, and any failure here is surfaced the same way
+    // as a handshake failure: BackendUnavailable with the same actionable hint.
+    try {
+      for (const t of [
+        NotificationType.NOTIFY_ON_LAYOUT_CHANGE,
+        NotificationType.NOTIFY_ON_NEW_SESSION,
+        NotificationType.NOTIFY_ON_TERMINATE_SESSION,
+        NotificationType.NOTIFY_ON_FOCUS_CHANGE,
+      ]) {
+        await this.client.request({
+          case: "notificationRequest",
+          value: create(NotificationRequestSchema, { subscribe: true, notificationType: t }),
+        });
+      }
+      const ls = await this.client.request({
+        case: "listSessionsRequest",
+        value: create(ListSessionsRequestSchema, {}),
       });
+      if (ls.submessage.case === "listSessionsResponse")
+        await this.applyLayout(ls.submessage.value);
+      const focus = await this.client.request({
+        case: "focusRequest",
+        value: create(FocusRequestSchema, {}),
+      });
+      if (focus.submessage.case === "focusResponse") {
+        for (const n of focus.submessage.value.notifications)
+          if (n.event.case === "session") this.focused = n.event.value;
+      }
+    } catch (err) {
+      throw new BackendUnavailable(String(err), UNAVAILABLE_HINT);
     }
-    const ls = await this.client.request({
-      case: "listSessionsRequest",
-      value: create(ListSessionsRequestSchema, {}),
-    });
-    if (ls.submessage.case === "listSessionsResponse") await this.applyLayout(ls.submessage.value);
-    const focus = await this.client.request({
-      case: "focusRequest",
-      value: create(FocusRequestSchema, {}),
-    });
-    if (focus.submessage.case === "focusResponse") {
-      for (const n of focus.submessage.value.notifications)
-        if (n.event.case === "session") this.focused = n.event.value;
-    }
+    this.attempt = 0;
   }
 
   async close(): Promise<void> {
@@ -151,7 +172,10 @@ export class ITerm2Backend implements TerminalBackend {
   }
 
   async listSessions(): Promise<SessionInfo[]> {
-    return this.order.map((id) => this.toInfo(this.sessions.get(id) as Native));
+    return this.order
+      .map((id) => this.sessions.get(id))
+      .filter((n): n is Native => n !== undefined)
+      .map((n) => this.toInfo(n));
   }
 
   tmuxWindowIds(): Set<string> {
@@ -198,7 +222,8 @@ export class ITerm2Backend implements TerminalBackend {
         includeStyles: true,
       }),
     });
-    if (res.submessage.case !== "getBufferResponse") throw new SessionGone(sessionId);
+    if (res.submessage.case !== "getBufferResponse" || res.submessage.value.status !== 0)
+      throw new SessionGone(sessionId);
     const lines = res.submessage.value.contents.map(lineContentsToLine);
     const oldestAvailable = lines.length < before - start ? before - lines.length : 0;
     return { lines, oldestAvailable };
@@ -209,8 +234,11 @@ export class ITerm2Backend implements TerminalBackend {
       case: "sendTextRequest",
       value: create(SendTextRequestSchema, { session: sessionId, text, suppressBroadcast: true }),
     });
-    if (res.submessage.case !== "sendTextResponse" || res.submessage.value.status !== 0)
-      throw new SessionGone(sessionId);
+    if (res.submessage.case !== "sendTextResponse") throw new SessionGone(sessionId);
+    const status = res.submessage.value.status;
+    if (status === SendTextResponse_Status.SESSION_NOT_FOUND) throw new SessionGone(sessionId);
+    if (status !== SendTextResponse_Status.OK)
+      throw new Error(`sendText failed: ${SendTextResponse_Status[status]}`);
   }
 
   async createSession(where: CreateWhere): Promise<string> {
@@ -263,7 +291,13 @@ export class ITerm2Backend implements TerminalBackend {
   // ---- internals ----
 
   private emit(e: BackendEvent): void {
-    for (const h of this.handlers) h(e);
+    for (const h of this.handlers) {
+      try {
+        h(e);
+      } catch (err) {
+        this.log.warn("event handler failed", { error: errName(err) });
+      }
+    }
   }
 
   private toInfo(n: Native): SessionInfo {
@@ -284,7 +318,25 @@ export class ITerm2Backend implements TerminalBackend {
     };
   }
 
-  private async applyLayout(layout: ListSessionsResponse): Promise<void> {
+  /** Coalescing single-flight wrapper around `runApplyLayout` -- see `layoutBusy`/`layoutDirty`. */
+  private applyLayout(layout: ListSessionsResponse): Promise<void> {
+    this.layoutDirty = layout;
+    if (this.layoutBusy) return this.layoutRefresh;
+    this.layoutBusy = true;
+    this.layoutRefresh = this.drainLayout();
+    return this.layoutRefresh;
+  }
+
+  private async drainLayout(): Promise<void> {
+    while (this.layoutDirty) {
+      const layout = this.layoutDirty;
+      this.layoutDirty = null;
+      await this.runApplyLayout(layout);
+    }
+    this.layoutBusy = false;
+  }
+
+  private async runApplyLayout(layout: ListSessionsResponse): Promise<void> {
     const next = new Map<string, Native>();
     const order: string[] = [];
     const windows = [...layout.windows].sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
@@ -300,7 +352,7 @@ export class ITerm2Backend implements TerminalBackend {
               const prev = this.sessions.get(id);
               next.set(id, {
                 id,
-                title: prev?.title ?? s.title ?? "Session",
+                title: prev?.title || s.title || "Session",
                 cwd: prev?.cwd,
                 cols: s.gridSize?.width ?? 80,
                 rows: s.gridSize?.height ?? 24,
@@ -325,62 +377,70 @@ export class ITerm2Backend implements TerminalBackend {
     this.emit({ type: "layout-changed" });
   }
 
+  /**
+   * Subscribes to a session's notifications and seeds its title/cwd exactly once -- runs only
+   * the first time a session id is seen (spec 8.5.3: `variable_changed_notification` keeps
+   * title/cwd fresh afterwards, so re-fetching on every LayoutChange is both wasteful and racy).
+   */
   private async ensureSession(id: string): Promise<void> {
-    const n = this.sessions.get(id);
-    if (!n) return;
-    if (!this.subscribed.has(id)) {
-      this.subscribed.add(id);
-      const subs = [
+    if (this.subscribed.has(id)) return;
+    this.subscribed.add(id);
+    const subs = [
+      create(NotificationRequestSchema, {
+        session: id,
+        subscribe: true,
+        notificationType: NotificationType.NOTIFY_ON_SCREEN_UPDATE,
+      }),
+      create(NotificationRequestSchema, {
+        session: id,
+        subscribe: true,
+        notificationType: NotificationType.NOTIFY_ON_PROMPT,
+        arguments: {
+          case: "promptMonitorRequest",
+          value: create(PromptMonitorRequestSchema, {
+            modes: [
+              PromptMonitorMode.PROMPT,
+              PromptMonitorMode.COMMAND_START,
+              PromptMonitorMode.COMMAND_END,
+            ],
+          }),
+        },
+      }),
+      ...["session.name", "session.path"].map((name) =>
         create(NotificationRequestSchema, {
           session: id,
           subscribe: true,
-          notificationType: NotificationType.NOTIFY_ON_SCREEN_UPDATE,
-        }),
-        create(NotificationRequestSchema, {
-          session: id,
-          subscribe: true,
-          notificationType: NotificationType.NOTIFY_ON_PROMPT,
+          notificationType: NotificationType.NOTIFY_ON_VARIABLE_CHANGE,
           arguments: {
-            case: "promptMonitorRequest",
-            value: create(PromptMonitorRequestSchema, {
-              modes: [
-                PromptMonitorMode.PROMPT,
-                PromptMonitorMode.COMMAND_START,
-                PromptMonitorMode.COMMAND_END,
-              ],
+            case: "variableMonitorRequest",
+            value: create(VariableMonitorRequestSchema, {
+              name,
+              scope: VariableScope.SESSION,
+              identifier: id,
             }),
           },
         }),
-        ...["session.name", "session.path"].map((name) =>
-          create(NotificationRequestSchema, {
-            session: id,
-            subscribe: true,
-            notificationType: NotificationType.NOTIFY_ON_VARIABLE_CHANGE,
-            arguments: {
-              case: "variableMonitorRequest",
-              value: create(VariableMonitorRequestSchema, {
-                name,
-                scope: VariableScope.SESSION,
-                identifier: id,
-              }),
-            },
-          }),
-        ),
-      ];
-      for (const s of subs) {
-        try {
-          await this.client.request({ case: "notificationRequest", value: s });
-        } catch (err) {
-          this.log.warn("subscribe failed", { session: id.slice(0, 8), err: String(err) });
-        }
+      ),
+    ];
+    for (const s of subs) {
+      try {
+        await this.client.request({ case: "notificationRequest", value: s });
+      } catch (err) {
+        this.log.warn("subscribe failed", { session: id.slice(0, 8), error: errName(err) });
       }
     }
+    // The session may have been removed (terminate-session) while the subscription round
+    // trips above were in flight -- re-check before touching it, and again after the variable
+    // fetch's own awaits, rather than trusting a reference captured before any `await`.
+    if (!this.sessions.has(id)) return;
     const [name, path] = await Promise.all([
       this.variable(id, "session.name"),
       this.variable(id, "session.path"),
     ]);
-    if (name) n.title = name;
-    if (path) n.cwd = path;
+    const cur = this.sessions.get(id);
+    if (!cur) return;
+    if (name) cur.title = name;
+    if (path) cur.cwd = path;
   }
 
   private async variable(id: string, name: string): Promise<string | undefined> {
@@ -430,7 +490,9 @@ export class ITerm2Backend implements TerminalBackend {
       return;
     }
     if (n.layoutChangedNotification?.listSessionsResponse) {
-      void this.applyLayout(n.layoutChangedNotification.listSessionsResponse);
+      void this.applyLayout(n.layoutChangedNotification.listSessionsResponse).catch((err) => {
+        this.log.warn("layout refresh failed", { error: errName(err) });
+      });
       return;
     }
     if (n.newSessionNotification?.sessionId) {
@@ -439,6 +501,9 @@ export class ITerm2Backend implements TerminalBackend {
         .then((ls) => {
           if (ls.submessage.case === "listSessionsResponse")
             return this.applyLayout(ls.submessage.value);
+        })
+        .catch((err) => {
+          this.log.warn("new-session layout refresh failed", { error: errName(err) });
         });
       this.emit({ type: "session-added", sessionId: n.newSessionNotification.sessionId });
       return;
