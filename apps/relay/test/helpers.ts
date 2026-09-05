@@ -42,26 +42,44 @@ export async function connect(computerFp: string): Promise<Conn> {
   ws.accept();
   ws.binaryType = "arraybuffer";
   const queue: Envelope[] = [];
-  const waiters: ((e: Envelope) => void)[] = [];
+  interface Waiter {
+    resolve(e: Envelope): void;
+    reject(err: Error): void;
+  }
+  const waiters: Waiter[] = [];
   ws.addEventListener("message", (ev) => {
     if (typeof ev.data === "string") return;
     const env = decodeEnvelope(new Uint8Array(ev.data as ArrayBuffer));
     const w = waiters.shift();
-    if (w) w(env);
+    if (w) w.resolve(env);
     else queue.push(env);
   });
   const closed = new Promise<{ code: number }>((resolve) => {
-    ws.addEventListener("close", (ev) => resolve({ code: ev.code }));
+    ws.addEventListener("close", (ev) => {
+      resolve({ code: ev.code });
+      for (const w of waiters.splice(0)) w.reject(new Error("socket closed"));
+    });
   });
   const next = (timeoutMs = 2000) =>
     new Promise<Envelope>((resolve, reject) => {
       const q = queue.shift();
       if (q) return resolve(q);
-      const t = setTimeout(() => reject(new Error("timeout waiting for frame")), timeoutMs);
-      waiters.push((e) => {
-        clearTimeout(t);
-        resolve(e);
-      });
+      const waiter: Waiter = {
+        resolve: (e) => {
+          clearTimeout(t);
+          resolve(e);
+        },
+        reject: (err) => {
+          clearTimeout(t);
+          reject(err);
+        },
+      };
+      const t = setTimeout(() => {
+        const i = waiters.indexOf(waiter);
+        if (i !== -1) waiters.splice(i, 1);
+        waiter.reject(new Error("timeout waiting for frame"));
+      }, timeoutMs);
+      waiters.push(waiter);
     });
   return {
     ws,

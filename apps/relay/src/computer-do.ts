@@ -126,8 +126,12 @@ export class ComputerDO extends DurableObject<Env> {
       if (env.t === "ctrl") await this.onCtrl(ws, att, env);
       else this.onE2E(ws, att, env, message);
     } catch (err) {
-      if (err instanceof ProtocolError) ws.close(4400, err.code);
-      else throw err;
+      if (err instanceof ProtocolError) {
+        ws.close(4400, err.code);
+      } else {
+        console.error("do error", err instanceof Error ? err.name : "unknown");
+        ws.close(1011, "internal error");
+      }
     }
   }
 
@@ -140,6 +144,11 @@ export class ComputerDO extends DurableObject<Env> {
         (s) => (s.deserializeAttachment() as Attachment).connId !== att.connId,
       );
       if (otherAgent) return;
+      this.ctx.storage.sql.exec(
+        "UPDATE computer SET last_seen = ? WHERE fp = ?",
+        Date.now(),
+        this.fp,
+      );
       this.closeWindow();
       for (const p of this.socketsByState("phone")) {
         this.sendCtrl(p, {
@@ -206,7 +215,9 @@ export class ComputerDO extends DurableObject<Env> {
     const computer = this.ctx.storage.sql
       .exec<{ last_seen: number }>("SELECT last_seen FROM computer WHERE fp = ?", this.fp)
       .toArray()[0];
-    if (computer) earliest = Math.min(earliest, computer.last_seen + GC_AFTER_MS);
+    if (computer && !this.agentSocket()) {
+      earliest = Math.min(earliest, computer.last_seen + GC_AFTER_MS);
+    }
     if (earliest === Number.POSITIVE_INFINITY) return;
     await this.ctx.storage.setAlarm(Math.max(now + 1000, earliest));
   }
@@ -261,8 +272,10 @@ export class ComputerDO extends DurableObject<Env> {
         now,
         now,
       );
-      for (const old of this.socketsByState("agent")) old.close(4005, "superseded");
       this.setState(ws, { ...att, state: "agent", fp: msg.fp, name: msg.name });
+      for (const old of this.socketsByState("agent")) {
+        if (old !== ws) old.close(4005, "superseded");
+      }
       this.sendCtrl(ws, {
         type: "auth-ok",
         role: "agent",
@@ -297,8 +310,10 @@ export class ComputerDO extends DurableObject<Env> {
         now,
         msg.fp,
       );
-      for (const old of this.phoneSockets(msg.fp)) old.close(4005, "superseded");
       this.setState(ws, { ...att, state: "phone", fp: msg.fp, name: msg.name });
+      for (const old of this.phoneSockets(msg.fp)) {
+        if (old !== ws) old.close(4005, "superseded");
+      }
       const agent = this.agentSocket();
       this.sendCtrl(ws, {
         type: "auth-ok",
