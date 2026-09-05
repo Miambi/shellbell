@@ -18,7 +18,7 @@ describe("qr payload", () => {
   it("round-trips", () => {
     expect(parseQr(encodeQr(good))).toEqual(good);
   });
-  it("rejects fp/e mismatch, non-wss, bad version, trailing slash", () => {
+  it("rejects fp/e mismatch, non-wss, bad version, trailing slash, credentials", () => {
     expect(() => parseQr(encodeQr({ ...good, c: "a".repeat(26) }))).toThrow(/malformed/);
     expect(() => parseQr(encodeQr({ ...good, r: "ws://relay" }))).toThrow(/malformed/);
     expect(
@@ -29,6 +29,9 @@ describe("qr payload", () => {
     );
     expect(() => parseQr(JSON.stringify({ ...good, v: 2 }))).toThrow(/malformed/);
     expect(() => parseQr("not json")).toThrow(/malformed/);
+    expect(() => parseQr(encodeQr({ ...good, r: "wss://user:pass@relay.shellbell.app" }))).toThrow(
+      /malformed/,
+    );
   });
   it("builds the socket url", () => {
     expect(relayWsUrl("wss://relay.shellbell.app", good.c)).toBe(

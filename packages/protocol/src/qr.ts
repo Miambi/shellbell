@@ -32,6 +32,8 @@ export function parseQr(text: string, opts: { allowInsecure?: boolean } = {}): Q
   if (!r.success) throw new ProtocolError("malformed", `qr: ${z.prettifyError(r.error)}`);
   const p = r.data;
   const url = new URL(p.r);
+  if (url.username || url.password)
+    throw new ProtocolError("malformed", "qr: relay url must not contain credentials");
   if (url.protocol !== "wss:" && !(opts.allowInsecure && url.protocol === "ws:")) {
     throw new ProtocolError("malformed", "qr: relay must be wss://");
   }

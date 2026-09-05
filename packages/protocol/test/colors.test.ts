@@ -17,4 +17,11 @@ describe("colors", () => {
     expect(colorToHex(2, "#abcdef")).toBe(TERMINAL16[2]);
     expect(colorToHex(undefined, "#abcdef")).toBe("#abcdef");
   });
+  it("clamps xterm256Hex out-of-range indices", () => {
+    expect(xterm256Hex(300)).toBe(xterm256Hex(255));
+    expect(xterm256Hex(-4)).toBe(xterm256Hex(0));
+  });
+  it("clamps colorToHex RGB components", () => {
+    expect(colorToHex([300, -5, 1.6], "#000000")).toBe("#ff0002");
+  });
 });

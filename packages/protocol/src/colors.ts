@@ -23,10 +23,12 @@ export const TERMINAL16: readonly string[] = [
 const CUBE = [0, 95, 135, 175, 215, 255];
 
 function hex2(n: number): string {
+  n = Math.max(0, Math.min(255, Math.round(n)));
   return n.toString(16).padStart(2, "0");
 }
 
 export function xterm256Hex(index: number, theme16: readonly string[] = TERMINAL16): string {
+  index = Math.max(0, Math.min(255, Math.round(index)));
   if (index < 16) return theme16[index] ?? "#ffffff";
   if (index < 232) {
     const i = index - 16;
