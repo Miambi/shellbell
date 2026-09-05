@@ -12,6 +12,16 @@ import { ScreenTracker } from "../src/screen-tracker.js";
 import { FakeHerdr } from "./fakes/fake-herdr.js";
 import { waitFor } from "./fakes/wait.js";
 
+/** Like waitFor, for async predicates. */
+async function waitForAsync(fn: () => Promise<boolean>, ms = 3000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await fn()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error("waitForAsync: condition not met in time");
+}
+
 const log = createLogger({ stdout: false });
 const snapshot = () =>
   JSON.parse(
@@ -123,8 +133,15 @@ describe("herdr through the agent's units", () => {
     server.reply("session.snapshot", snapshot);
     await server.start();
     await waitFor(() => h.registry.connected().some((b) => b.name === "herdr"), 5000);
-    // term_a is still blocked, and it is a first sighting again -> state yes, ring no.
-    expect((await h.sessions()).find((s) => s.id === "herdr:term_a")?.state).toBe("blocked");
+    // term_a is still blocked, and it is a first sighting again -> state yes, ring no. The
+    // re-adopted snapshot lands asynchronously after the reconnect, so wait for the state to
+    // appear rather than asserting on the first tick (slow CI runners).
+    let state: string | undefined;
+    await waitForAsync(async () => {
+      state = (await h.sessions()).find((s) => s.id === "herdr:term_a")?.state;
+      return state === "blocked";
+    }, 5000);
+    expect(state).toBe("blocked");
     expect(h.rings).toEqual([]);
   });
 
