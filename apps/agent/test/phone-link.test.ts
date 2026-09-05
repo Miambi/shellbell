@@ -38,6 +38,15 @@ function setup() {
   return { link, phone, sent };
 }
 
+/** Flips a bit in a sealed envelope's ciphertext so AEAD decryption fails, without touching `n`. */
+function corrupt(env: Envelope): Envelope {
+  const body = env.body as { n: Uint8Array; c: Uint8Array };
+  const c = new Uint8Array(body.c);
+  const last = c.length - 1;
+  c[last] = (c[last] as number) ^ 0xff;
+  return { ...env, body: { n: body.n, c } };
+}
+
 describe("PhoneLink", () => {
   it("completes the handshake and exchanges frames both ways", () => {
     const { link, phone, sent } = setup();
@@ -83,6 +92,122 @@ describe("PhoneLink", () => {
       reqId: "r1",
       ok: true,
     });
+  });
+
+  it("does not count an unrecognised-but-authentic inner message as a decrypt failure", () => {
+    const { link, phone, sent } = setup();
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[0] as Envelope);
+
+    // 25 frames that decrypt fine but carry an inner type this agent does not recognise.
+    for (let i = 0; i < 25; i++) {
+      const unknown = phone.seal({ type: "future.thing", i } as unknown as InnerMessage);
+      expect(link.handleEnvelope(unknown)).toBeNull();
+    }
+    expect(link.broken).toBe(false);
+
+    let broken = 0;
+    link.onBroken = () => broken++;
+    // If the 25 unrecognised messages above had counted, 20 more decrypt failures would already
+    // have broken the link well before this loop finishes.
+    for (let i = 0; i < 19; i++) {
+      expect(
+        link.handleEnvelope(corrupt(phone.seal({ type: "subscribe", sessionId: null }))),
+      ).toBeNull();
+    }
+    expect(link.broken).toBe(false);
+    expect(broken).toBe(0);
+
+    expect(
+      link.handleEnvelope(corrupt(phone.seal({ type: "subscribe", sessionId: null }))),
+    ).toBeNull();
+    expect(link.broken).toBe(true);
+    expect(broken).toBe(1);
+  });
+
+  it("resets the consecutive-failure counter on a decrypt success", () => {
+    const { link, phone, sent } = setup();
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[0] as Envelope);
+    let broken = 0;
+    link.onBroken = () => broken++;
+
+    for (let i = 0; i < 19; i++) {
+      expect(
+        link.handleEnvelope(corrupt(phone.seal({ type: "subscribe", sessionId: null }))),
+      ).toBeNull();
+    }
+    expect(link.broken).toBe(false);
+
+    expect(link.handleEnvelope(phone.seal({ type: "subscribe", sessionId: null }))).not.toBeNull();
+
+    for (let i = 0; i < 19; i++) {
+      expect(
+        link.handleEnvelope(corrupt(phone.seal({ type: "subscribe", sessionId: null }))),
+      ).toBeNull();
+    }
+    expect(link.broken).toBe(false);
+    expect(broken).toBe(0);
+  });
+
+  it("ignores a replayed conn.hello without re-keying the connection", () => {
+    const { link, phone, sent } = setup();
+    const hello = phone.hello();
+    expect(link.handleEnvelope(hello)).toBeNull();
+    phone.acceptHello(sent[0] as Envelope);
+    const msg: InnerMessage = { type: "subscribe", sessionId: null };
+    expect(link.handleEnvelope(phone.seal(msg))).toEqual(msg);
+
+    const sentBefore = sent.length;
+    expect(link.handleEnvelope(hello)).toBeNull(); // replayed hello, same n_p
+    expect(sent.length).toBe(sentBefore); // no new hello reply: it was not re-keyed
+    expect(link.handshaken).toBe(true);
+
+    // the original connection is still alive under the original key
+    const msg2: InnerMessage = { type: "subscribe", sessionId: "s2" };
+    expect(link.handleEnvelope(phone.seal(msg2))).toEqual(msg2);
+  });
+
+  it("resets viewed on re-handshake but not on ordinary frames", () => {
+    const { link, phone, sent } = setup();
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[0] as Envelope);
+    link.viewed = "iterm2:x";
+    link.handleEnvelope(phone.seal({ type: "subscribe", sessionId: "iterm2:x" }));
+    expect(link.viewed).toBe("iterm2:x");
+
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[1] as Envelope);
+    expect(link.viewed).toBeNull();
+  });
+
+  it("bounds the ack cache to 256 entries with FIFO eviction", () => {
+    const { link, phone, sent } = setup();
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[0] as Envelope);
+
+    for (let i = 0; i < 257; i++) {
+      link.rememberAck(`r${i}`, { type: "ack", reqId: `r${i}`, ok: true });
+    }
+
+    // r0 was evicted (the 257th insert pushed the cache over its 256 bound): a duplicate of it
+    // is no longer deduped and comes through as a fresh message.
+    const dupOfEvicted: InnerMessage = {
+      type: "input.line",
+      reqId: "r0",
+      sessionId: "s",
+      text: "ls",
+    };
+    expect(link.handleEnvelope(phone.seal(dupOfEvicted))).toEqual(dupOfEvicted);
+
+    // r256 is still cached: a duplicate is deduped and its cached ack resent instead.
+    const dupOfRecent: InnerMessage = {
+      type: "input.line",
+      reqId: "r256",
+      sessionId: "s",
+      text: "ls",
+    };
+    expect(link.handleEnvelope(phone.seal(dupOfRecent))).toBeNull();
   });
 
   it("marks itself broken after 20 consecutive failures", () => {

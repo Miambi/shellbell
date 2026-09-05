@@ -1,4 +1,5 @@
 import {
+  bytesEqual,
   decodeCbor,
   deriveConnKey,
   E2EBodySchema,
@@ -9,6 +10,7 @@ import {
   type InnerMessage,
   type InnerMessageOf,
   open,
+  ProtocolError,
   parseInner,
   randomBytes,
   seal,
@@ -40,9 +42,15 @@ export class PhoneLink {
   /** Set by the agent when no conn.hello arrived within 10 s; cleared by a late conn.hello. */
   dormant = false;
   viewed: string | null = null;
+  /**
+   * Called once when the link transitions to broken (20 consecutive decrypt failures).
+   * Fires synchronously inside handleEnvelope; the handler must not call back into this
+   * PhoneLink (e.g. via handleEnvelope or send) — doing so would re-enter that call.
+   */
   onBroken?: () => void;
   private kConn: Uint8Array | null = null;
   private connTag = "";
+  private nPhone: Uint8Array | null = null;
   private seqOut = 0;
   private seqIn = 0;
   private failures = 0;
@@ -75,6 +83,13 @@ export class PhoneLink {
           decodeCbor(open(this.opts.kPair, body.data, helloAd(this.phoneFp, this.opts.computerFp))),
         );
         if (inner.type !== "conn.hello") return this.fail("expected conn.hello");
+        // A hello carrying the same phone nonce as the current connection is a replay of a
+        // captured conn.hello (the relay has no way to forge a new one under K_pair): ignore it
+        // rather than tearing down and re-keying a live connection.
+        if (this.nPhone && bytesEqual(inner.n, this.nPhone)) {
+          this.log.debug("duplicate conn.hello ignored");
+          return null;
+        }
         const nAgent = randomBytes(16);
         const d = deriveConnKey(
           this.opts.kPair,
@@ -85,11 +100,13 @@ export class PhoneLink {
         );
         this.kConn = d.kConn;
         this.connTag = d.connTag;
+        this.nPhone = inner.n;
         this.seqOut = 0;
         this.seqIn = 0;
         this.handshaken = true;
         this.dormant = false;
         this.failures = 0;
+        this.viewed = null;
         this.acks.clear();
         const reply = seal(
           this.opts.kPair,
@@ -115,26 +132,34 @@ export class PhoneLink {
       this.log.warn("replayed or reordered frame dropped", { seq: env.seq, last: this.seqIn });
       return null;
     }
-    let inner: InnerMessage;
+    let plaintext: Uint8Array;
     try {
-      inner = parseInner(
-        decodeCbor(
-          open(
-            this.kConn,
-            body.data,
-            frameAd(this.phoneFp, this.opts.computerFp, this.connTag, env.seq),
-          ),
-        ),
+      plaintext = open(
+        this.kConn,
+        body.data,
+        frameAd(this.phoneFp, this.opts.computerFp, this.connTag, env.seq),
       );
     } catch {
       return this.fail("frame decrypt failed");
     }
+    // The frame is authentic (AEAD verified): advance seq and reset the failure counter
+    // regardless of whether its contents parse. Only decrypt failures count toward `broken`
+    // (spec 6.7) — an unrecognised-but-authentic inner message must not.
     this.seqIn = env.seq;
     this.failures = 0;
+    let inner: InnerMessage;
+    try {
+      inner = parseInner(decodeCbor(plaintext));
+    } catch (err) {
+      this.log.warn("inner message rejected", {
+        reason: err instanceof ProtocolError ? err.code : (err as Error).name,
+      });
+      return null;
+    }
     if ("reqId" in inner) {
       const cached = this.acks.get(inner.reqId);
       if (cached) {
-        this.send(cached);
+        if (!this.send(cached)) this.log.debug("could not resend cached ack: link not sendable");
         return null;
       }
     }

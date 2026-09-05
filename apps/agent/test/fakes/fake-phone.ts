@@ -1,6 +1,7 @@
 import {
   decodeCbor,
   deriveConnKey,
+  E2EBodySchema,
   type Envelope,
   encodeCbor,
   fingerprint,
@@ -16,7 +17,7 @@ import {
 
 export class FakePhone {
   readonly fp: string;
-  private nPhone = randomBytes(16);
+  private nPhone!: Uint8Array;
   private kConn: Uint8Array | null = null;
   private connTag = "";
   private seq = 0;
@@ -44,7 +45,7 @@ export class FakePhone {
   }
 
   acceptHello(env: Envelope): void {
-    const body = env.body as { n: Uint8Array; c: Uint8Array };
+    const body = E2EBodySchema.parse(env.body);
     const inner = parseInner(decodeCbor(open(this.kPair, body, helloAd(this.computerFp, this.fp))));
     if (inner.type !== "conn.hello") throw new Error("expected conn.hello");
     const d = deriveConnKey(this.kPair, this.nPhone, inner.n, this.computerFp, this.fp);
@@ -67,7 +68,7 @@ export class FakePhone {
     if (!this.kConn) throw new Error("no kConn");
     if (env.seq <= this.lastSeq) throw new Error("replay");
     this.lastSeq = env.seq;
-    const body = env.body as { n: Uint8Array; c: Uint8Array };
+    const body = E2EBodySchema.parse(env.body);
     return parseInner(
       decodeCbor(open(this.kConn, body, frameAd(this.computerFp, this.fp, this.connTag, env.seq))),
     );
