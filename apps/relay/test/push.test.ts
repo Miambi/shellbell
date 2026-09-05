@@ -53,6 +53,21 @@ async function pairedWithToken(enabled = true) {
 
 const settle = () => new Promise((r) => setTimeout(r, 120));
 
+/**
+ * Polls `check` until it returns true instead of sleeping a fixed duration.
+ * Keeps assertions anchored to an actual condition rather than wall-clock
+ * time, so a slow CI runner just polls a bit longer instead of flaking.
+ */
+async function waitFor(check: () => boolean, timeoutMs = 3000, intervalMs = 10): Promise<void> {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 describe("push text", () => {
   it("formats durations and bodies", () => {
     expect(formatDuration(43_000)).toBe("43s");
@@ -160,7 +175,7 @@ describe("notify → push", () => {
     for (let i = 0; i <= 20; i++) {
       agent.sendCtrl(mac.fp, { type: "notify", sessionId: `s${i}`, kind: "idle" });
     }
-    await new Promise((r) => setTimeout(r, 300));
+    await waitFor(() => calls() >= 20, 3000);
     expect(calls()).toBe(20);
     agent.ws.close();
   });
@@ -171,7 +186,7 @@ describe("notify → push", () => {
     // as attentive while `leaseUntil > now` -- so this really is pushed.
     const { mac, agent, p } = await pairedWithToken();
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "herdr:term_a", kind: "blocked" });
-    await settle();
+    await waitFor(() => sent.length >= 1, 3000);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       body: "An agent is waiting for you",

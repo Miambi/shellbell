@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { agentOnline, connect, TestDevice } from "./helpers.js";
 
+/**
+ * Bounds a promise to `timeoutMs` instead of letting it hang until the
+ * suite's own timeout, so a stuck condition fails fast with a clear message.
+ */
+function bounded<T>(p: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label}: timed out after ${timeoutMs}ms`)), timeoutMs),
+    ),
+  ]);
+}
+
 describe("abuse controls", () => {
   it("oversized frame before auth closes with 4413", async () => {
     const mac = new TestDevice("MBP");
@@ -13,11 +26,16 @@ describe("abuse controls", () => {
   it("flooding ctrl frames trips the token bucket with 4429", async () => {
     const mac = new TestDevice("MBP");
     const { agent } = await agentOnline(mac);
-    for (let i = 0; i < 260; i++) {
+    // The bucket (src/limits.ts) starts with a 200-token burst and refills
+    // at 60/s. A slow CI runner can take over a second to push a tight loop
+    // of frames through, letting the bucket refill as it drains — so send
+    // well past the burst (400, not 260) to still exhaust it even then.
+    for (let i = 0; i < 400; i++) {
       agent.sendCtrl(mac.fp, { type: "pairing-close" });
     }
-    expect((await agent.closed).code).toBe(4429);
-  });
+    const closed = await bounded(agent.closed, 15_000, "flood: waiting for close");
+    expect(closed.code).toBe(4429);
+  }, 20_000);
 
   it("unauthenticated socket is closed by the alarm sweep with 4408", async () => {
     const mac = new TestDevice("MBP");
