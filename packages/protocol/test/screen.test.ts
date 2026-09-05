@@ -55,6 +55,13 @@ describe("runs", () => {
     expect(trimTrailing([{ t: "漢字  ", n: 6 }])).toEqual([{ t: "漢字", n: 4 }]);
     expect(trimTrailing([{ t: "hi   ", bg: 1 }])).toEqual([{ t: "hi   ", bg: 1 }]);
   });
+  it("cascades trimming across multiple empty space-only runs", () => {
+    expect(trimTrailing([{ t: "a  " }, { t: "   " }])).toEqual([{ t: "a" }]);
+    expect(trimTrailing([{ t: "a" }, { t: "  " }, { t: "   " }])).toEqual([{ t: "a" }]);
+  });
+  it("trims only literal spaces, not tabs", () => {
+    expect(trimTrailing([{ t: "x\t" }])).toEqual([{ t: "x\t" }]);
+  });
   it("counts code points and strips styles", () => {
     expect(codePoints("a🚀b")).toBe(3);
     expect(
