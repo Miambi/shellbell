@@ -155,9 +155,13 @@ export class ControlServer {
         }));
       case "unpair":
         return { removed: a.unpair(String(req.args?.target ?? "")) };
-      case "pair-open":
+      case "pair-open": {
+        // Open first: openPairing() may synchronously close a previous window, which broadcasts
+        // `closed` to every registered client -- this client must not be one of them yet.
+        const opened = a.openPairing();
         this.pairClients.add(socket);
-        return a.openPairing();
+        return opened;
+      }
       case "pair-close":
         a.closePairing();
         return {};

@@ -85,6 +85,40 @@ describe("control socket", () => {
     await server.stop();
   });
 
+  it("does not send `closed` to the client whose pair-open re-opened the window", async () => {
+    const sock = newSock();
+    // openPairing() on the real PairingManager closes a previous window first, which broadcasts
+    // `closed` to every registered client. The client that is opening must not be registered yet.
+    let server!: ControlServer;
+    const agent = {
+      ...fakeAgent(),
+      openPairing: () => {
+        server.notifyClosed();
+        return { qrText: "{}", expiresAt: 1 };
+      },
+    };
+    server = new ControlServer(sock, agent as never, createLogger({ stdout: false }));
+    await server.start();
+
+    let closedCount = 0;
+    const opened = new Promise<string>((resolve) => {
+      controlPairSession(sock, {
+        onOpen: (qrText) => resolve(qrText),
+        onRequest: () => Promise.resolve(false),
+        onClose: () => {
+          closedCount += 1;
+        },
+        onError: (e) => {
+          throw e;
+        },
+      });
+    });
+    expect(await opened).toBe("{}");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(closedCount).toBe(0);
+    await server.stop();
+  });
+
   it("streams pair-open requests, resolves pairingConfirm on confirm, and emits closed", async () => {
     const sock = newSock();
     const server = new ControlServer(sock, fakeAgent() as never, createLogger({ stdout: false }));
