@@ -47,8 +47,8 @@ function sanitize<T>(value: T): T {
   const shortHost = host.split(".")[0] ?? host;
   // Paths are replaced as substrings; identifiers (user, host) only at word boundaries so a short
   // hostname such as "mac" cannot corrupt words like "package" inside captured pane text.
-  const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const word = (v: string) => new RegExp(`(?<![A-Za-z0-9_])${escape(v)}(?![A-Za-z0-9_])`, "g");
+  const escapeRegex = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = (v: string) => new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(v)}(?![A-Za-z0-9_])`, "g");
   let text = JSON.stringify(value).split(home).join("/Users/dev");
   if (user) text = text.replace(word(user), "dev");
   text = text.replace(word(host), "<host>");
