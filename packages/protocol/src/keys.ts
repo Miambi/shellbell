@@ -1,8 +1,38 @@
 import { z } from "zod";
 
+const LETTERS = [
+  "a",
+  "b",
+  "c",
+  "d",
+  "e",
+  "f",
+  "g",
+  "h",
+  "i",
+  "j",
+  "k",
+  "l",
+  "m",
+  "n",
+  "o",
+  "p",
+  "q",
+  "r",
+  "s",
+  "t",
+  "u",
+  "v",
+  "w",
+  "x",
+  "y",
+  "z",
+] as const;
+type Letter = (typeof LETTERS)[number];
+type CtrlKey = `ctrl-${Letter}`;
 const ctrl = Object.fromEntries(
-  "abcdefghijklmnopqrstuvwxyz".split("").map((c, i) => [`ctrl-${c}`, String.fromCharCode(i + 1)]),
-) as Record<`ctrl-${string}`, string>;
+  LETTERS.map((c, i) => [`ctrl-${c}`, String.fromCharCode(i + 1)]),
+) as Record<CtrlKey, string>;
 
 export const NAMED_KEYS = {
   enter: "\r",

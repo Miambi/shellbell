@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bytesForKey, NAMED_KEYS, NamedKeySchema } from "../src/keys.js";
+import { bytesForKey, NAMED_KEYS, type NamedKey, NamedKeySchema } from "../src/keys.js";
 
 describe("named keys", () => {
   it("has the documented mappings", () => {
@@ -13,6 +13,9 @@ describe("named keys", () => {
     expect(bytesForKey("f1")).toBe("\x1bOP");
     expect(bytesForKey("f12")).toBe("\x1b[24~");
     expect(bytesForKey("ctrl-space")).toBe("\x00");
+    // compile-time assertion that ctrl-* keys are in NamedKey type
+    const k: NamedKey = "ctrl-c";
+    expect(bytesForKey(k)).toBe("\x03");
   });
   it("every key maps to a non-empty string and the schema matches the table", () => {
     for (const k of NamedKeySchema.options) expect(NAMED_KEYS[k].length).toBeGreaterThan(0);
