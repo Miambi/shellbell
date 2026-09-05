@@ -715,7 +715,7 @@ Published to npm as `shellbell`. `npx shellbell` runs `start`.
 | `shellbell service install` | Requires a global install (`npm i -g shellbell`; refuses under `npx`). Writes `~/Library/LaunchAgents/dev.bilalahmad.shellbell.plist` with `ProgramArguments: [<absolute node path>, <absolute cli path>, "start", "--service"]`, `EnvironmentVariables.PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"`, `RunAtLoad`, `KeepAlive`, logs to `~/.shellbell/agent.log`, then `launchctl bootstrap gui/$UID <plist>`. `uninstall` does `bootout` and deletes the plist. Re-running `install` after an upgrade rewrites the paths. |
 | `shellbell logs [-f]` | Tails `~/.shellbell/agent.log`. |
 | `shellbell config set relay <url>` / `name <name>` / `accent <color>` | Edits `config.json`. |
-| `shellbell doctor` | Checks: iTerm2 running; API socket exists; cookie obtainable; tmux present and ≥ 3.2; relay reachable; identity readable; launchd paths valid; prints fixes. |
+| `shellbell doctor` | Checks: iTerm2 running; API socket exists; cookie obtainable; tmux present and ≥ 3.2; Herdr present and ≥ 0.7.2 (optional — absent is a pass); relay reachable; identity readable; launchd paths valid; prints fixes. |
 
 Global flags: `--relay <url>`, `--json` (for `status`/`devices`), `--verbose`.
 
@@ -727,6 +727,7 @@ Global flags: `--relay <url>`, `--json` (for `status`/`devices`), `--verbose`.
   Relay      wss://relay.shellbell.app   connected
   iTerm2     connected · 7 sessions
   tmux       not running
+  herdr      detecting…            → becomes "connected · N panes" or "not running (optional)"
 
   No phones paired yet. Scan this with the Shellbell app:
 
@@ -1151,7 +1152,7 @@ ranges and emoji presentation ranges; 1 otherwise. The exact range table is in P
   tmux if `tmux -V` succeeds with version ≥ 3.2 and `tmux list-sessions` exits 0.
 - Each detected backend is `connect()`ed independently; a failure in one never affects
   the others. `hello.backends` lists the connected ones — a member that reports
-  `connected: false` (its transport is down, 8.13) is excluded even though it is still
+  `isConnected: false` (its transport is down, 8.13) is excluded even though it is still
   registered; any change to that set triggers a new `hello`.
 - `capabilities` are **per session** where it matters: the tracker asks the registry for
   the owning backend's capabilities (`capabilitiesOf(id)`) rather than an all-backends
@@ -1229,7 +1230,7 @@ window is lost; if the following snapshot fails, the new stream is closed and th
 takes over.
 
 **Disconnect.** When the stream ends or the socket goes away the backend emits `session-removed` for
-every Herdr pane, clears its maps, and reports `connected: false`; the registry excludes a
+every Herdr pane, clears its maps, and reports `isConnected: false`; the registry excludes a
 disconnected member from `hello.backends` and the agent sends a fresh `hello` (8.12). On reconnect
 the panes come back as `session-added` with their initial state, which the event engine treats as a
 first sighting — so an already-blocked agent does not ring for history.
@@ -1255,7 +1256,7 @@ viewing** (`TerminalBackend.setWatched(nativeIds)`, driven by the screen tracker
 `pane.copy_motion` (side-effect free, needs no focus) and compare `content_revision`; on change emit
 `screen-changed`. The interval is **adaptive** — 200 ms while the pane keeps changing, 500 ms after
 5 s unchanged, 1000 ms cap — because every probe is a fresh connection and Herdr spawns a thread per
-connection. An **odd** `content_revision` means a write is in flight: skip it without emitting.
+connection. The 1000 ms cap engages after 15 s unchanged (`SETTLE_SLOW_MS`). An **odd** `content_revision` means a write is in flight: skip it without emitting.
 Non-viewed panes are never polled, which means the 8.8 idle heuristic only runs for Herdr shells
 **while a phone is viewing them**; agent panes are covered by agent state instead, which needs no
 polling.
@@ -1285,7 +1286,7 @@ Never log the text; log lengths.
 
 **Create / focus.** `session.create` with `where.kind = "tab"` → `tab.create {workspace_id,
 focus:false}` (workspace of the reference pane, else the focused one; creating a tab must not steal
-the Mac's focus). `where.kind = "split"` → `pane.split {target_pane_id, direction}` with Shellbell
+the Mac's focus). `where.kind = "split"` → `pane.split {target_pane_id, direction}` (also `focus: false`, so a split never steals the Mac's focus) with Shellbell
 `"vertical"` → Herdr `"right"` and `"horizontal"` → `"down"`: Shellbell's axis names the *divider*,
 matching iTerm2's `SplitPane.VERTICAL` (side-by-side panes), and Herdr's `down` is a horizontal
 divider. Herdr has no left/up split. `focus` → `pane.focus`; only ever from an explicit user action,
@@ -1294,7 +1295,7 @@ because focusing a `done` agent marks it seen and flips it to `idle`. Capabiliti
 absoluteLines: false }`.
 
 **Not running / not installed.** No socket → `BackendUnavailable` with hint
-`Install: curl -fsSL https://herdr.dev/install.sh | sh, then start herdr`. Herdr is **optional**, so
+`Install Herdr: curl -fsSL https://herdr.dev/install.sh | sh, then start it with "herdr".` Herdr is **optional**, so
 `doctor` reports an absent Herdr as a **passing** check ("not installed (optional)") and only fails
 when a Herdr that *is* running is too old or unreachable; when present it prints the version and
 protocol. A pane target that answers `not_found`/`pane_not_found`/`stale_pane_target` triggers the
