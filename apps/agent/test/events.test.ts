@@ -125,4 +125,26 @@ describe("Notifier", () => {
       durationMs: 15_000,
     });
   });
+
+  it("forget() drops rate-limit state, and ring() prunes entries older than 60 s", () => {
+    let t = 0;
+    const n = new Notifier(
+      () => {},
+      createLogger({ stdout: false }),
+      () => t,
+    );
+    n.ring({ sessionId: "S", kind: "prompt" });
+    n.forget("S");
+    expect(n.size).toBe(0);
+    // forgetting clears the rate limit immediately, even within the 60 s window
+    expect(n.ring({ sessionId: "S", kind: "idle" })).toBe(true);
+
+    n.ring({ sessionId: "T", kind: "idle" });
+    n.ring({ sessionId: "U", kind: "idle" });
+    expect(n.size).toBe(3);
+    t = 61_000;
+    // ringing a new session prunes every entry older than 60 s, so the map stays bounded
+    n.ring({ sessionId: "V", kind: "idle" });
+    expect(n.size).toBe(1);
+  });
 });
