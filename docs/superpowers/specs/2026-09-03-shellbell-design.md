@@ -1142,7 +1142,7 @@ sequences (what `capture-pane -e` emits) into runs. Exact behaviour:
 
 `cellWidth(cp: number): 0 | 1 | 2` after Markus Kuhn's `wcwidth`: 0 for combining marks
 (Mn/Me), zero-width joiner/space and variation selectors; 2 for East Asian Wide/Fullwidth
-ranges and emoji presentation ranges; 1 otherwise. The exact range table is in Plan 04.
+ranges and emoji presentation ranges; 1 otherwise. The range table shipped in Plan 01 as `packages/protocol/src/width.ts` (`cellWidth`/`stringCells`, 45 test cases); backends reuse it, Plan 04 adds none.
 `stringCells(s)` sums it over code points (a ZWJ sequence counts its widest element).
 
 ### 8.12 Backend registry (`src/backends/registry.ts`)
