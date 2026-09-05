@@ -12,7 +12,7 @@ export default {
       return Response.json({
         name: "shellbell-relay",
         version: VERSION,
-        docs: "https://github.com/bilal-/shellbell",
+        docs: "https://github.com/Miambi/shellbell",
       });
     }
     if (request.method === "GET" && url.pathname === "/healthz") {
