@@ -235,7 +235,10 @@ describe("RelayClient", () => {
     });
 
     it("does not reset the backoff attempt counter across repeated 4413/4429 closes", async () => {
-      const c = makeClient({ backoffMinMs: 20, backoffMaxMs: 5000 });
+      // Deterministic jitter (Math.random = 0.5 -> zero jitter) and a base delay large enough that
+      // CI scheduling overhead (tens of ms) cannot mask the doubling.
+      const rnd = vi.spyOn(Math, "random").mockReturnValue(0.5);
+      const c = makeClient({ backoffMinMs: 40, backoffMaxMs: 5000 });
       // Reject every raw connection with 4429 before any challenge/auth-ok is ever sent, so nothing
       // can reset the attempt counter except (buggy) special-casing of the close code itself.
       relay.rejectCode = 4429;
@@ -244,12 +247,13 @@ describe("RelayClient", () => {
       relay.rejectCode = null;
       await waitFor(() => c.online);
 
+      rnd.mockRestore();
       const times = relay.connectionTimes;
-      const gap1 = (times[1] as number) - (times[0] as number); // attempt 0 -> raw ~20ms
-      const gap3 = (times[3] as number) - (times[2] as number); // attempt 2 -> raw ~80ms
-      // A correctly-growing backoff should roughly quadruple over two doublings even with +/-20% jitter;
-      // a reset bug would keep every gap pinned near backoffMinMs.
-      expect(gap3).toBeGreaterThan(gap1 * 2);
+      const gap1 = (times[1] as number) - (times[0] as number); // attempt 0 -> 40ms (+ overhead c)
+      const gap3 = (times[3] as number) - (times[2] as number); // attempt 2 -> 160ms (+ overhead c)
+      // Growing backoff: (160 + c) > 1.5 * (40 + c) holds for any scheduling overhead c < 200ms;
+      // a reset bug would keep every gap pinned near backoffMinMs and fail this.
+      expect(gap3).toBeGreaterThan(gap1 * 1.5);
     });
   });
 
