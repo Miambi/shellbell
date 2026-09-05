@@ -1,0 +1,128 @@
+import type { CtrlMessage } from "@shellbell/protocol";
+import { describe, expect, it } from "vitest";
+import { EventEngine } from "../src/events.js";
+import { createLogger } from "../src/log.js";
+import { Notifier } from "../src/notifier.js";
+
+function engine() {
+  let t = 1_000_000;
+  const now = () => t;
+  const e = new EventEngine({
+    notifyMinCommandMs: 10_000,
+    idleQuietMs: 4000,
+    idleMinActiveMs: 1500,
+    now,
+  });
+  const events: string[] = [];
+  const rings: string[] = [];
+  e.on("event", (ev) =>
+    events.push(`${ev.kind}:${ev.sessionId}:${ev.exitCode ?? ""}:${ev.durationMs ?? ""}`),
+  );
+  e.on("ring", (r) => rings.push(`${r.kind}:${r.sessionId}`));
+  /** Advance the clock AND run the 1 s sweep. */
+  const advance = (ms: number) => {
+    t += ms;
+    e.tick();
+  };
+  /** Advance the clock WITHOUT sweeping — models time passing between ticks. */
+  const jump = (ms: number) => {
+    t += ms;
+  };
+  return { e, events, rings, advance, jump, now: () => t };
+}
+
+describe("EventEngine", () => {
+  it("prompt path: command-end emits prompt event; rings only for long commands", () => {
+    const { e, events, rings, advance, now } = engine();
+    e.onBackendEvent({ type: "command-start", sessionId: "S", command: "sleep 1", at: now() });
+    expect(e.stateOf("S")).toBe("running");
+    advance(2000);
+    e.onBackendEvent({ type: "command-end", sessionId: "S", exitCode: 0, at: now() });
+    expect(events).toEqual(["prompt:S:0:2000"]);
+    expect(rings).toEqual([]);
+    e.onBackendEvent({ type: "command-start", sessionId: "S", command: "make", at: now() });
+    advance(12_000);
+    e.onBackendEvent({ type: "command-end", sessionId: "S", exitCode: 2, at: now() });
+    expect(events[1]).toBe("prompt:S:2:12000");
+    expect(rings).toEqual(["prompt:S"]);
+    expect(e.stateOf("S")).toBe("finished");
+    e.onBackendEvent({ type: "prompt", sessionId: "S", at: now() });
+    expect(e.stateOf("S")).toBe("editing");
+  });
+
+  it("idle path: activity ≥1.5 s then quiet ≥4 s → idle event + ring; not while editing; not twice", () => {
+    const { e, events, rings, advance } = engine();
+    e.onBackendEvent({ type: "screen-changed", sessionId: "T" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "T" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "T" });
+    advance(3000);
+    expect(events).toEqual([]);
+    advance(1500);
+    expect(events).toEqual(["idle:T::2000"]);
+    expect(rings).toEqual(["idle:T"]);
+    advance(5000);
+    expect(events.length).toBe(1);
+    // editing suppresses the ring but not the event
+    e.onBackendEvent({ type: "prompt", sessionId: "T", at: 0 });
+    e.onBackendEvent({ type: "screen-changed", sessionId: "T" });
+    advance(2000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "T" });
+    advance(5000);
+    expect(events.length).toBe(2);
+    expect(rings.length).toBe(1);
+  });
+
+  it("idle ring is deduped within 5 s of a prompt ring", () => {
+    const { e, rings, advance, jump, now } = engine();
+    e.onBackendEvent({ type: "command-start", sessionId: "U", command: "x", at: now() });
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    // `jump`, not `advance`: the command is still running, so no sweep may run yet. Ticking here
+    // would legitimately fire an idle ring before the command ended.
+    jump(2000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    jump(11_000);
+    e.onBackendEvent({ type: "command-end", sessionId: "U", exitCode: 0, at: now() });
+    expect(rings).toEqual(["prompt:U"]);
+
+    // The command ended, output resumes, then goes quiet: the idle EVENT fires but the ring is
+    // suppressed because the prompt ring is still inside the dedupe window.
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    jump(2000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    advance(4000);
+    expect(rings).toEqual(["prompt:U"]);
+  });
+
+  it("exit event on session removal, no ring", () => {
+    const { e, events, rings } = engine();
+    e.onBackendEvent({ type: "session-removed", sessionId: "V" });
+    expect(events).toEqual(["exit:V::"]);
+    expect(rings).toEqual([]);
+  });
+});
+
+describe("Notifier", () => {
+  it("sends notify and rate-limits per session for 60 s", () => {
+    let t = 0;
+    const sent: CtrlMessage[] = [];
+    const n = new Notifier(
+      (m) => sent.push(m),
+      createLogger({ stdout: false }),
+      () => t,
+    );
+    expect(n.ring({ sessionId: "S", kind: "prompt", exitCode: 0, durationMs: 15_000 })).toBe(true);
+    expect(n.ring({ sessionId: "S", kind: "idle" })).toBe(false);
+    expect(n.ring({ sessionId: "T", kind: "idle" })).toBe(true);
+    t = 61_000;
+    expect(n.ring({ sessionId: "S", kind: "idle" })).toBe(true);
+    expect(sent[0]).toEqual({
+      type: "notify",
+      sessionId: "S",
+      kind: "prompt",
+      exitCode: 0,
+      durationMs: 15_000,
+    });
+  });
+});
