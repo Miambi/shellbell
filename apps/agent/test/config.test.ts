@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +9,7 @@ import {
   paths,
   saveConfig,
   savePairings,
+  writeSecretFile,
 } from "../src/config.js";
 import { loadOrCreateIdentity } from "../src/identity.js";
 
@@ -48,6 +49,33 @@ describe("config", () => {
     expect(loadPairings(p)[0]?.name).toBe("iPhone");
     expect(JSON.parse(readFileSync(p.pairings, "utf8")).v).toBe(1);
   });
+  it("writeSecretFile is atomic: no leftover temp file, mode 0600", () => {
+    const p = tmp();
+    const file = join(p.dir, "secret.json");
+    writeSecretFile(file, "hello\n");
+    const leftovers = readdirSync(p.dir).filter((f) => f.includes(".tmp-"));
+    expect(leftovers).toEqual([]);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readFileSync(file, "utf8")).toBe("hello\n");
+  });
+  it("loadConfig throws a diagnostic error naming the path on invalid JSON", () => {
+    const p = tmp();
+    loadConfig(p);
+    writeFileSync(p.config, "{ not json");
+    expect(() => loadConfig(p)).toThrow(p.config);
+  });
+  it("loadConfig throws a diagnostic error naming the path on a schema mismatch", () => {
+    const p = tmp();
+    loadConfig(p);
+    writeFileSync(p.config, JSON.stringify({ v: 2 }));
+    expect(() => loadConfig(p)).toThrow(p.config);
+  });
+  it("loadPairings throws a diagnostic error naming the path on invalid JSON", () => {
+    const p = tmp();
+    loadPairings(p);
+    writeFileSync(p.pairings, "{ not json");
+    expect(() => loadPairings(p)).toThrow(p.pairings);
+  });
 });
 
 describe("identity", () => {
@@ -57,5 +85,11 @@ describe("identity", () => {
     const b = loadOrCreateIdentity(p);
     expect(a.fp).toBe(b.fp);
     expect(statSync(p.identity).mode & 0o777).toBe(0o600);
+  });
+  it("throws a diagnostic error naming the path on a corrupt identity file", () => {
+    const p = tmp();
+    loadOrCreateIdentity(p);
+    writeFileSync(p.identity, "{ not json");
+    expect(() => loadOrCreateIdentity(p)).toThrow(p.identity);
   });
 });

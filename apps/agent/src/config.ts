@@ -1,4 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -42,9 +53,50 @@ export function ensureDir(p: Paths): void {
   chmodSync(p.dir, 0o700);
 }
 
+/**
+ * Writes `text` to `path` atomically: the file at `path` is either the old
+ * content or the new content in full, never a partial write. Writes to a
+ * sibling temp file, fsyncs it, then renames over the target. On any
+ * failure the temp file is removed (best effort) and the error is rethrown.
+ */
 export function writeSecretFile(path: string, text: string): void {
-  writeFileSync(path, text, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  const tmp = `${path}.tmp-${process.pid}`;
+  try {
+    const fd = openSync(tmp, "w", 0o600);
+    try {
+      writeSync(fd, text);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // best effort cleanup; the original error is what matters
+    }
+    throw err;
+  }
+}
+
+/**
+ * Reads and JSON-parses `path`, throwing a diagnostic `Error` naming the
+ * file (never its content) if it cannot be read or is not valid JSON.
+ */
+export function readJsonFile(path: string): unknown {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    throw new Error(`shellbell: cannot read ${path}: ${(err as Error).message}`);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`shellbell: ${path} is not valid JSON: ${(err as Error).message}`);
+  }
 }
 
 export const AgentConfigSchema = z.object({
@@ -77,7 +129,11 @@ export function loadConfig(p: Paths): AgentConfig {
     saveConfig(p, cfg);
     return cfg;
   }
-  return AgentConfigSchema.parse(JSON.parse(readFileSync(p.config, "utf8")));
+  const result = AgentConfigSchema.safeParse(readJsonFile(p.config));
+  if (!result.success) {
+    throw new Error(`shellbell: invalid config at ${p.config}: ${z.prettifyError(result.error)}`);
+  }
+  return result.data;
 }
 
 export function saveConfig(p: Paths, cfg: AgentConfig): void {
@@ -101,7 +157,13 @@ const PairingsFile = z.object({ v: z.literal(1), phones: z.array(PairingSchema) 
 export function loadPairings(p: Paths): Pairing[] {
   ensureDir(p);
   if (!existsSync(p.pairings)) return [];
-  return PairingsFile.parse(JSON.parse(readFileSync(p.pairings, "utf8"))).phones;
+  const result = PairingsFile.safeParse(readJsonFile(p.pairings));
+  if (!result.success) {
+    throw new Error(
+      `shellbell: invalid pairings at ${p.pairings}: ${z.prettifyError(result.error)}`,
+    );
+  }
+  return result.data.phones;
 }
 
 export function savePairings(p: Paths, phones: Pairing[]): void {
