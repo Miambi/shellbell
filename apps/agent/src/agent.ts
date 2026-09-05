@@ -170,11 +170,13 @@ export class Agent {
     this.relay.start();
     this.tracker.start();
     this.tick = setInterval(() => {
-      this.events.tick();
-      this.pairing.tick();
-      this.sweepHandshakes();
+      this.safe("tick", () => {
+        this.events.tick();
+        this.pairing.tick();
+        this.sweepHandshakes();
+      });
     }, 1000);
-    void this.refreshSessions();
+    this.safe("refresh-sessions", () => this.refreshSessions());
   }
 
   stop(): void {
