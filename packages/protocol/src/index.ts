@@ -9,4 +9,5 @@ export * from "./keys.js";
 export * from "./qr.js";
 export * from "./screen.js";
 export * from "./sgr.js";
+export * from "./vectors.js";
 export * from "./width.js";
