@@ -43,7 +43,9 @@ export class BackendRegistry implements TerminalBackend {
       createSession: or("createSession"),
       focus: or("focus"),
       history: or("history"),
-      absoluteLines: all.every((c) => c.absoluteLines),
+      // `Array.every` on an empty array is vacuously true; with no backends connected there is no
+      // basis to claim absolute line numbering, so an empty registry must report `false` here.
+      absoluteLines: all.length > 0 && all.every((c) => c.absoluteLines),
     };
   }
 
@@ -80,22 +82,54 @@ export class BackendRegistry implements TerminalBackend {
   async connect(): Promise<void> {}
   async close(): Promise<void> {
     await Promise.all([...this.members.values()].map((b) => b.close()));
+    for (const unsub of this.unsubs.values()) unsub();
+    this.unsubs.clear();
+    this.members.clear();
   }
 
   async listSessions(): Promise<SessionInfo[]> {
-    const out: SessionInfo[] = [];
     const iterm = this.members.get("iterm2");
     const tmux = this.members.get("tmux");
-    const hidden = iterm?.tmuxWindowIds?.() ?? new Set<string>();
-    if (iterm) for (const s of await iterm.listSessions()) out.push(withPrefix("iterm2", s));
-    if (tmux) {
-      for (const s of await tmux.listSessions()) {
-        const w = tmux.tmuxWindowIdOf?.(s.id);
-        if (w && hidden.has(w)) continue;
-        out.push(withPrefix("tmux", s));
+    let hidden = new Set<string>();
+    if (iterm) {
+      try {
+        hidden = iterm.tmuxWindowIds?.() ?? new Set<string>();
+      } catch (err) {
+        this.log.warn("tmuxWindowIds failed; tmux panes will not be de-duped this round", {
+          err: err instanceof Error ? err.name : String(err),
+        });
       }
     }
+    // spec 8.12/15: one backend's failure must never affect the other -- settle each member's
+    // `listSessions()` independently, log the failure, and return whatever the survivors have.
+    const [itermSessions, tmuxSessions] = await Promise.all([
+      this.safeListSessions(iterm, "iterm2"),
+      this.safeListSessions(tmux, "tmux"),
+    ]);
+    const out: SessionInfo[] = [];
+    for (const s of itermSessions) out.push(withPrefix("iterm2", s));
+    for (const s of tmuxSessions) {
+      const w = tmux?.tmuxWindowIdOf?.(s.id);
+      if (w && hidden.has(w)) continue;
+      out.push(withPrefix("tmux", s));
+    }
     return out;
+  }
+
+  private async safeListSessions(
+    backend: TerminalBackend | undefined,
+    name: BackendName,
+  ): Promise<SessionInfo[]> {
+    if (!backend) return [];
+    try {
+      return await backend.listSessions();
+    } catch (err) {
+      this.log.warn("listSessions failed for backend; returning the other backends' sessions", {
+        backend: name,
+        err: err instanceof Error ? err.name : String(err),
+      });
+      return [];
+    }
   }
 
   private target(id: string): { backend: TerminalBackend; native: string } {

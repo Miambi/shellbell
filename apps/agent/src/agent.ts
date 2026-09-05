@@ -36,6 +36,8 @@ export interface AgentOptions {
   appVersion: string;
   relay?: RelayClient;
   relayUrlOverride?: string;
+  /** spec §12: "old exits with a message" when a newer agent process supersedes this one. */
+  onSuperseded?: () => void;
 }
 
 export class Agent {
@@ -52,6 +54,14 @@ export class Agent {
   private sessions: SessionInfo[] = [];
   private tick: NodeJS.Timeout | null = null;
   private sessionsDebounce: NodeJS.Timeout | null = null;
+  /**
+   * reqId currently executing, keyed by `${connId}:${reqId}`, resolving to the ack that will
+   * eventually be sent. Lets a duplicate that arrives *before* the first finishes wait for and
+   * re-send that same ack instead of re-executing the side effect (spec 7.4: at-most-once).
+   * A duplicate that arrives *after* the first finishes is instead handled by `PhoneLink`'s own
+   * ack cache, which resends without ever reaching this map.
+   */
+  private readonly pendingAcks = new Map<string, Promise<InnerMessageOf<"ack"> | null>>();
   private readonly log: Logger;
 
   constructor(private readonly o: AgentOptions) {
@@ -98,25 +108,60 @@ export class Agent {
       log: o.log,
     });
     this.relay.on("auth-ok", (m) => {
-      // spec 4.2/8.6: the relay advertises its minimum frame interval; the flush loop must honour it.
-      this.tracker.setIntervalMs(Math.max(125, m.minFrameMs));
+      this.safe("auth-ok", () => {
+        // spec 4.2/8.6: the relay advertises its minimum frame interval; the flush loop must
+        // honour it.
+        this.tracker.setIntervalMs(Math.max(125, m.minFrameMs));
+      });
     });
-    this.relay.on("ctrl", (m) => void this.onCtrl(m));
-    this.relay.on("e2e", (env) => this.onE2E(env));
+    this.relay.on("ctrl", (m) => this.safe("ctrl", () => this.onCtrl(m)));
+    this.relay.on("e2e", (env) => this.safe("e2e", () => this.onE2E(env)));
     this.relay.on("down", () => {
-      for (const connId of this.links.keys()) this.tracker.dropViewer(connId);
-      this.links.clear();
-      this.connByFp.clear();
+      this.safe("down", () => {
+        for (const connId of this.links.keys()) this.tracker.dropViewer(connId);
+        this.links.clear();
+        this.connByFp.clear();
+      });
     });
-    // spec: the relay closed us with 4005 (superseded by a newer agent) -- there is no reconnect
-    // coming (RelayClient itself stops retrying), so just log it; `down` above already tore down
-    // the phone links.
+    // spec §12: "Duplicate agent process: New wins; old exits with a message." The relay closed us
+    // with 4005 (superseded by a newer agent) -- there is no reconnect coming (RelayClient itself
+    // stops retrying), so shut everything down and let the host (Task 11's CLI) print the message
+    // and exit. `down` above already tore down the phone links.
     this.relay.on("superseded", () => {
-      this.log.warn("relay connection superseded by a newer agent instance; not reconnecting");
+      this.safe("superseded", () => {
+        this.log.warn("relay connection superseded by a newer agent instance; stopping");
+        this.stop();
+        this.o.onSuperseded?.();
+      });
     });
-    o.registry.on((e) => this.onBackendEvent(e));
-    this.events.on("event", (ev) => this.broadcast(ev));
-    this.events.on("ring", (r) => this.notifier.ring(r));
+    o.registry.on((e) => this.safe("backend-event", () => this.onBackendEvent(e)));
+    this.events.on("event", (ev) => this.safe("events-event", () => this.broadcast(ev)));
+    this.events.on("ring", (r) =>
+      this.safe("events-ring", () => {
+        this.notifier.ring(r);
+      }),
+    );
+  }
+
+  /**
+   * Runs a fire-and-forget event handler (sync or async) so neither a synchronous throw nor a
+   * rejected promise ever escapes uncaught -- a disk write failing mid-handler (e.g. `savePairings`
+   * during `unpaired`) must be logged and leave the agent running, never crash the process or
+   * surface as an unhandled rejection.
+   */
+  private safe(where: string, fn: () => void | Promise<void>): void {
+    try {
+      const result = fn();
+      if (result && typeof result.then === "function") {
+        result.catch((err: unknown) => this.logHandlerFailure(where, err));
+      }
+    } catch (err) {
+      this.logHandlerFailure(where, err);
+    }
+  }
+
+  private logHandlerFailure(where: string, err: unknown): void {
+    this.log.error("handler failed", { where, error: err instanceof Error ? err.name : "unknown" });
   }
 
   // ---- lifecycle ----
@@ -137,6 +182,10 @@ export class Agent {
     this.tick = null;
     if (this.sessionsDebounce) clearTimeout(this.sessionsDebounce);
     this.sessionsDebounce = null;
+    this.pairing.closeWindow();
+    for (const connId of this.links.keys()) this.tracker.dropViewer(connId);
+    this.links.clear();
+    this.connByFp.clear();
     this.tracker.stop();
     this.relay.stop();
   }
@@ -188,6 +237,7 @@ export class Agent {
   }
 
   unpair(fpOrName: string): boolean {
+    if (!fpOrName) return false; // guard: `startsWith("")` would otherwise match the first pairing
     const p = this.pairings.find((x) => x.phoneFp.startsWith(fpOrName) || x.name === fpOrName);
     if (!p) return false;
     this.pairings = this.pairings.filter((x) => x !== p);
@@ -303,7 +353,7 @@ export class Agent {
 
   // ---- e2e ----
 
-  private onE2E(env: Envelope): void {
+  private onE2E(env: Envelope): void | Promise<void> {
     // Envelopes carry the phone's fp, so resolve the live connId through the side index.
     const connId = this.connByFp.get(env.from);
     const link = connId === undefined ? undefined : this.links.get(connId);
@@ -320,37 +370,75 @@ export class Agent {
       });
       link.send({ type: "sessions", list: this.sessions });
     }
-    if (msg) void this.onInner(link, msg);
+    // Returned (not fire-and-forgotten) so the caller's `safe()` wrapper catches a rejection.
+    return msg ? this.onInner(link, msg) : undefined;
   }
 
+  /**
+   * Dispatches one inner message. Messages that carry a `reqId` are deduped exactly-once (spec
+   * 7.4): the reqId is reserved in `pendingAcks` *before* the side effect runs, so a duplicate
+   * arriving while the first is still in flight awaits the same execution and gets the same ack
+   * resent, rather than re-running `execute()`. A duplicate that arrives *after* the first
+   * finishes never reaches here at all -- `PhoneLink.handleEnvelope` already resends its own
+   * cached ack and returns null.
+   */
   private async onInner(link: PhoneLink, msg: InnerMessage): Promise<void> {
-    const ack = (
-      reqId: string,
-      ok: boolean,
-      extra: { error?: string; sessionId?: string } = {},
-    ) => {
-      const a: InnerMessageOf<"ack"> = { type: "ack", reqId, ok, ...extra };
-      link.rememberAck(reqId, a);
-      link.send(a);
-    };
+    if (!("reqId" in msg)) {
+      await this.execute(link, msg);
+      return;
+    }
+    const key = `${link.connId}:${msg.reqId}`;
+    const inflight = this.pendingAcks.get(key);
+    if (inflight) {
+      const ack = await inflight;
+      if (ack) link.send(ack);
+      return;
+    }
+    const p = this.execute(link, msg);
+    this.pendingAcks.set(key, p);
+    try {
+      const ack = await p;
+      if (ack) {
+        link.rememberAck(msg.reqId, ack);
+        link.send(ack);
+      }
+    } finally {
+      this.pendingAcks.delete(key);
+    }
+  }
+
+  /** Runs one inner message's side effect and returns the ack to send, or null (e.g. `subscribe`). */
+  private async execute(link: PhoneLink, msg: InnerMessage): Promise<InnerMessageOf<"ack"> | null> {
     const reg = this.o.registry;
+    const okAck = (reqId: string, extra: { sessionId?: string } = {}): InnerMessageOf<"ack"> => ({
+      type: "ack",
+      reqId,
+      ok: true,
+      ...extra,
+    });
+    const errAck = (reqId: string, error: string): InnerMessageOf<"ack"> => ({
+      type: "ack",
+      reqId,
+      ok: false,
+      error,
+    });
     try {
       switch (msg.type) {
         case "subscribe":
           link.viewed = msg.sessionId;
           this.tracker.setViewed(link.connId, msg.sessionId);
-          return;
+          return null;
         case "input.line":
           this.log.info("input", { kind: "line", len: msg.text.length });
           await reg.sendText(msg.sessionId, `${msg.text}\r`);
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
         case "input.text":
           this.log.info("input", { kind: "text", len: msg.text.length });
           await reg.sendText(msg.sessionId, msg.text);
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
         case "input.key":
           await reg.sendText(msg.sessionId, bytesForKey(msg.key));
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
         case "history.get": {
           const h = await reg.getHistory(msg.sessionId, msg.before, msg.count);
           link.send({
@@ -360,26 +448,34 @@ export class Agent {
             lines: h.lines.slice(-200),
             oldestAvailable: h.oldestAvailable,
           });
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
         }
         case "session.create": {
           const id = await reg.createSession(msg.in);
-          void this.refreshSessions();
-          return ack(msg.reqId, true, { sessionId: id });
+          // Debounced, not an immediate `refreshSessions()`: a real backend (iTerm2) already emits
+          // `session-added` for this same creation, so an unconditional immediate refresh here would
+          // broadcast `sessions` twice. `scheduleSessions()` coalesces with that event if it lands in
+          // the same 100 ms window, and still fires exactly once if the backend never emits one.
+          this.scheduleSessions();
+          return okAck(msg.reqId, { sessionId: id });
         }
-        case "session.focus":
-          if (!reg.capabilitiesOf(msg.sessionId)?.focus)
-            return ack(msg.reqId, false, { error: "unsupported" });
+        case "session.focus": {
+          const caps = reg.capabilitiesOf(msg.sessionId);
+          // spec 7.4: an unknown/gone session id is `session-gone`; `unsupported` is reserved for a
+          // real session on a backend that just doesn't implement focus (e.g. tmux).
+          if (caps === null) throw new SessionGone(msg.sessionId);
+          if (!caps.focus) return errAck(msg.reqId, "unsupported");
           await reg.focus(msg.sessionId);
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
+        }
         case "snapshot.get":
+          if (link.viewed !== msg.sessionId) return errAck(msg.reqId, "not-viewing");
           this.tracker.forceSnapshot(link.connId, msg.sessionId);
-          return ack(msg.reqId, true);
+          return okAck(msg.reqId);
         default:
-          return;
+          return null;
       }
     } catch (err) {
-      const reqId = "reqId" in msg ? msg.reqId : null;
       // spec 8.12: a mismatched windowId must reach the phone as error:"bad-window", not "failed".
       const error =
         err instanceof SessionGone
@@ -390,7 +486,7 @@ export class Agent {
               ? "bad-window"
               : "failed";
       this.log.warn("inner message failed", { type: msg.type, error, err: String(err) });
-      if (reqId) ack(reqId, false, { error });
+      return "reqId" in msg ? errAck(msg.reqId, error) : null;
     }
   }
 

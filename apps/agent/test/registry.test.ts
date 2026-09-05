@@ -65,4 +65,35 @@ describe("BackendRegistry", () => {
     tmux.emit({ type: "screen-changed", sessionId: "%1" });
     expect(seen).toContain("tmux:%1");
   });
+
+  it("listSessions isolates a failing backend and returns the survivors (spec 8.12/15)", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    iterm.listSessions = async () => {
+      throw new Error("iTerm2 API died");
+    };
+    const tmux = new FakeBackend("tmux");
+    tmux.addSession("%1", {});
+    reg.add(iterm);
+    reg.add(tmux);
+
+    const sessions = await reg.listSessions();
+    expect(sessions.map((s) => s.id)).toEqual(["tmux:%1"]);
+  });
+
+  it("reports absoluteLines: false when no backend is connected", () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    expect(reg.capabilities.absoluteLines).toBe(false);
+  });
+
+  it("close() closes every member and clears them from the registry", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    reg.add(iterm);
+    await reg.close();
+    expect(reg.connected()).toEqual([]);
+    await expect(reg.getScreen("iterm2:A")).rejects.toThrow(/session gone/);
+  });
 });

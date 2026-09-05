@@ -2,6 +2,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  applyDiff,
+  applySnapshot,
   authMessage,
   type CtrlMessage,
   decodeCbor,
@@ -19,6 +21,9 @@ import {
   pairingAd,
   parseCtrl,
   parseQr,
+  type ScreenDiff,
+  type ScreenSnapshot,
+  type ScreenState,
   seal,
   sign,
 } from "@shellbell/protocol";
@@ -26,15 +31,34 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Agent } from "../src/agent.js";
 import { BackendRegistry } from "../src/backends/registry.js";
+import * as configModule from "../src/config.js";
 import { loadConfig, loadPairings, type Paths, paths } from "../src/config.js";
 import { loadOrCreateIdentity } from "../src/identity.js";
+import type { Logger } from "../src/log.js";
 import { createLogger } from "../src/log.js";
+import { RelayClient } from "../src/relay-client.js";
 import { FakeBackend } from "./fakes/fake-backend.js";
 import { FakePhone } from "./fakes/fake-phone.js";
 import { FakeRelay } from "./fakes/fake-relay.js";
 import { waitFor } from "./fakes/wait.js";
 
 const log = createLogger({ stdout: false });
+
+/** A `Logger` that records every call instead of writing anywhere, for white-box assertions. */
+function capturingLogger(): {
+  log: Logger;
+  calls: { level: string; msg: string; fields?: Record<string, unknown> }[];
+} {
+  const calls: { level: string; msg: string; fields?: Record<string, unknown> }[] = [];
+  const mk = (): Logger => ({
+    debug: (msg, fields) => calls.push({ level: "debug", msg, fields }),
+    info: (msg, fields) => calls.push({ level: "info", msg, fields }),
+    warn: (msg, fields) => calls.push({ level: "warn", msg, fields }),
+    error: (msg, fields) => calls.push({ level: "error", msg, fields }),
+    child: () => mk(),
+  });
+  return { log: mk(), calls };
+}
 
 /** A phone-side WebSocket client speaking the relay protocol. */
 class PhoneSocket {
@@ -107,17 +131,27 @@ let agentPaths: Paths;
 /** A PhoneSocket that has completed conn.hello, so `phone` is non-null. */
 type ConnectedPhone = PhoneSocket & { phone: FakePhone };
 
+interface PairTarget {
+  agent: Agent;
+  relay: FakeRelay;
+  computerFp: string;
+}
+
 /**
  * Runs the whole pairing dance for one phone and returns a connected, handshaken phone socket.
- * Used by every test below so the flow is written exactly once.
+ * Used by every test below so the flow is written exactly once. Defaults to the shared
+ * `agent`/`relay`/`computerFp` from `beforeEach`; a test that stands up its own second agent
+ * (e.g. the `superseded` and fire-and-forget-guard tests) passes its own instead.
  */
-async function pairAndConnect(): Promise<ConnectedPhone> {
-  const { qrText } = agent.openPairing();
+async function pairAndConnect(
+  target: PairTarget = { agent, relay, computerFp },
+): Promise<ConnectedPhone> {
+  const { qrText } = target.agent.openPairing();
   const qr = parseQr(qrText, { allowInsecure: true });
   const pairSock = new PhoneSocket();
-  await pairSock.connect(relay.url, computerFp, "pairing", fromBase64Url(qr.g));
+  await pairSock.connect(target.relay.url, target.computerFp, "pairing", fromBase64Url(qr.g));
   const code = fromBase64Url(qr.p);
-  const kPsk = derivePskKey(code, computerFp);
+  const kPsk = derivePskKey(code, target.computerFp);
   const box = seal(
     kPsk,
     encodeCbor({
@@ -126,27 +160,27 @@ async function pairAndConnect(): Promise<ConnectedPhone> {
       name: "iPhone",
       platform: "ios",
     }),
-    pairingAd("request", computerFp, pairSock.fp),
+    pairingAd("request", target.computerFp, pairSock.fp),
   );
   pairSock.sendCtrl({ type: "pairing-request", phoneFp: pairSock.fp, box });
   await waitFor(() => pairSock.ctrl.some((m) => m.type === "pairing-response"));
   const resp = pairSock.ctrl.find((m) => m.type === "pairing-response");
   if (resp?.type !== "pairing-response") throw new Error("no pairing-response");
   const inner = decodeCbor(
-    open(kPsk, resp.box, pairingAd("response", computerFp, pairSock.fp)),
+    open(kPsk, resp.box, pairingAd("response", target.computerFp, pairSock.fp)),
   ) as { x25519Pub: Uint8Array };
   const kPair = derivePairKey(
     pairSock.identity.x25519.priv,
     inner.x25519Pub,
     code,
-    computerFp,
+    target.computerFp,
     pairSock.fp,
   );
   pairSock.ws.close();
 
   const ph = new PhoneSocket(pairSock.identity);
-  ph.phone = new FakePhone(pairSock.identity, computerFp, kPair);
-  await ph.connect(relay.url, computerFp, "phone");
+  ph.phone = new FakePhone(pairSock.identity, target.computerFp, kPair);
+  await ph.connect(target.relay.url, target.computerFp, "phone");
   ph.send(ph.phone.hello());
   await waitFor(() => ph.inner.some((m) => m.type === "sessions"));
   return ph as ConnectedPhone;
@@ -220,6 +254,23 @@ describe("Agent end to end (fake relay, fake backend)", () => {
     // --- output → diff; command-end → event to the phone; ring to the relay ---
     backend.appendLine("S1", "four");
     await waitFor(() => ph.inner.some((m) => m.type === "screen.diff"));
+
+    // Reconstruct the phone's local screen state through the *shipped* applySnapshot/applyDiff,
+    // exactly as a real client would, rather than merely asserting a diff frame arrived: this is
+    // the end-to-end proof that the diff actually reconstructs what the backend now shows.
+    let screenState: ScreenState | undefined;
+    for (const m of ph.inner) {
+      if (m.type === "screen.snapshot")
+        screenState = applySnapshot(screenState, m as ScreenSnapshot);
+      else if (m.type === "screen.diff") {
+        if (!screenState) throw new Error("diff arrived before any snapshot");
+        const applied = applyDiff(screenState, m as ScreenDiff);
+        if (applied.gap) throw new Error("unexpected gap reconstructing screen state");
+        screenState = applied.state;
+      }
+    }
+    expect(screenState?.lines.map((l) => l.r[0]?.t)).toEqual(["two", "three", "four"]);
+
     backend.emit({
       type: "command-start",
       sessionId: "S1",
@@ -313,6 +364,7 @@ describe("Agent end to end (fake relay, fake backend)", () => {
     relay.ctrlFromAgent.length = 0;
 
     expect(agent.unpair("nobody")).toBe(false);
+    expect(agent.unpair("")).toBe(false); // guard: `"".startsWith("")` must not match the first pairing
     expect(agent.unpair(fp.slice(0, 6))).toBe(true); // fp prefix, per spec 8.1
 
     expect(agent.pairingList).toHaveLength(0);
@@ -352,5 +404,224 @@ describe("Agent end to end (fake relay, fake backend)", () => {
     ).toHaveLength(0);
     a.ws.close();
     b.ws.close();
+  });
+
+  it("session.focus on an unknown/unregistered-backend session id acks session-gone, not unsupported (spec 7.4)", async () => {
+    const ph = await pairAndConnect();
+    // The registry in this suite only ever has an "iterm2" backend added -- "tmux:nope" names a
+    // backend that isn't registered, so `capabilitiesOf()` returns null.
+    ph.send(ph.phone.seal({ type: "session.focus", reqId: "rfocus", sessionId: "tmux:nope" }));
+    await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "rfocus"));
+    expect(ph.inner.find((m) => m.type === "ack" && m.reqId === "rfocus")).toMatchObject({
+      ok: false,
+      error: "session-gone",
+    });
+    ph.ws.close();
+  });
+
+  it("input to a session on an unregistered backend acks session-gone", async () => {
+    const ph = await pairAndConnect();
+    ph.send(ph.phone.seal({ type: "input.line", reqId: "rin", sessionId: "tmux:nope", text: "x" }));
+    await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "rin"));
+    expect(ph.inner.find((m) => m.type === "ack" && m.reqId === "rin")).toMatchObject({
+      ok: false,
+      error: "session-gone",
+    });
+    ph.ws.close();
+  });
+
+  it("snapshot.get for a session the phone is not viewing acks an error, not ok", async () => {
+    const ph = await pairAndConnect();
+    // No `subscribe` was sent, so `link.viewed` is still null -- this must not silently ack ok.
+    ph.send(ph.phone.seal({ type: "snapshot.get", reqId: "rsnap", sessionId: "iterm2:S1" }));
+    await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "rsnap"));
+    expect(ph.inner.find((m) => m.type === "ack" && m.reqId === "rsnap")).toMatchObject({
+      ok: false,
+      error: "not-viewing",
+    });
+    ph.ws.close();
+  });
+
+  it("session.create broadcasts `sessions` exactly once", async () => {
+    const ph = await pairAndConnect();
+    const before = ph.inner.filter((m) => m.type === "sessions").length;
+    ph.send(
+      ph.phone.seal({
+        type: "session.create",
+        reqId: "rcreate",
+        in: { kind: "tab", backend: "iterm2" },
+      }),
+    );
+    await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "rcreate"));
+    // The `sessions` refresh is debounced 100 ms; give it (generously) time to land, then make
+    // sure it landed exactly once rather than counting an absence as success.
+    await waitFor(() => ph.inner.filter((m) => m.type === "sessions").length > before, 1000);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(ph.inner.filter((m) => m.type === "sessions").length - before).toBe(1);
+    ph.ws.close();
+  });
+
+  it("exactly-once: a duplicate reqId arriving while the first is still executing is not re-executed (spec 7.4)", async () => {
+    const ph = await pairAndConnect();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const realSendText = backend.sendText.bind(backend);
+    backend.sendText = async (id: string, text: string) => {
+      await gate;
+      return realSendText(id, text);
+    };
+    try {
+      // Both frames are sent before either has any chance to finish executing.
+      ph.send(
+        ph.phone.seal({ type: "input.line", reqId: "dup1", sessionId: "iterm2:S1", text: "z" }),
+      );
+      ph.send(
+        ph.phone.seal({ type: "input.line", reqId: "dup1", sessionId: "iterm2:S1", text: "z" }),
+      );
+      // Give the agent time to receive & decrypt both frames (and reserve the reqId for the
+      // first) while `sendText` is still gated, so the second frame provably observes the first
+      // still in flight rather than an already-completed cached ack.
+      await new Promise((r) => setTimeout(r, 30));
+      release();
+      await waitFor(
+        () => ph.inner.filter((m) => m.type === "ack" && m.reqId === "dup1").length === 2,
+      );
+      expect(backend.sentText.filter((t) => t.text === "z\r")).toHaveLength(1);
+      for (const ack of ph.inner.filter((m) => m.type === "ack" && m.reqId === "dup1")) {
+        expect(ack).toMatchObject({ ok: true });
+      }
+    } finally {
+      backend.sendText = realSendText;
+    }
+    ph.ws.close();
+  });
+
+  it("stop() closes any open pairing window and drops every phone link + tracker viewer (Important)", async () => {
+    const ph = await pairAndConnect();
+    ph.send(ph.phone.seal({ type: "subscribe", sessionId: "iterm2:S1" }));
+    await waitFor(() => ph.inner.some((m) => m.type === "screen.snapshot"));
+    expect(agent.connectedPhones).toHaveLength(1);
+
+    agent.openPairing(); // leave a pairing window open across stop()
+    const closeWindowSpy = vi.spyOn(agent.pairing, "closeWindow");
+    const dropViewerSpy = vi.spyOn(agent.tracker, "dropViewer");
+
+    agent.stop();
+
+    expect(closeWindowSpy).toHaveBeenCalled();
+    expect(dropViewerSpy).toHaveBeenCalled();
+    expect(agent.connectedPhones).toHaveLength(0);
+    ph.ws.close();
+  });
+
+  it("superseded (relay closes with 4005): stops the agent and calls onSuperseded (spec §12, Important)", async () => {
+    const p3 = paths(mkdtempSync(join(tmpdir(), "sb-agent-superseded-")));
+    const { identity: id3, fp: fp3 } = loadOrCreateIdentity(p3);
+    const relay3 = new FakeRelay(fp3);
+    await relay3.start();
+    const registry3 = new BackendRegistry(log);
+    registry3.add(new FakeBackend());
+    const config3 = { ...loadConfig(p3), computerName: "MBP3" };
+    let supersededCalls = 0;
+    const agent3 = new Agent({
+      paths: p3,
+      config: config3,
+      identity: id3,
+      fp: fp3,
+      registry: registry3,
+      log,
+      confirm: async () => true,
+      appVersion: "0.0.1-test",
+      relayUrlOverride: relay3.url,
+      onSuperseded: () => {
+        supersededCalls += 1;
+      },
+    });
+    agent3.start();
+    try {
+      await waitFor(() => agent3.relayOnline);
+      const stopSpy = vi.spyOn(agent3, "stop");
+
+      // A second "agent" socket authenticating with the *same* fp supersedes the first, closing
+      // its socket with 4005 (spec §12: "Duplicate agent process: New wins; old exits").
+      const impostor = new RelayClient({
+        relayUrl: relay3.url,
+        fp: fp3,
+        identity: id3,
+        name: "impostor",
+        appVersion: "0.0.1-test",
+        log,
+      });
+      impostor.start();
+      try {
+        await waitFor(() => supersededCalls === 1);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        expect(agent3.relayOnline).toBe(false);
+        expect(agent3.connectedPhones).toHaveLength(0);
+      } finally {
+        impostor.stop();
+      }
+    } finally {
+      agent3.stop();
+      await relay3.stop();
+    }
+  });
+
+  it("guards a fire-and-forget ctrl handler: a savePairings failure during `unpaired` is logged, not thrown (Critical)", async () => {
+    const rejections: unknown[] = [];
+    const onRejection = (err: unknown) => rejections.push(err);
+    process.on("unhandledRejection", onRejection);
+
+    const { log: log2, calls } = capturingLogger();
+    const p2 = paths(mkdtempSync(join(tmpdir(), "sb-agent-guard-")));
+    const { identity: id2, fp: fp2 } = loadOrCreateIdentity(p2);
+    const relay2 = new FakeRelay(fp2);
+    await relay2.start();
+    const registry2 = new BackendRegistry(log2);
+    registry2.add(new FakeBackend());
+    const config2 = { ...loadConfig(p2), computerName: "MBP2" };
+    const agent2 = new Agent({
+      paths: p2,
+      config: config2,
+      identity: id2,
+      fp: fp2,
+      registry: registry2,
+      log: log2,
+      confirm: async () => true,
+      appVersion: "0.0.1-test",
+      relayUrlOverride: relay2.url,
+    });
+    agent2.start();
+    try {
+      await waitFor(() => agent2.relayOnline);
+      const ph2 = await pairAndConnect({ agent: agent2, relay: relay2, computerFp: fp2 });
+      expect(agent2.pairingList).toHaveLength(1);
+
+      const spy = vi.spyOn(configModule, "savePairings").mockImplementationOnce(() => {
+        throw new Error("disk full");
+      });
+      try {
+        relay2.sendToAgent({ type: "unpaired", phoneFps: [ph2.fp] });
+        await waitFor(() => calls.some((c) => c.level === "error" && c.msg === "handler failed"));
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(calls.find((c) => c.level === "error" && c.msg === "handler failed")).toMatchObject({
+        fields: { where: "ctrl" },
+      });
+      // The agent survived the failure: the relay connection is still up.
+      expect(agent2.relayOnline).toBe(true);
+      await new Promise((r) => setTimeout(r, 30)); // let any unhandled rejection surface
+      expect(rejections).toHaveLength(0);
+
+      ph2.ws.close();
+    } finally {
+      process.removeListener("unhandledRejection", onRejection);
+      agent2.stop();
+      await relay2.stop();
+    }
   });
 });
