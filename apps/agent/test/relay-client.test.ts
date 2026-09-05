@@ -129,6 +129,9 @@ describe("RelayClient", () => {
     c.start();
     await waitFor(() => reason !== "");
     expect(reason).toBe("bad-sig");
+    await new Promise((r) => setTimeout(r, 150));
+    expect(c.online).toBe(false);
+    expect(reason).toBe("bad-sig");
   });
 
   it("forwards ctrl from the relay and sends ctrl to it", async () => {
@@ -293,7 +296,8 @@ describe("RelayClient", () => {
       const c = makeClient({ pingIntervalMs: 30, pongTimeoutMs: 30 });
       c.start();
       await waitFor(() => c.online);
-      await new Promise((r) => setTimeout(r, 30 * 3 + 60));
+      const t0 = Date.now();
+      await waitFor(() => c.online && Date.now() - t0 >= 30 * 3 + 60);
       expect(c.online).toBe(true);
     });
 
