@@ -1056,8 +1056,10 @@ long-lived `tmux -C attach-session -t $N -f ignore-size` (stdio pipes). Not
 (`list-panes`, `capture-pane`, `display-message`, `send-keys`, `new-window`,
 `split-window`, `list-clients`) is written to its stdin and its reply is read between
 `%begin` / `%end` (or `%error`) lines, correlated in order. No child process is spawned
-per frame. Control-mode output escapes non-printable bytes as octal (`\033`); the client
-unescapes `\ooo` sequences before returning reply lines. Parsing stdout:
+per frame. Escaping (measured in M0b, tmux 3.7c): reply lines inside `%begin`/`%end`
+carry ESC as a **raw 0x1B byte** — no unescaping (`UNESCAPE_OCTAL = false`); only
+`%output` payloads are octal-escaped (`\033`), and the agent ignores their data (it only
+uses `%output` as a "screen changed" signal). Parsing stdout:
 - `%output %N <data>` → emit `screen-changed` for `%N` (data ignored).
 - `%layout-change`, `%window-add`, `%window-close`, `%window-renamed`, `%unlinked-window-*`,
   `%session-renamed`, `%sessions-changed` → emit `layout-changed` (debounced 100 ms).

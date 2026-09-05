@@ -10,6 +10,33 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — sections 5, 6, 7, 8.5.1, 8.5.2, 8.11 (spike only), 8.11.1, 8.11.2, 15, 16, Appendix A and C. Read those sections before starting; every task cites the section it implements.
 
+## Post-execution errata (2026-09-04)
+
+This plan was executed on branch `sdd/plan-01-foundation` (23 task commits + a final fix
+wave). The text below has been corrected where the literal plan would fail a re-run
+(PT-1…PT-13 from the whole-branch review); the shipped code is the authority where the
+two still differ. Items fixed in code but not restated in every task's listing:
+- Task 2 spike: default `ITERM2_SPIKE_MODE` is `socketpath`, implemented with ws's
+  `createConnection: () => netConnect({ path: SOCKET })` (ws 8.21.3 discards the
+  `socketPath` option; `ws+unix://` breaks on the space in "Application Support").
+- Task 3 spike: control client uses `-f ignore-size` only (`read-only` blocks `send-keys`
+  session-wide); the script guards `transcript` writes with `writableEnded` and ends the
+  stream in `rl.on("close")`.
+- Task 6: `ProtocolError` builds its message as `${code}: ${detail}`; schema failures use
+  `z.prettifyError`; `EnvelopeSchema` refines `t === "e2e" ⇒ to` present; `decodeCbor`
+  passes `rejectDuplicateMapKeys: true`.
+- Task 9: `sealWithNonce` carries a test-only warning; `identityFromJson` validates with
+  `safeParse`, checks 32-byte keys, and wraps base64url errors in `ProtocolError`.
+- Task 10: `hex2`/`xterm256Hex` clamp to 0..255; `parseQr` rejects credentials in the
+  relay URL; `r` uses `z.url()`.
+- Task 12: `n` is set whenever cells ≠ code points (no control-char exception); TAB
+  column tracking iterates code points with `cellWidth(cp)`; `trimTrailing` (screen.ts)
+  trims trailing spaces inside the last run and adjusts `n`, cascading across emptied
+  runs; the table has 43 (+2 added) cases, not 45.
+- Task 5/8: `applyDiff` pushes at most `min(scroll, lines.length)` empties; `screen.diff.scroll`
+  is `.max(1000)`.
+- `biome.json` has `style.noNonNullAssertion: "off"`.
+
 ## Global Constraints
 
 - Node `>= 22` (author has 22.23.1). pnpm `11.12.0`. TypeScript `5.9.3` — **not** 7.x.
@@ -129,10 +156,10 @@ node-linker=hoisted
 {
   "$schema": "https://biomejs.dev/schemas/2.5.12/schema.json",
   "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
-  "files": { "includes": ["**", "!**/gen/**", "!**/dist/**", "!**/.expo/**", "!**/node_modules/**"] },
+  "files": { "includes": ["**", "!**/gen", "!**/dist", "!**/.expo", "!**/node_modules"] },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always", "trailingCommas": "all" } },
-  "linter": { "enabled": true, "rules": { "recommended": true } }
+  "linter": { "enabled": true, "rules": { "preset": "recommended", "style": { "noNonNullAssertion": "off" } } }
 }
 ```
 
@@ -183,7 +210,7 @@ Expected: install succeeds; `biome check` reports no errors; `Version 5.9.3`.
 
 ```bash
 git add -A
-git commit -m "chore: monorepo scaffold (pnpm, biome, tsconfig, license)"
+git commit -m "chore(repo): monorepo scaffold (pnpm, biome, tsconfig, license)"
 ```
 
 ---
@@ -222,7 +249,6 @@ git commit -m "chore: monorepo scaffold (pnpm, biome, tsconfig, license)"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.14.1",
-    "@shellbell/protocol": "workspace:*",
     "ws": "8.21.3"
   },
   "devDependencies": {
@@ -260,8 +286,17 @@ plugins:
 `apps/agent/vitest.config.ts`:
 ```ts
 import { defineConfig } from "vitest/config";
-export default defineConfig({ test: { include: ["test/**/*.test.ts"] } });
+export default defineConfig({ test: { include: ["test/**/*.test.ts"], passWithNoTests: true } });
 ```
+
+Also add to the root `pnpm-workspace.yaml` (pnpm 11 refuses to run postinstall scripts
+non-interactively otherwise):
+```yaml
+allowBuilds:
+  "@bufbuild/buf": true
+  esbuild: true
+```
+(`@shellbell/protocol` is added to this package's dependencies in Plan 03 Task 1 — it does not exist yet.)
 
 - [ ] **Step 2: Write our proto subset**
 
@@ -764,7 +799,7 @@ Expected: iTerm2 may show "Allow Shellbell to control iTerm2?" — click Allow. 
 
 Review the fixture files for anything private (paths, tokens in scrollback) and delete lines if needed. Then:
 ```bash
-git add apps/agent docs/spike-iterm2.md
+git add apps/agent docs/spike-iterm2.md pnpm-lock.yaml pnpm-workspace.yaml
 git commit -m "feat(agent): iTerm2 API spike — proto subset, cookie auth, styled screen fetch"
 ```
 
@@ -949,12 +984,13 @@ git commit -m "feat(agent): tmux control-mode spike with recorded transcript"
 }
 ```
 
-`packages/protocol/tsconfig.json`:
+`packages/protocol/tsconfig.json` (`scripts/` is deliberately excluded — it runs via tsx;
+`DOM` supplies `TextEncoder`/`TextDecoder`/`URL` types):
 ```json
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": [], "noEmit": true },
-  "include": ["src", "test", "scripts"]
+  "compilerOptions": { "lib": ["ES2022", "DOM"], "types": [], "noEmit": true },
+  "include": ["src", "test"]
 }
 ```
 
@@ -1124,7 +1160,7 @@ export function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/protocol
+git add packages/protocol pnpm-lock.yaml
 git commit -m "feat(protocol): package skeleton and byte helpers"
 ```
 
@@ -1195,7 +1231,7 @@ describe("runs", () => {
 describe("lineKey", () => {
   it("is the documented format", () => {
     expect(lineKey({ r: [{ t: "ab", fg: 1, b: true }, { t: "c", bg: [9, 8, 7], f: true, n: 2 }] })).toBe(
-      "ab|1||10000|c||9,8,7|00001|2",
+      "ab|1||10000|\x1fc||9,8,7|00001|2",
     );
   });
   it("differs for different styles and is stable", () => {
@@ -1397,7 +1433,7 @@ function flags(r: Run): string {
 
 /** Canonical string form used for row comparison: runs joined by \x1f. */
 export function lineKey(line: Line): string {
-  return line.r.map((r) => `${r.t}|${colorKey(r.fg)}|${colorKey(r.bg)}|${flags(r)}|${r.n ?? ""}`).join("");
+  return line.r.map((r) => `${r.t}|${colorKey(r.fg)}|${colorKey(r.bg)}|${flags(r)}|${r.n ?? ""}`).join("\x1f");
 }
 
 export function applySnapshot(prev: ScreenState | undefined, snap: ScreenSnapshot): ScreenState {
@@ -1644,9 +1680,12 @@ describe("named keys", () => {
 ```ts
 import { z } from "zod";
 
-const ctrl = Object.fromEntries(
-  "abcdefghijklmnopqrstuvwxyz".split("").map((c, i) => [`ctrl-${c}`, String.fromCharCode(i + 1)]),
-) as Record<`ctrl-${string}`, string>;
+const LETTERS = ["a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z"] as const;
+type Letter = (typeof LETTERS)[number];
+type CtrlKey = `ctrl-${Letter}`;
+// Record<CtrlKey, string> keeps the 26 literal keys in `keyof typeof NAMED_KEYS`; a
+// template-literal Record<`ctrl-${string}`, string> would erase them.
+const ctrl = Object.fromEntries(LETTERS.map((c, i) => [`ctrl-${c}`, String.fromCharCode(i + 1)])) as Record<CtrlKey, string>;
 
 export const NAMED_KEYS = {
   enter: "\r",
@@ -2889,7 +2928,7 @@ export function parseSgrLine(text: string): Line {
 
 Add `export * from "./sgr.js";` to `src/index.ts`.
 
-- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. All 45 table cases must pass.
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. All table cases (43 in the table above) must pass.
 
 - [ ] **Step 5: Commit**
 
@@ -3083,7 +3122,8 @@ jobs:
 
 - [ ] **Step 2: Run the same commands locally**
 
-Run: `pnpm lint && pnpm typecheck && pnpm test` from the repo root.
+Run: `pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test` from the
+repo root — exactly what CI runs (a stale lockfile fails the first step).
 Expected: all green. Fix Biome complaints with `pnpm lint:fix` and re-run.
 
 - [ ] **Step 3: Commit**
