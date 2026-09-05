@@ -32,10 +32,21 @@ import {
 import { createLogger } from "../src/log.js";
 
 class FakeClient extends EventEmitter<{ notification: [Notification]; close: [] }> {
-  connected = true;
+  connected = false;
+  connects = 0;
+  failConnects = 0;
   calls: ClientSub[] = [];
-  async connect() {}
-  close() {}
+  async connect() {
+    this.connects++;
+    if (this.failConnects > 0) {
+      this.failConnects--;
+      throw new Error("fake connect failed");
+    }
+    this.connected = true;
+  }
+  close() {
+    this.connected = false;
+  }
   async request(sub: ClientSub): Promise<ServerOriginatedMessage> {
     this.calls.push(sub);
     const reply = (value: ServerOriginatedMessage["submessage"]) =>
@@ -182,31 +193,51 @@ describe("ITerm2Backend", () => {
     expect(events).toEqual(["screen-changed:S1", "command-end:S1"]);
   });
 
-  it("reconnects with backoff after the iTerm2 socket closes, and stops after close()", async () => {
+  it("reconnects with exponential backoff while retries fail, resets after a successful connect, and stops after close()", async () => {
     vi.useFakeTimers();
     const client = new FakeClient();
-    let connects = 0;
-    client.connect = async () => {
-      connects++;
-      client.connected = true;
-    };
     const b = new ITerm2Backend(client as never, log, { minMs: 10, maxMs: 40 });
     await b.connect();
-    expect(connects).toBe(1);
+    expect(client.connects).toBe(1);
+
+    // Drop the connection; the next three retries (10 ms, 20 ms, 40 ms backoff) all fail.
+    client.connected = false;
+    client.failConnects = 3;
+    client.emit("close");
+
+    await vi.advanceTimersByTimeAsync(15);
+    expect(client.connects).toBe(2); // retry #1 at +10 ms (fails)
+
+    await vi.advanceTimersByTimeAsync(10); // elapsed 25 ms; retry #2 due at +30 ms, not yet
+    expect(client.connects).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(10); // elapsed 35 ms; retry #2 fired at +30 ms (fails)
+    expect(client.connects).toBe(3);
+
+    await vi.advanceTimersByTimeAsync(30); // elapsed 65 ms; retry #3 due at +70 ms, not yet
+    expect(client.connects).toBe(3);
+
+    await vi.advanceTimersByTimeAsync(10); // elapsed 75 ms; retry #3 fired at +70 ms (fails, capped at 40 ms backoff)
+    expect(client.connects).toBe(4);
+
+    // Let the next retry (+40 ms, still capped) succeed.
+    client.failConnects = 0;
+    await vi.advanceTimersByTimeAsync(45); // elapsed 120 ms; retry #4 fired at +110 ms (succeeds)
+    expect(client.connects).toBe(5);
+    expect(client.connected).toBe(true);
+
+    // Reset-on-success: one more drop retries at the base 10 ms again, not a longer delay.
     client.connected = false;
     client.emit("close");
     await vi.advanceTimersByTimeAsync(15);
-    expect(connects).toBe(2); // first retry at 10 ms
+    expect(client.connects).toBe(6); // back to the base 10 ms delay
+
+    // close() cancels any pending/future retry.
     client.connected = false;
-    client.emit("close");
-    await vi.advanceTimersByTimeAsync(15);
-    expect(connects).toBe(2); // second retry is at 20 ms, not yet due
-    await vi.advanceTimersByTimeAsync(15);
-    expect(connects).toBe(3);
     await b.close();
     client.emit("close");
     await vi.advanceTimersByTimeAsync(200);
-    expect(connects).toBe(3); // close() cancels the retry loop
+    expect(client.connects).toBe(6); // close() cancels the retry loop
     vi.useRealTimers();
   });
 
