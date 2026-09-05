@@ -6,17 +6,19 @@
 
 **Architecture:** `agent.ts` orchestrates five independent units — `RelayClient` (socket + auth + reconnect), `PhoneLink` (per-phone crypto and dedupe), `ScreenTracker` (diff engine), `EventEngine`/`Notifier` (rings), `PairingManager` — over a `TerminalBackend` facade (`BackendRegistry`). The iTerm2 backend is `ITerm2Client` (raw protobuf WebSocket) + `convert.ts` (cells → runs) + `ITerm2Backend` (interface implementation). Every unit is testable with fakes; one integration test wires them all against an in-process fake relay.
 
-**Tech Stack:** Node 22, TypeScript 5.9, `@shellbell/protocol`, `ws` 8.21, `@bufbuild/protobuf` 2.14, commander 15, qrcode-terminal 0.12, tsdown 0.23, vitest 5.
+**Tech Stack:** Node 22, TypeScript 5.9, `@shellbell/protocol` (workspace), `zod` 4.5.4, `ws` 8.21.3, `@bufbuild/protobuf` 2.14.1, commander 15, qrcode-terminal 0.12, tsdown 0.23, vitest 5.
 
 **Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — sections 6.4 (agent side), 6.6–6.7, 7.4, 8.1–8.10, 8.12 (iTerm2-only for now), 12, 15 (agent tests), 16. Plans 01 and 02 must be complete.
 
 ## Global Constraints
 
-- All Plan 01 constraints apply. Runtime deps of the published package: `ws`, `@bufbuild/protobuf`, `commander`, `qrcode-terminal` only; `@shellbell/protocol` is bundled.
+- All Plan 01 constraints apply. Runtime deps of the published package: `ws`, `@bufbuild/protobuf`, `commander`, `qrcode-terminal`, `zod`. `@shellbell/protocol` **and its own deps** (`cborg`, `@noble/*`) are bundled into `dist/cli.js` by tsdown (`noExternal: [/^@shellbell\//, "cborg", /^@noble\//]`); `zod` stays external because it is a declared runtime dep.
+- **Steps marked "Human-run only" are never executed by implementers.** An implementer reaches such a step, records "not run (human-run only)", and moves on.
+- Plan code blocks may exceed Biome's 100-column limit; implementers wrap lines (`pnpm lint:fix`) without changing semantics. `pnpm lint` must pass before every commit.
 - `~/.shellbell/` files are written with mode `0600`, the directory `0700`. Tests never touch the real directory: every unit takes a `Paths` object, and tests use `mkdtempSync`.
 - Never log keys, cookies, pairing codes, terminal content, or input text. Log input **lengths**.
-- Timers: flush interval `max(125, minFrameMs)` ms; idle tick 1 s; relay ping 45 s / pong timeout 10 s; backoff 1→30 s ±20 %; `conn.hello` timeout 10 s; iTerm2 request timeout 5 s; pairing window 5 min; confirmation prompt 60 s.
-- All units that use time or timers accept `{ now?: () => number; setTimer?; clearTimer? }` so tests can use `vi.useFakeTimers()`.
+- Timers: flush interval `max(125, minFrameMs)` ms (the `Agent` applies `minFrameMs` from every `auth-ok`); idle tick 1 s; relay ping 45 s / pong timeout 10 s; relay backoff 1→30 s ±20 %; iTerm2 backend reconnect backoff 1→30 s; `conn.hello` timeout 10 s; iTerm2 request timeout 5 s; pairing window 5 min; confirmation prompt 60 s.
+- All units that use time accept `{ now?: () => number }`; units that own timers are driven by `vi.useFakeTimers()` in tests. There is no `setTimer`/`clearTimer` injection anywhere in this plan.
 - Session ids leaving the registry are `"<backend>:<native>"`; backends only ever see native ids.
 - Commit after every task with `type(scope): summary`.
 
@@ -54,8 +56,8 @@ apps/agent/
     ├── config.test.ts  log.test.ts  relay-client.test.ts  phone-link.test.ts
     ├── iterm2-client.test.ts  convert.test.ts  iterm2-backend.test.ts
     ├── screen-tracker.test.ts  events.test.ts  pairing.test.ts  registry.test.ts
-    ├── agent.integration.test.ts  live-iterm2.test.ts
-    ├── fakes/fake-relay.ts  fakes/fake-backend.ts  fakes/fake-phone.ts
+    ├── agent.integration.test.ts  live-iterm2.test.ts  launchd.test.ts  doctor.test.ts
+    ├── fakes/wait.ts  fakes/fake-relay.ts  fakes/fake-backend.ts  fakes/fake-phone.ts
     └── fixtures/  (from Plan 01)
 ```
 
@@ -65,7 +67,13 @@ apps/agent/
 
 **Files:**
 - Create: `apps/agent/src/config.ts`, `apps/agent/src/identity.ts`, `apps/agent/src/log.ts`, `apps/agent/test/config.test.ts`, `apps/agent/test/log.test.ts`
-- Modify: `apps/agent/package.json` — add deps `commander: "15.0.0"`, `qrcode-terminal: "0.12.0"`; devDeps `tsdown: "0.23.0"`, `@types/qrcode-terminal: "0.12.2"`; scripts `"build": "tsdown"`, `"dev": "tsx src/cli.ts"`.
+- Modify: `apps/agent/package.json` — add to `dependencies`:
+  `"@shellbell/protocol": "workspace:*"`, `"commander": "15.0.0"`, `"qrcode-terminal": "0.12.0"`, `"zod": "4.5.4"`
+  (the agent imports `@shellbell/protocol` from this task onward, and `config.ts`/`pairing.ts` import `zod`
+  **directly**; neither is currently declared, and relying on pnpm hoisting is not acceptable).
+  Add to `devDependencies`: `"tsdown": "0.23.0"`, `"@types/qrcode-terminal": "0.12.2"`.
+  Add scripts `"build": "tsdown"`, `"dev": "tsx src/cli.ts"`.
+  After editing, run `pnpm install` from the repo root so the workspace link is created.
 
 **Interfaces:**
 - `config.ts`: `DEFAULT_RELAY`, `ACCENTS`, `interface Paths { dir; identity; pairings; config; log; sock; pid }`, `paths(dir?: string): Paths` (default `$SHELLBELL_DIR` or `~/.shellbell`), `AgentConfigSchema`/`type AgentConfig { v: 1; relayUrl; computerName; accent; notifyMinCommandMs; idleQuietMs; idleMinActiveMs }`, `loadConfig(p): AgentConfig` (writes defaults when missing), `saveConfig(p, cfg)`, `PairingSchema`/`type Pairing` (spec 8.3), `loadPairings(p): Pairing[]`, `savePairings(p, list)`, `writeSecretFile(path, text)`.
@@ -353,14 +361,32 @@ git commit -m "feat(agent): config, identity and logging"
 ### Task 2: `RelayClient` — socket, auth, reconnect, keepalive (spec 6.5, 8.7)
 
 **Files:**
-- Create: `apps/agent/src/relay-client.ts`, `apps/agent/test/fakes/fake-relay.ts`, `apps/agent/test/relay-client.test.ts`
+- Create: `apps/agent/src/relay-client.ts`, `apps/agent/test/fakes/wait.ts`, `apps/agent/test/fakes/fake-relay.ts`, `apps/agent/test/relay-client.test.ts`
 
 **Interfaces:**
 - `RelayClientOptions { relayUrl; fp; identity: Identity; name; appVersion; log; backoffMinMs?: 1000; backoffMaxMs?: 30000; pingIntervalMs?: 45000; pongTimeoutMs?: 10000 }`
 - `class RelayClient extends EventEmitter` with events: `"auth-ok"(msg)`, `"auth-fail"(reason)`, `"ctrl"(msg: CtrlMessage)`, `"e2e"(env: Envelope)`, `"down"()`. Methods: `start()`, `stop()`, `sendCtrl(body: CtrlMessage)`, `sendEnvelope(env: Envelope)`, getter `online: boolean`.
-- `test/fakes/fake-relay.ts`: `class FakeRelay { url; constructor(opts?) ; start(): Promise<void>; stop(); sockets; agent: WsWithFp | null; phones: Map<fp, ws>; sendToAgent(body: CtrlMessage); sendEnvelopeToAgent(env); received: Envelope[]; onEnvelope(cb) }` — implements challenge/auth (any valid signature passes; the fp must equal the URL's), replies `auth-ok` + `unpaired` + `phones`, forwards e2e between agent and registered fake phones, and exposes `dropAgent()` to simulate a disconnect.
+- `test/fakes/wait.ts`: `waitFor(fn: () => boolean, ms?: number): Promise<void>` — the **single** definition, imported by every test that polls. Do not re-declare it in a test file.
+- `test/fakes/fake-relay.ts`: `class FakeRelay { constructor(computerFp: string); url: string; start(): Promise<void>; stop(): Promise<void>; agent: Peer | null; phones: Map<string, Peer>; pairing: Map<string, Peer>; received: { from: Peer; env: Envelope }[]; ctrlFromAgent: CtrlMessage[]; sendCtrl(ws, body); sendToAgent(body: CtrlMessage); nextCtrlFromAgent(timeoutMs?): Promise<CtrlMessage>; dropAgent(): void }` — implements challenge/auth (any valid signature passes; the fp must equal the URL's), replies `auth-ok` → `unpaired` → `phones` **in that order** for the agent role, forwards e2e between agent and registered fake phones, forwards `pairing-request`/`pairing-response`/`pairing-reject`, and exposes `dropAgent()` to simulate a disconnect.
+  **Fidelity limits (deliberate, so tests stay readable):** the fake does *not* verify the pairing `gate` against `pairing-open.gateHash`, does *not* enforce the real relay's one-`pairing-request`-per-socket rule, does *not* close a pairing socket after `pairing-reject` (the real relay closes it `4003`), and does *not* enforce the 5-admission cap or the 60 msg/s token bucket. Anything that depends on those is covered by the relay's own tests in Plan 02.
 
-- [ ] **Step 1: Write the fake relay**
+- [ ] **Step 1: Write the shared wait helper and the fake relay**
+
+`apps/agent/test/fakes/wait.ts` (the only definition of `waitFor` in the repo):
+```ts
+/** Polls `fn` every 10 ms until it is true, or rejects after `ms`. */
+export function waitFor(fn: () => boolean, ms = 3000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const tick = () => {
+      if (fn()) return resolve();
+      if (Date.now() - t0 > ms) return reject(new Error("waitFor timeout"));
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+```
 
 `apps/agent/test/fakes/fake-relay.ts`:
 ```ts
@@ -519,6 +545,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLogger } from "../src/log.js";
 import { RelayClient } from "../src/relay-client.js";
 import { FakeRelay } from "./fakes/fake-relay.js";
+import { waitFor } from "./fakes/wait.js";
 
 const log = createLogger({ stdout: false });
 let relay: FakeRelay;
@@ -530,13 +557,6 @@ beforeEach(async () => {
   await relay.start();
 });
 afterEach(async () => relay.stop());
-
-const waitFor = (fn: () => boolean, ms = 3000) =>
-  new Promise<void>((resolve, reject) => {
-    const t0 = Date.now();
-    const tick = () => (fn() ? resolve() : Date.now() - t0 > ms ? reject(new Error("waitFor timeout")) : setTimeout(tick, 10));
-    tick();
-  });
 
 describe("RelayClient", () => {
   it("authenticates, receives unpaired+phones, reports online", async () => {
@@ -563,7 +583,7 @@ describe("RelayClient", () => {
     c.stop();
   });
 
-  it("stops after fp-mismatch", async () => {
+  it("reports auth-fail bad-sig when the signing key does not match the fp", async () => {
     const other = generateIdentity();
     const c = new RelayClient({ relayUrl: relay.url, fp, identity: other, name: "MBP", appVersion: "t", log, backoffMinMs: 50, backoffMaxMs: 100 });
     let reason = "";
@@ -801,7 +821,8 @@ git commit -m "feat(agent): relay client with auth, backoff reconnect and protoc
 
 **Interfaces:**
 - `PhoneLinkOptions { phoneFp; connId; name; kPair: Uint8Array; computerFp; send: (env: Envelope) => void; log; now?: () => number }`
-- `class PhoneLink`: `readonly phoneFp`, `readonly connId`, `readonly name`, `handshaken: boolean`, `viewed: string | null`, `handleEnvelope(env: Envelope): InnerMessage | null` (handles `conn.hello`, replay/seq checks, `reqId` dedupe; returns a message the agent must act on, or `null`), `send(msg: InnerMessage): boolean` (false if not handshaken), `rememberAck(reqId: string, ack: InnerMessageOf<"ack">)`, `broken: boolean` (set after 20 consecutive decrypt failures), `onBroken?: () => void`.
+- `class PhoneLink`: `readonly phoneFp`, `readonly connId`, `readonly name`, `readonly openedAt: number`, `handshaken: boolean`, `dormant: boolean`, `viewed: string | null`, `handleEnvelope(env: Envelope): InnerMessage | null` (handles `conn.hello`, replay/seq checks, `reqId` dedupe; returns a message the agent must act on, or `null`), `send(msg: InnerMessage): boolean` (false if not handshaken), `rememberAck(reqId: string, ack: InnerMessageOf<"ack">)`, `broken: boolean` (set after 20 consecutive decrypt failures), `onBroken?: () => void`, `helloOverdue(now?: number): boolean`.
+- **`conn.hello` timeout (spec 6.6, 10 s).** `openedAt` is stamped when the link is created (on `phone-connected`). `helloOverdue(now)` is `true` when the link is still un-handshaken, not already `dormant`, and `now - openedAt >= 10_000`. The agent's 1 s tick calls it, logs **once**, and sets `dormant = true` — the link is then ignored until a `conn.hello` actually arrives, which clears `dormant`. The agent does **not** close the socket: the relay owns it.
 - `test/fakes/fake-phone.ts`: `class FakePhone` — the phone side of the protocol for tests: `constructor(identity, computerFp, kPair)`, `hello(): Envelope` (its `conn.hello`), `acceptHello(env): void` (derives `K_conn`), `seal(msg: InnerMessage): Envelope`, `open(env): InnerMessage`.
 
 - [ ] **Step 1: Write the fake phone**
@@ -956,6 +977,19 @@ describe("PhoneLink", () => {
     const { link } = setup();
     expect(link.send({ type: "ack", reqId: "r", ok: true })).toBe(false);
   });
+
+  it("reports conn.hello overdue after 10 s and stops once a late hello arrives", () => {
+    const { link, phone } = setup();
+    const t0 = link.openedAt;
+    expect(link.helloOverdue(t0 + 9_999)).toBe(false);
+    expect(link.helloOverdue(t0 + 10_000)).toBe(true);
+    link.dormant = true; // what the agent does after logging once
+    expect(link.helloOverdue(t0 + 20_000)).toBe(false); // already reported; not reported twice
+    link.handleEnvelope(phone.hello());
+    expect(link.handshaken).toBe(true);
+    expect(link.dormant).toBe(false);
+    expect(link.helloOverdue(t0 + 60_000)).toBe(false);
+  });
 });
 ```
 
@@ -990,17 +1024,22 @@ export interface PhoneLinkOptions {
   computerFp: string;
   send: (env: Envelope) => void;
   log: Logger;
+  now?: () => number;
 }
 
 const MAX_FAILURES = 20;
 const ACK_CACHE = 256;
+const HELLO_TIMEOUT_MS = 10_000;
 
 export class PhoneLink {
   readonly phoneFp: string;
   readonly connId: string;
   readonly name: string;
+  readonly openedAt: number;
   handshaken = false;
   broken = false;
+  /** Set by the agent when no conn.hello arrived within 10 s; cleared by a late conn.hello. */
+  dormant = false;
   viewed: string | null = null;
   onBroken?: () => void;
   private kConn: Uint8Array | null = null;
@@ -1010,12 +1049,20 @@ export class PhoneLink {
   private failures = 0;
   private readonly acks = new Map<string, InnerMessageOf<"ack">>();
   private readonly log: Logger;
+  private readonly now: () => number;
 
   constructor(private readonly opts: PhoneLinkOptions) {
     this.phoneFp = opts.phoneFp;
     this.connId = opts.connId;
     this.name = opts.name;
+    this.now = opts.now ?? (() => Date.now());
+    this.openedAt = this.now();
     this.log = opts.log.child({ phone: opts.phoneFp.slice(0, 8), conn: opts.connId.slice(0, 6) });
+  }
+
+  /** True once the 10 s conn.hello window (spec 6.6) has passed with no handshake. */
+  helloOverdue(now: number = this.now()): boolean {
+    return !this.handshaken && !this.dormant && now - this.openedAt >= HELLO_TIMEOUT_MS;
   }
 
   handleEnvelope(env: Envelope): InnerMessage | null {
@@ -1034,6 +1081,7 @@ export class PhoneLink {
         this.seqOut = 0;
         this.seqIn = 0;
         this.handshaken = true;
+        this.dormant = false;
         this.failures = 0;
         this.acks.clear();
         const reply = seal(this.opts.kPair, encodeCbor({ type: "conn.hello", n: nAgent }), helloAd(this.opts.computerFp, this.phoneFp));
@@ -1112,7 +1160,14 @@ git commit -m "feat(agent): phone link with conn.hello handshake, seq and ack de
 - Create: `apps/agent/src/backends/iterm2/client.ts`, `apps/agent/test/iterm2-client.test.ts`
 
 **Interfaces:**
-- `ITerm2ClientOptions { log; socketPath?: string; url?: string; appName?: string; cookieProvider?: () => Promise<{ cookie: string; key: string }>; requestTimeoutMs?: number; connectMode?: "unix-url" | "socketpath" }` — `connectMode` defaults to the value recorded in `docs/spike-iterm2.md`.
+- `ITerm2ClientOptions { log; socketPath?: string; url?: string; appName?: string; cookieProvider?: () => Promise<{ cookie: string; key: string }>; requestTimeoutMs?: number }` — **there is exactly one connect mode.**
+- **How to dial the socket (settled by the M0 spike — do not improvise).** `docs/spike-iterm2.md` and Plan 01's errata record that *both* obvious approaches are dead in `ws@8.21.3`:
+  - `ws+unix://${encodeURI(socketPath)}:/` fails `ENOENT` — the WHATWG `URL` parser percent-encodes the space in `.../Library/Application Support/iTerm2/...` to `%20` and `ws` uses that pathname verbatim as the filesystem path, never decoding it.
+  - passing `socketPath` in the constructor options is dead code — `initAsClient` unconditionally resets `opts.socketPath = undefined`, so the client silently falls back to TCP `localhost:80` (`ECONNREFUSED`).
+
+  The client therefore uses ws's documented `createConnection` hook, exactly as the shipped `scripts/spike-iterm2.ts` does:
+  `new WebSocket("ws://localhost/", ["api.iterm2.com"], { headers, createConnection: () => netConnect({ path: socketPath }) })`
+  with `import { connect as netConnect } from "node:net"`. `url` remains as a **test-only** override that dials a plain TCP `ws://` server.
 - `type ClientSub = Exclude<ClientOriginatedMessage["submessage"], { case: undefined }>`
 - `class ITerm2Client extends EventEmitter<{ notification: [Notification]; close: [] }>`: `connect(): Promise<void>`, `close(): void`, `request(sub: ClientSub): Promise<ServerOriginatedMessage>` (rejects after `requestTimeoutMs`, default 5000, or on socket close), `readonly connected: boolean`.
 - Throws `ITerm2AuthError` from `auth.ts` when the cookie cannot be obtained.
@@ -1121,8 +1176,11 @@ git commit -m "feat(agent): phone link with conn.hello handshake, seq and ack de
 
 `apps/agent/test/iterm2-client.test.ts`:
 ```ts
+import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
@@ -1201,6 +1259,21 @@ describe("ITerm2Client", () => {
     c.close();
   });
 
+  it("dials a Unix domain socket through createConnection when no url override is given", async () => {
+    // Pins the fix from docs/spike-iterm2.md: never `socketPath`, never `ws+unix://`.
+    const sock = join(mkdtempSync(join(tmpdir(), "sb-iterm-")), "socket");
+    const unixServer = createServer();
+    const unixWss = new WebSocketServer({ server: unixServer, handleProtocols: (p) => (p.has("api.iterm2.com") ? "api.iterm2.com" : false) });
+    await new Promise<void>((r) => unixServer.listen(sock, r));
+    const c = new ITerm2Client({ log, socketPath: sock, cookieProvider, requestTimeoutMs: 500 });
+    await c.connect();
+    expect(c.connected).toBe(true);
+    c.close();
+    for (const s of unixWss.clients) s.terminate();
+    await new Promise<void>((r) => unixWss.close(() => r()));
+    await new Promise<void>((r) => unixServer.close(() => r()));
+  });
+
   it("rejects pending requests when the socket closes and emits close", async () => {
     const c = new ITerm2Client({ log, url, cookieProvider, requestTimeoutMs: 5000 });
     let closed = 0;
@@ -1222,6 +1295,7 @@ describe("ITerm2Client", () => {
 `apps/agent/src/backends/iterm2/client.ts`:
 ```ts
 import { EventEmitter } from "node:events";
+import { connect as netConnect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
@@ -1241,16 +1315,14 @@ export type ClientSub = Exclude<ClientOriginatedMessage["submessage"], { case: u
 export interface ITerm2ClientOptions {
   log: Logger;
   socketPath?: string;
+  /** Test-only override: dial this plain TCP ws:// URL instead of the Unix socket. */
   url?: string;
   appName?: string;
   cookieProvider?: () => Promise<{ cookie: string; key: string }>;
   requestTimeoutMs?: number;
-  connectMode?: "unix-url" | "socketpath";
 }
 
 export const DEFAULT_SOCKET = join(homedir(), "Library", "Application Support", "iTerm2", "private", "socket");
-/** Set from docs/spike-iterm2.md after the M0 spike. */
-export const DEFAULT_CONNECT_MODE: "unix-url" | "socketpath" = "unix-url";
 
 export class ITerm2Client extends EventEmitter<{ notification: [Notification]; close: [] }> {
   private ws: WebSocket | null = null;
@@ -1279,12 +1351,15 @@ export class ITerm2Client extends EventEmitter<{ notification: [Notification]; c
       "x-iterm2-key": key,
     };
     const socketPath = this.opts.socketPath ?? DEFAULT_SOCKET;
-    const mode = this.opts.connectMode ?? DEFAULT_CONNECT_MODE;
+    // ws 8.21.3 discards the `socketPath` option and mangles `ws+unix://` paths that contain a
+    // space, so the Unix socket is dialled through the `createConnection` hook. See
+    // docs/spike-iterm2.md. `url` is only used by tests.
     const ws = this.opts.url
       ? new WebSocket(this.opts.url, ["api.iterm2.com"], { headers })
-      : mode === "socketpath"
-        ? new WebSocket("ws://localhost/", ["api.iterm2.com"], { headers, socketPath })
-        : new WebSocket(`ws+unix://${encodeURI(socketPath)}:/`, ["api.iterm2.com"], { headers });
+      : new WebSocket("ws://localhost/", ["api.iterm2.com"], {
+          headers,
+          createConnection: () => netConnect({ path: socketPath }),
+        });
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
       ws.once("open", () => resolve());
@@ -1346,7 +1421,7 @@ export class ITerm2Client extends EventEmitter<{ notification: [Notification]; c
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. If the `ws` server rejects the subprotocol, check the `handleProtocols` callback in the test returns the string.
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. If the `ws` server rejects the subprotocol, check the `handleProtocols` callback in the test returns the string. The Unix-socket test binds under `mkdtempSync(tmpdir())`; on macOS the path must stay under ~104 bytes (it does).
 
 - [ ] **Step 5: Commit**
 
@@ -1360,247 +1435,13 @@ git commit -m "feat(agent): iTerm2 protobuf client with request correlation and 
 ### Task 5: `convert.ts` — iTerm2 cells → runs (spec 8.5.5)
 
 **Files:**
-- Create: `apps/agent/src/backends/iterm2/convert.ts`, `apps/agent/test/convert.test.ts`
+- Create: `apps/agent/src/backends/types.ts`, `apps/agent/src/backends/iterm2/convert.ts`, `apps/agent/test/convert.test.ts`
 
 **Interfaces:**
-- `lineContentsToLine(lc: LineContents): Line` and `bufferToScreen(resp: GetBufferResponse, rows: number, cols: number): Screen` where `Screen` comes from `backends/types.ts` (Task 6 defines it; for this task import the shape from `@shellbell/protocol` as `{ cols; rows; cursor; lines; scrollbackTotal }`).
+- `types.ts` exactly as spec 8.4 plus: `class BackendUnavailable extends Error { hint: string }`, `class SessionGone extends Error`, `class Unsupported extends Error`, `class BadWindow extends Error`, and two optional methods on `TerminalBackend`: `tmuxWindowIds?(): Set<string>` (iTerm2: tmux-integration window ids it shows) and `tmuxWindowIdOf?(nativeId: string): string | undefined` (tmux backend, Plan 04). It is created **here**, in Task 5, because `convert.ts` returns its `Screen` type; Task 6 consumes it unchanged.
+- `lineContentsToLine(lc: LineContents): Line` and `bufferToScreen(resp: GetBufferResponse, rows: number, cols: number): Screen` — `Screen` is **imported from `../types.js`**. There is exactly one definition of that shape in the repo; do not declare a second `ScreenShape` interface.
 
-- [ ] **Step 1: Write the failing tests**
-
-`apps/agent/test/convert.test.ts`:
-```ts
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { create, fromJson } from "@bufbuild/protobuf";
-import { codePoints } from "@shellbell/protocol";
-import { describe, expect, it } from "vitest";
-import { bufferToScreen, lineContentsToLine } from "../src/backends/iterm2/convert.js";
-import {
-  AlternateColor,
-  CellStyleSchema,
-  CodePointsPerCellSchema,
-  LineContents_Continuation,
-  LineContentsSchema,
-  RGBColorSchema,
-  ServerOriginatedMessageSchema,
-} from "../src/backends/iterm2/gen/iterm2_pb.js";
-
-const style = (init: Parameters<typeof create<typeof CellStyleSchema>>[1]) => create(CellStyleSchema, init);
-
-describe("lineContentsToLine", () => {
-  it("unstyled text becomes one run", () => {
-    const lc = create(LineContentsSchema, { text: "hello" });
-    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "hello" }] });
-  });
-
-  it("RLE styles split into runs; fgStandard/bgRgb/bold map; trailing spaces trimmed", () => {
-    const lc = create(LineContentsSchema, {
-      text: "abcd   ",
-      style: [
-        style({ fgColor: { case: "fgStandard", value: 1 }, bold: true, repeats: 2 }),
-        style({ bgColor: { case: "bgRgb", value: create(RGBColorSchema, { red: 9, green: 8, blue: 7 }) }, repeats: 2 }),
-        style({ repeats: 3 }),
-      ],
-    });
-    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "ab", fg: 1, b: true }, { t: "cd", bg: [9, 8, 7] }] });
-  });
-
-  it("inverse swaps with 15/0 defaults; alternate colors are undefined; invisible becomes spaces", () => {
-    const lc = create(LineContentsSchema, {
-      text: "xyz",
-      style: [
-        style({ inverse: true, repeats: 1 }),
-        style({ fgColor: { case: "fgAlternate", value: AlternateColor.DEFAULT }, repeats: 1 }),
-        style({ invisible: true, fgColor: { case: "fgStandard", value: 2 }, repeats: 1 }),
-      ],
-    });
-    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "x", fg: 0, bg: 15 }, { t: "y" }, { t: " ", fg: 2 }] });
-  });
-
-  it("code_points_per_cell: uninitialized cell → space, combining mark folds into one cell, n set when cells ≠ code points", () => {
-    // display: "a␣ñ" where ␣ is an uninitialized cell and ñ = n + U+0303
-    const lc = create(LineContentsSchema, {
-      text: "añ",
-      codePointsPerCell: [
-        create(CodePointsPerCellSchema, { numCodePoints: 1, repeats: 1 }),
-        create(CodePointsPerCellSchema, { numCodePoints: 0, repeats: 1 }),
-        create(CodePointsPerCellSchema, { numCodePoints: 2, repeats: 1 }),
-      ],
-    });
-    const line = lineContentsToLine(lc);
-    expect(line.r).toHaveLength(1);
-    expect(line.r[0]?.t).toBe("a ñ");
-    expect(line.r[0]?.n).toBe(3);
-    expect(codePoints(line.r[0]?.t ?? "")).toBe(4);
-  });
-
-  it("soft wrap sets w", () => {
-    const lc = create(LineContentsSchema, { text: "x", continuation: LineContents_Continuation.CONTINUATION_SOFT_EOL });
-    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "x" }], w: true });
-  });
-});
-
-describe("real fixtures", () => {
-  const dir = join(import.meta.dirname, "fixtures");
-  const files = readdirSync(dir).filter((f) => f.startsWith("getbuffer-") && f.endsWith(".json"));
-  it.each(files)("%s converts with invariants", (file) => {
-    const msg = fromJson(ServerOriginatedMessageSchema, JSON.parse(readFileSync(join(dir, file), "utf8")));
-    if (msg.submessage.case !== "getBufferResponse") throw new Error("fixture is not a GetBufferResponse");
-    const resp = msg.submessage.value;
-    for (const lc of resp.contents) {
-      const line = lineContentsToLine(lc);
-      const text = line.r.map((r) => r.t).join("");
-      const cells = line.r.reduce((n, r) => n + (r.n ?? codePoints(r.t)), 0);
-      const totalCells = lc.codePointsPerCell.reduce((n, c) => n + (c.repeats ?? 1), 0) || codePoints(lc.text ?? "");
-      expect(text.replace(/ +$/, "")).toBe(text.replace(/ +$/, "")); // no throw; text is a string
-      expect(cells).toBeLessThanOrEqual(totalCells);
-    }
-    const screen = bufferToScreen(resp, resp.contents.length || 1, 80);
-    expect(screen.lines.length).toBe(resp.contents.length || 1);
-    expect(screen.cursor.y).toBeGreaterThanOrEqual(-1);
-  });
-});
-```
-
-- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
-
-- [ ] **Step 3: Implement `convert.ts`**
-
-`apps/agent/src/backends/iterm2/convert.ts`:
-```ts
-import { codePoints, emptyLine, mergeRuns, trimTrailing, type Color, type Cursor, type Line, type Run } from "@shellbell/protocol";
-import { type CellStyle, type GetBufferResponse, type LineContents, LineContents_Continuation } from "./gen/iterm2_pb.js";
-
-interface Style {
-  fg?: Color;
-  bg?: Color;
-  b?: boolean;
-  i?: boolean;
-  u?: boolean;
-  s?: boolean;
-  f?: boolean;
-  invisible?: boolean;
-}
-
-function normalize(st: CellStyle | undefined): Style {
-  if (!st) return {};
-  let fg: Color | undefined;
-  let bg: Color | undefined;
-  if (st.fgColor.case === "fgStandard") fg = st.fgColor.value;
-  else if (st.fgColor.case === "fgRgb") fg = [st.fgColor.value.red ?? 0, st.fgColor.value.green ?? 0, st.fgColor.value.blue ?? 0];
-  if (st.bgColor.case === "bgStandard") bg = st.bgColor.value;
-  else if (st.bgColor.case === "bgRgb") bg = [st.bgColor.value.red ?? 0, st.bgColor.value.green ?? 0, st.bgColor.value.blue ?? 0];
-  if (st.inverse) {
-    const f = fg ?? 15;
-    const g = bg ?? 0;
-    fg = g;
-    bg = f;
-  }
-  const out: Style = {};
-  if (fg !== undefined) out.fg = fg;
-  if (bg !== undefined) out.bg = bg;
-  if (st.bold) out.b = true;
-  if (st.italic) out.i = true;
-  if (st.underline) out.u = true;
-  if (st.strikethrough) out.s = true;
-  if (st.faint) out.f = true;
-  if (st.invisible) out.invisible = true;
-  return out;
-}
-
-function styleKey(s: Style): string {
-  return `${JSON.stringify(s.fg ?? null)}|${JSON.stringify(s.bg ?? null)}|${s.b ? 1 : 0}${s.i ? 1 : 0}${s.u ? 1 : 0}${s.s ? 1 : 0}${s.f ? 1 : 0}${s.invisible ? 1 : 0}`;
-}
-
-export function lineContentsToLine(lc: LineContents): Line {
-  const cps = Array.from(lc.text ?? "");
-  const cellCp: number[] = [];
-  for (const c of lc.codePointsPerCell) for (let k = 0; k < (c.repeats ?? 1); k++) cellCp.push(c.numCodePoints ?? 1);
-  if (cellCp.length === 0) for (let k = 0; k < cps.length; k++) cellCp.push(1);
-  const cellStyle: (CellStyle | undefined)[] = [];
-  for (const s of lc.style) for (let k = 0; k < (s.repeats ?? 1); k++) cellStyle.push(s);
-
-  const runs: Run[] = [];
-  let cur: { style: Style; key: string; text: string; cells: number } | null = null;
-  let ti = 0;
-  for (let k = 0; k < cellCp.length; k++) {
-    const n = cellCp[k] as number;
-    let cellText: string;
-    if (n === 0) cellText = " ";
-    else {
-      cellText = cps.slice(ti, ti + n).join("");
-      ti += n;
-    }
-    const st = normalize(cellStyle[k]);
-    if (st.invisible) cellText = " ".repeat(Math.max(1, codePoints(cellText)));
-    const key = styleKey(st);
-    if (cur && cur.key === key) {
-      cur.text += cellText;
-      cur.cells += 1;
-    } else {
-      if (cur) runs.push(toRun(cur));
-      cur = { style: st, key, text: cellText, cells: 1 };
-    }
-  }
-  if (cur) runs.push(toRun(cur));
-  const line: Line = { r: trimTrailing(mergeRuns(runs)) };
-  if (lc.continuation === LineContents_Continuation.CONTINUATION_SOFT_EOL) line.w = true;
-  return line;
-}
-
-function toRun(c: { style: Style; text: string; cells: number }): Run {
-  const r: Run = { t: c.text };
-  if (c.style.fg !== undefined) r.fg = c.style.fg;
-  if (c.style.bg !== undefined) r.bg = c.style.bg;
-  if (c.style.b) r.b = true;
-  if (c.style.i) r.i = true;
-  if (c.style.u) r.u = true;
-  if (c.style.s) r.s = true;
-  if (c.style.f) r.f = true;
-  if (c.cells !== codePoints(c.text)) r.n = c.cells;
-  return r;
-}
-
-export interface ScreenShape {
-  cols: number;
-  rows: number;
-  cursor: Cursor;
-  lines: Line[];
-  scrollbackTotal: number;
-}
-
-export function bufferToScreen(resp: GetBufferResponse, rows: number, cols: number): ScreenShape {
-  const first = Number(resp.windowedCoordRange?.coordRange?.start?.y ?? 0n);
-  const lines = resp.contents.map(lineContentsToLine);
-  while (lines.length < rows) lines.push(emptyLine());
-  if (lines.length > rows) lines.length = rows;
-  const cy = resp.cursor ? Number(resp.cursor.y ?? 0n) - first : -1;
-  const cursor: Cursor = { x: resp.cursor?.x ?? 0, y: Math.max(-1, Math.min(rows - 1, cy)) };
-  return { cols, rows, cursor, lines, scrollbackTotal: first };
-}
-```
-
-- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`. The fixture test needs at least one `getbuffer-*.json` from Plan 01 Task 2; if none exists the `it.each` runs zero cases (that is acceptable on CI but the author's machine must have one).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add apps/agent
-git commit -m "feat(agent): iTerm2 cell/style conversion to runs"
-```
-
----
-
-### Task 6: `TerminalBackend` types and `ITerm2Backend` (spec 8.4, 8.5.3, 8.5.4, 8.5.6)
-
-**Files:**
-- Create: `apps/agent/src/backends/types.ts`, `apps/agent/src/backends/iterm2/backend.ts`, `apps/agent/test/iterm2-backend.test.ts`
-
-**Interfaces:**
-- `types.ts` exactly as spec 8.4 plus: `class BackendUnavailable extends Error { hint: string }`, `class SessionGone extends Error`, `class Unsupported extends Error`, and two optional methods on `TerminalBackend`: `tmuxWindowIds?(): Set<string>` (iTerm2: tmux-integration window ids it shows) and `tmuxWindowIdOf?(nativeId: string): string | undefined` (tmux backend, Plan 04).
-- `ITerm2Backend implements TerminalBackend` with `constructor(client: ITerm2Client, log: Logger)`. Capabilities `{ subscribe: true, prompts: true, createSession: true, focus: true, history: true, absoluteLines: true }`.
-
-- [ ] **Step 1: Write `types.ts`**
+- [ ] **Step 1: Write `backends/types.ts`**
 
 `apps/agent/src/backends/types.ts`:
 ```ts
@@ -1648,6 +1489,13 @@ export class Unsupported extends Error {
     this.name = "Unsupported";
   }
 }
+/** Spec 8.12: a `session.create` whose windowId prefix does not match `where.backend`. */
+export class BadWindow extends Error {
+  constructor(windowId: string) {
+    super(`bad-window: ${windowId}`);
+    this.name = "BadWindow";
+  }
+}
 
 export interface TerminalBackend {
   readonly name: BackendName;
@@ -1666,13 +1514,293 @@ export interface TerminalBackend {
 }
 ```
 
-- [ ] **Step 2: Write the failing tests** (fake `ITerm2Client` via a scripted `request` and `emit`)
+- [ ] **Step 2: Write the failing tests**
+
+`apps/agent/test/convert.test.ts`:
+```ts
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { create, fromJson } from "@bufbuild/protobuf";
+import { codePoints } from "@shellbell/protocol";
+import { describe, expect, it } from "vitest";
+import { bufferToScreen, lineContentsToLine } from "../src/backends/iterm2/convert.js";
+import {
+  AlternateColor,
+  CellStyleSchema,
+  CodePointsPerCellSchema,
+  LineContents_Continuation,
+  LineContentsSchema,
+  RGBColorSchema,
+  ServerOriginatedMessageSchema,
+} from "../src/backends/iterm2/gen/iterm2_pb.js";
+
+const style = (init: Parameters<typeof create<typeof CellStyleSchema>>[1]) => create(CellStyleSchema, init);
+
+describe("lineContentsToLine", () => {
+  it("unstyled text becomes one run", () => {
+    const lc = create(LineContentsSchema, { text: "hello" });
+    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "hello" }] });
+  });
+
+  it("RLE styles split into runs; fgStandard/bgRgb/bold map; trailing spaces trimmed", () => {
+    const lc = create(LineContentsSchema, {
+      text: "abcd   ",
+      style: [
+        style({ fgColor: { case: "fgStandard", value: 1 }, bold: true, repeats: 2 }),
+        style({ bgColor: { case: "bgRgb", value: create(RGBColorSchema, { red: 9, green: 8, blue: 7 }) }, repeats: 2 }),
+        style({ repeats: 3 }),
+      ],
+    });
+    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "ab", fg: 1, b: true }, { t: "cd", bg: [9, 8, 7] }] });
+  });
+
+  it("inverse swaps with 15/0 defaults; alternate colors are undefined; invisible becomes spaces", () => {
+    const lc = create(LineContentsSchema, {
+      text: "xyzA",
+      style: [
+        style({ inverse: true, repeats: 1 }),
+        style({ fgColor: { case: "fgAlternate", value: AlternateColor.DEFAULT }, repeats: 1 }),
+        style({ invisible: true, fgColor: { case: "fgStandard", value: 2 }, repeats: 1 }),
+        style({ repeats: 1 }),
+      ],
+    });
+    // "A" keeps the invisible cell off the end of the line, so trimTrailing leaves it alone.
+    expect(lineContentsToLine(lc)).toEqual({
+      r: [{ t: "x", fg: 0, bg: 15 }, { t: "y" }, { t: " ", fg: 2 }, { t: "A" }],
+    });
+  });
+
+  it("a trailing space-only run with no bg is dropped (shipped trimTrailing)", () => {
+    const lc = create(LineContentsSchema, {
+      text: "xz",
+      style: [
+        style({ repeats: 1 }),
+        style({ invisible: true, fgColor: { case: "fgStandard", value: 2 }, repeats: 1 }),
+      ],
+    });
+    // screen.ts trimTrailing() pops any trailing run whose text trims to "" and that has no bg,
+    // so the invisible cell disappears entirely when it is last on the line.
+    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "x" }] });
+  });
+
+  it("code_points_per_cell: uninitialized cell → space, combining mark folds into one cell, n set when cells ≠ code points", () => {
+    // The `text` literal below is DECOMPOSED on purpose: it is the two code points n + U+0303,
+    // not the precomposed U+00F1. Editors and "fix mojibake" passes love to normalise it to NFC,
+    // which is one code point -- that would make cells === codePoints, silently drop `n`, and fail
+    // this test for a reason invisible in a diff. Verify with
+    // `node -e 'console.log([..."<the literal>"].length)'` -> must print 3, not 2.
+    // display: "a<uninitialized cell><n + combining tilde>".
+    const lc = create(LineContentsSchema, {
+      text: "añ",
+      codePointsPerCell: [
+        create(CodePointsPerCellSchema, { numCodePoints: 1, repeats: 1 }),
+        create(CodePointsPerCellSchema, { numCodePoints: 0, repeats: 1 }),
+        create(CodePointsPerCellSchema, { numCodePoints: 2, repeats: 1 }),
+      ],
+    });
+    const line = lineContentsToLine(lc);
+    expect(line.r).toHaveLength(1);
+    expect(line.r[0]?.t).toBe("a ñ");
+    expect(line.r[0]?.n).toBe(3);
+    expect(codePoints(line.r[0]?.t ?? "")).toBe(4);
+  });
+
+  it("soft wrap sets w", () => {
+    const lc = create(LineContentsSchema, { text: "x", continuation: LineContents_Continuation.SOFT_EOL });
+    expect(lineContentsToLine(lc)).toEqual({ r: [{ t: "x" }], w: true });
+  });
+});
+
+describe("real fixtures", () => {
+  const dir = join(import.meta.dirname, "fixtures");
+  const files = readdirSync(dir).filter((f) => f.startsWith("getbuffer-") && f.endsWith(".json"));
+
+  it("has at least one committed GetBuffer fixture", () => {
+    expect(files.length).toBeGreaterThan(0);
+  });
+
+  it.each(files)("%s converts with invariants", (file) => {
+    const msg = fromJson(ServerOriginatedMessageSchema, JSON.parse(readFileSync(join(dir, file), "utf8")));
+    if (msg.submessage.case !== "getBufferResponse") throw new Error("fixture is not a GetBufferResponse");
+    const resp = msg.submessage.value;
+    let sawRun = false;
+    for (const lc of resp.contents) {
+      const line = lineContentsToLine(lc);
+      const cells = line.r.reduce((n, r) => n + (r.n ?? codePoints(r.t)), 0);
+      const totalCells = lc.codePointsPerCell.reduce((n, c) => n + (c.repeats || 1), 0) || codePoints(lc.text);
+      // 1. Conversion never invents cells.
+      expect(cells).toBeLessThanOrEqual(totalCells);
+      for (const run of line.r) {
+        sawRun = true;
+        // 2. mergeRuns never leaves an empty run behind.
+        expect(run.t.length).toBeGreaterThan(0);
+        // 3. `n` is present only when it differs from the code-point count (spec 7.4).
+        if (run.n !== undefined) expect(run.n).not.toBe(codePoints(run.t));
+        // 4. Palette colors stay in range.
+        if (typeof run.fg === "number") expect(run.fg).toBeLessThanOrEqual(255);
+        if (typeof run.bg === "number") expect(run.bg).toBeLessThanOrEqual(255);
+      }
+      // 5. trimTrailing invariant: no trailing space-only run without a bg survives.
+      const last = line.r[line.r.length - 1];
+      if (last && last.bg === undefined) expect(last.t.replace(/ +$/, "")).not.toBe("");
+    }
+    expect(sawRun).toBe(true);
+    const rows = resp.contents.length || 1;
+    const screen = bufferToScreen(resp, rows, 80);
+    expect(screen.lines.length).toBe(rows);
+    expect(screen.cols).toBe(80);
+    expect(screen.scrollbackTotal).toBeGreaterThanOrEqual(0);
+    expect(screen.cursor.y).toBeGreaterThanOrEqual(-1);
+    expect(screen.cursor.y).toBeLessThanOrEqual(rows - 1);
+  });
+});
+```
+
+- [ ] **Step 3: Run tests to verify they fail** — `pnpm test`.
+
+- [ ] **Step 4: Implement `convert.ts`**
+
+`apps/agent/src/backends/iterm2/convert.ts`:
+```ts
+import { codePoints, emptyLine, mergeRuns, trimTrailing, type Color, type Cursor, type Line, type Run } from "@shellbell/protocol";
+import type { Screen } from "../types.js";
+import { type CellStyle, type GetBufferResponse, type LineContents, LineContents_Continuation } from "./gen/iterm2_pb.js";
+
+interface Style {
+  fg?: Color;
+  bg?: Color;
+  b?: boolean;
+  i?: boolean;
+  u?: boolean;
+  s?: boolean;
+  f?: boolean;
+  invisible?: boolean;
+}
+
+function normalize(st: CellStyle | undefined): Style {
+  if (!st) return {};
+  let fg: Color | undefined;
+  let bg: Color | undefined;
+  if (st.fgColor.case === "fgStandard") fg = st.fgColor.value;
+  else if (st.fgColor.case === "fgRgb") fg = [st.fgColor.value.red ?? 0, st.fgColor.value.green ?? 0, st.fgColor.value.blue ?? 0];
+  if (st.bgColor.case === "bgStandard") bg = st.bgColor.value;
+  else if (st.bgColor.case === "bgRgb") bg = [st.bgColor.value.red ?? 0, st.bgColor.value.green ?? 0, st.bgColor.value.blue ?? 0];
+  if (st.inverse) {
+    const f = fg ?? 15;
+    const g = bg ?? 0;
+    fg = g;
+    bg = f;
+  }
+  const out: Style = {};
+  if (fg !== undefined) out.fg = fg;
+  if (bg !== undefined) out.bg = bg;
+  if (st.bold) out.b = true;
+  if (st.italic) out.i = true;
+  if (st.underline) out.u = true;
+  if (st.strikethrough) out.s = true;
+  if (st.faint) out.f = true;
+  if (st.invisible) out.invisible = true;
+  return out;
+}
+
+function styleKey(s: Style): string {
+  return `${JSON.stringify(s.fg ?? null)}|${JSON.stringify(s.bg ?? null)}|${s.b ? 1 : 0}${s.i ? 1 : 0}${s.u ? 1 : 0}${s.s ? 1 : 0}${s.f ? 1 : 0}${s.invisible ? 1 : 0}`;
+}
+
+export function lineContentsToLine(lc: LineContents): Line {
+  const cps = Array.from(lc.text ?? "");
+  // `repeats` has no proto default, so protobuf-es materialises 0 when it is unset -- `|| 1`, not
+  // `?? 1`, is what turns that into "one cell". `num_code_points` DOES carry [default = 1], so it
+  // is already 1 when unset, and an explicit 0 legitimately means "uninitialized cell".
+  const cellCp: number[] = [];
+  for (const c of lc.codePointsPerCell) for (let k = 0; k < (c.repeats || 1); k++) cellCp.push(c.numCodePoints);
+  if (cellCp.length === 0) for (let k = 0; k < cps.length; k++) cellCp.push(1);
+  const cellStyle: (CellStyle | undefined)[] = [];
+  for (const s of lc.style) for (let k = 0; k < (s.repeats || 1); k++) cellStyle.push(s);
+
+  const runs: Run[] = [];
+  let cur: { style: Style; key: string; text: string; cells: number } | null = null;
+  let ti = 0;
+  for (let k = 0; k < cellCp.length; k++) {
+    const n = cellCp[k] as number;
+    let cellText: string;
+    if (n === 0) cellText = " ";
+    else {
+      cellText = cps.slice(ti, ti + n).join("");
+      ti += n;
+    }
+    const st = normalize(cellStyle[k]);
+    if (st.invisible) cellText = " ".repeat(Math.max(1, codePoints(cellText)));
+    const key = styleKey(st);
+    if (cur && cur.key === key) {
+      cur.text += cellText;
+      cur.cells += 1;
+    } else {
+      if (cur) runs.push(toRun(cur));
+      cur = { style: st, key, text: cellText, cells: 1 };
+    }
+  }
+  if (cur) runs.push(toRun(cur));
+  const line: Line = { r: trimTrailing(mergeRuns(runs)) };
+  // protobuf-es v2 strips the enum-name prefix: proto CONTINUATION_SOFT_EOL -> TS SOFT_EOL.
+  if (lc.continuation === LineContents_Continuation.SOFT_EOL) line.w = true;
+  return line;
+}
+
+function toRun(c: { style: Style; text: string; cells: number }): Run {
+  const r: Run = { t: c.text };
+  if (c.style.fg !== undefined) r.fg = c.style.fg;
+  if (c.style.bg !== undefined) r.bg = c.style.bg;
+  if (c.style.b) r.b = true;
+  if (c.style.i) r.i = true;
+  if (c.style.u) r.u = true;
+  if (c.style.s) r.s = true;
+  if (c.style.f) r.f = true;
+  if (c.cells !== codePoints(c.text)) r.n = c.cells;
+  return r;
+}
+
+export function bufferToScreen(resp: GetBufferResponse, rows: number, cols: number): Screen {
+  const first = Number(resp.windowedCoordRange?.coordRange?.start?.y ?? 0n);
+  const lines = resp.contents.map(lineContentsToLine);
+  while (lines.length < rows) lines.push(emptyLine());
+  if (lines.length > rows) lines.length = rows;
+  const cy = resp.cursor ? Number(resp.cursor.y ?? 0n) - first : -1;
+  const cursor: Cursor = { x: resp.cursor?.x ?? 0, y: Math.max(-1, Math.min(rows - 1, cy)) };
+  return { cols, rows, cursor, lines, scrollbackTotal: first };
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass** — `pnpm test`. `apps/agent/test/fixtures/getbuffer-1788542830080.json` is committed, so the fixture suite must run **at least one** case — the `expect(files.length).toBeGreaterThan(0)` guard fails loudly if the fixtures ever go missing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add apps/agent
+git commit -m "feat(agent): iTerm2 cell/style conversion to runs"
+```
+
+---
+
+### Task 6: `TerminalBackend` types and `ITerm2Backend` (spec 8.4, 8.5.3, 8.5.4, 8.5.6)
+
+**Files:**
+- Create: `apps/agent/src/backends/iterm2/backend.ts`, `apps/agent/test/iterm2-backend.test.ts`
+- Already created in Task 5: `apps/agent/src/backends/types.ts`
+
+**Interfaces:**
+- `ITerm2Backend implements TerminalBackend` with `constructor(client: ITerm2Client, log: Logger, opts?: { backoffMinMs?: number; backoffMaxMs?: number })`. Capabilities `{ subscribe: true, prompts: true, createSession: true, focus: true, history: true, absoluteLines: true }`.
+- **Reconnect (spec 8.5.1 step 4).** When the iTerm2 socket closes, the backend clears its session state, emits `layout-changed`, and retries `client.connect()` with backoff **1 s → 2 s → 4 s → 8 s → 16 s → 30 s (cap)**, resetting the attempt counter on a successful connect. A fresh cookie is requested on every attempt (`ITerm2Client.connect()` already calls the cookie provider each time). `close()` cancels any pending retry. The `ws://localhost:1912` TCP fallback in spec 8.5.1 is **not** built in this plan (see the corrections block at the end).
+
+`types.ts` was created in Task 5 (it defines `Screen`, which `convert.ts` returns) — do not re-create it here.
+
+- [ ] **Step 1: Write the failing tests** (fake `ITerm2Client` via a scripted `request` and `emit`)
 
 `apps/agent/test/iterm2-backend.test.ts`:
 ```ts
 import { EventEmitter } from "node:events";
 import { create } from "@bufbuild/protobuf";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ITerm2Backend } from "../src/backends/iterm2/backend.js";
 import type { ClientSub } from "../src/backends/iterm2/client.js";
 import {
@@ -1687,7 +1815,7 @@ import {
   ListSessionsResponseSchema,
   NotificationResponseSchema,
   NotificationSchema,
-  PromptNotification_CommandEndSchema,
+  PromptNotificationCommandEndSchema,
   PromptNotificationSchema,
   ScreenUpdateNotificationSchema,
   SendTextResponseSchema,
@@ -1798,10 +1926,38 @@ describe("ITerm2Backend", () => {
     client.emit(
       "notification",
       create(NotificationSchema, {
-        promptNotification: create(PromptNotificationSchema, { session: "S1", event: { case: "commandEnd", value: create(PromptNotification_CommandEndSchema, { status: 0 }) } }),
+        promptNotification: create(PromptNotificationSchema, { session: "S1", event: { case: "commandEnd", value: create(PromptNotificationCommandEndSchema, { status: 0 }) } }),
       }),
     );
     expect(events).toEqual(["screen-changed:S1", "command-end:S1"]);
+  });
+
+  it("reconnects with backoff after the iTerm2 socket closes, and stops after close()", async () => {
+    vi.useFakeTimers();
+    const client = new FakeClient();
+    let connects = 0;
+    client.connect = async () => {
+      connects++;
+      client.connected = true;
+    };
+    const b = new ITerm2Backend(client as never, log, { minMs: 10, maxMs: 40 });
+    await b.connect();
+    expect(connects).toBe(1);
+    client.connected = false;
+    client.emit("close");
+    await vi.advanceTimersByTimeAsync(15);
+    expect(connects).toBe(2); // first retry at 10 ms
+    client.connected = false;
+    client.emit("close");
+    await vi.advanceTimersByTimeAsync(15);
+    expect(connects).toBe(2); // second retry is at 20 ms, not yet due
+    await vi.advanceTimersByTimeAsync(15);
+    expect(connects).toBe(3);
+    await b.close();
+    client.emit("close");
+    await vi.advanceTimersByTimeAsync(200);
+    expect(connects).toBe(3); // close() cancels the retry loop
+    vi.useRealTimers();
   });
 
   it("sendText maps SESSION_NOT_FOUND to SessionGone", async () => {
@@ -1814,9 +1970,9 @@ describe("ITerm2Backend", () => {
 });
 ```
 
-- [ ] **Step 3: Run tests to verify they fail** — `pnpm test`.
+- [ ] **Step 2: Run tests to verify they fail** — `pnpm test`.
 
-- [ ] **Step 4: Implement `backend.ts`**
+- [ ] **Step 3: Implement `backend.ts`**
 
 `apps/agent/src/backends/iterm2/backend.ts`:
 ```ts
@@ -1876,9 +2032,14 @@ export class ITerm2Backend implements TerminalBackend {
   private readonly subscribed = new Set<string>();
   private readonly log: Logger;
 
+  private attempt = 0;
+  private retryTimer: NodeJS.Timeout | null = null;
+  private closed = false;
+
   constructor(
     private readonly client: ITerm2Client,
     log: Logger,
+    private readonly backoff: { minMs?: number; maxMs?: number } = {},
   ) {
     this.log = log.child({ backend: "iterm2" });
     this.client.on("notification", (n) => this.onNotification(n));
@@ -1887,10 +2048,29 @@ export class ITerm2Backend implements TerminalBackend {
       this.order = [];
       this.subscribed.clear();
       this.emit({ type: "layout-changed" });
+      this.scheduleReconnect();
     });
   }
 
+  /** Spec 8.5.1 step 4: 1 s -> 2 s -> 4 s -> 8 s -> 16 s -> 30 s cap, fresh cookie each attempt. */
+  private scheduleReconnect(): void {
+    if (this.closed || this.retryTimer) return;
+    const min = this.backoff.minMs ?? 1000;
+    const max = this.backoff.maxMs ?? 30_000;
+    const delay = Math.min(max, min * 2 ** this.attempt);
+    this.attempt = Math.min(this.attempt + 1, 10);
+    this.log.info("iTerm2 gone; retrying", { delayMs: delay, attempt: this.attempt });
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.connect().catch((err) => {
+        this.log.warn("iTerm2 reconnect failed", { err: String(err) });
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
   async connect(): Promise<void> {
+    this.closed = false;
     if (!this.client.connected) {
       try {
         await this.client.connect();
@@ -1898,6 +2078,7 @@ export class ITerm2Backend implements TerminalBackend {
         throw new BackendUnavailable(String(err), "iTerm2 → Settings → General → Magic → ✓ Enable Python API, then run `shellbell` again.");
       }
     }
+    this.attempt = 0;
     for (const t of [NotificationType.NOTIFY_ON_LAYOUT_CHANGE, NotificationType.NOTIFY_ON_NEW_SESSION, NotificationType.NOTIFY_ON_TERMINATE_SESSION, NotificationType.NOTIFY_ON_FOCUS_CHANGE]) {
       await this.client.request({ case: "notificationRequest", value: create(NotificationRequestSchema, { subscribe: true, notificationType: t }) });
     }
@@ -1910,6 +2091,9 @@ export class ITerm2Backend implements TerminalBackend {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
     this.client.close();
   }
 
@@ -2165,13 +2349,13 @@ export class ITerm2Backend implements TerminalBackend {
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass** — `pnpm test`. If generated names differ (e.g. `ListSessionsResponse_TabSchema`), open `gen/iterm2_pb.ts` and use the emitted names — protobuf-es v2 names nested messages `Outer_InnerSchema` and nested enums `Outer_Inner`.
+- [ ] **Step 4: Run tests to verify they pass** — `pnpm test`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add apps/agent
-git commit -m "feat(agent): TerminalBackend types and iTerm2 backend"
+git commit -m "feat(agent): iTerm2 backend with reconnect"
 ```
 
 ---
@@ -2184,13 +2368,16 @@ git commit -m "feat(agent): TerminalBackend types and iTerm2 backend"
 **Interfaces:**
 - `ScreenTrackerOptions { backend: TerminalBackend; sink: (connId: string, msg: InnerMessage) => void; log; intervalMs?: 125; maxFramesPerSecond?: 40; maxEncodedBytes?: 262144; now?: () => number }`
 - `class ScreenTracker`: `start()`, `stop()`, `setViewed(connId: string, sessionId: string | null)`, `dropViewer(connId)`, `markDirty(sessionId)`, `forceSnapshot(connId, sessionId)`, `sessionRemoved(sessionId)`, `setIntervalMs(ms)`; getter `viewedBy(sessionId): string[]`.
+- **The tracker owns its own dirty tracking.** `start()` calls `backend.on(...)` and keeps the unsubscribe function; it marks a session dirty on `BackendEvent` kind **`screen-changed`** (the only kind that means "output happened") and drops session state on **`session-removed`**. Every other kind is ignored here — layout/title/focus changes are the `Agent`'s business. `stop()` unsubscribes. `markDirty()` and `sessionRemoved()` stay public and idempotent so tests (and the `Agent`) can drive them directly.
+- **Frame budget is global, not per viewer (Plan 02 parked item).** `maxFramesPerSecond` (default **40**) is a single token bucket over **every** `sink` call, because all of them leave through the agent's one relay socket, which the relay rate-limits at 60 msg/s per connection and closes with `4429` when exceeded. A per-viewer cap does not bound the total: 8 viewers × 8 fps = 64 msg/s → disconnect. When the budget is exhausted in a tick, the remaining viewers are **coalesced** — skipped this tick, `skipped++`. A skipped viewer's `lastSentGen` goes stale, so the existing lagging-viewer rule already gives it a fresh `screen.snapshot` on the next tick it is served; no state is lost.
+- **`degraded` on a starved viewer.** A viewer coalesced **3 or more consecutive ticks** is served its catch-up `screen.snapshot` with styles stripped (`stripStyles`) and `degraded: true` — the same flag and the same cheap payload already used for the 256 KB cap. This is deliberately the *snapshot* path: `screen.diff` has **no** `degraded` field in `packages/protocol/src/inner.ts`, and this plan does not change the protocol package.
 - `test/fakes/fake-backend.ts`: `class FakeBackend implements TerminalBackend` with in-memory sessions: `addSession(id, { cols, rows, lines: string[], scrollbackTotal?: number, absoluteLines? })`, `setLines(id, lines: string[])`, `appendLine(id, text)` (scrolls: drops top row, bumps `scrollbackTotal` unless `saturated`), `saturated = false`, `sentText: { id; text }[]`, `emit(e)`, `getScreenCalls`.
 
 - [ ] **Step 1: Write the fake backend**
 
 `apps/agent/test/fakes/fake-backend.ts`:
 ```ts
-import type { Capabilities, CreateWhere, Line, SessionInfo } from "@shellbell/protocol";
+import type { BackendName, Capabilities, CreateWhere, Line, SessionInfo } from "@shellbell/protocol";
 import { Unsupported, type BackendEvent, type Screen, type TerminalBackend } from "../../src/backends/types.js";
 
 interface S {
@@ -2202,13 +2389,21 @@ interface S {
 }
 
 export class FakeBackend implements TerminalBackend {
-  readonly name = "iterm2" as const;
   capabilities: Capabilities = { subscribe: true, prompts: true, createSession: true, focus: true, history: true, absoluteLines: true };
   saturated = false;
   sentText: { id: string; text: string }[] = [];
   getScreenCalls = 0;
+  /**
+   * Declared as optional properties (not methods) so tests can assign them. `TerminalBackend`
+   * declares them as optional methods, which a property of function type satisfies.
+   */
+  tmuxWindowIds?: () => Set<string>;
+  tmuxWindowIdOf?: (nativeId: string) => string | undefined;
   private sessions = new Map<string, S>();
   private handlers = new Set<(e: BackendEvent) => void>();
+
+  /** Pass "tmux" to stand in for the tmux backend in registry tests. */
+  constructor(readonly name: BackendName = "iterm2") {}
 
   addSession(id: string, o: { cols?: number; rows?: number; lines?: string[]; scrollbackTotal?: number }): void {
     const rows = o.rows ?? 3;
@@ -2243,7 +2438,7 @@ export class FakeBackend implements TerminalBackend {
   async close(): Promise<void> {}
   async listSessions(): Promise<SessionInfo[]> {
     return [...this.sessions.entries()].map(([id, s], i) => ({
-      id, backend: "iterm2", title: id, cols: s.cols, rows: s.rows, windowId: "w", windowNumber: 1, tabId: `t${i}`, tabIndex: i, paneIndex: 0, isFocusedOnMac: i === 0, state: "unknown",
+      id, backend: this.name, title: id, cols: s.cols, rows: s.rows, windowId: "w", windowNumber: 1, tabId: `t${i}`, tabIndex: i, paneIndex: 0, isFocusedOnMac: i === 0, state: "unknown",
     }));
   }
   async getScreen(id: string): Promise<Screen> {
@@ -2320,6 +2515,7 @@ describe("ScreenTracker", () => {
     expect(sent[0]?.msg.type).toBe("screen.snapshot");
     expect(text(sent[0]?.msg as InnerMessage)).toEqual(["a", "b", "c"]);
     backend.appendLine("S", "d");
+    tracker.markDirty("S"); // idempotent: the tracker also hears screen-changed itself
     await flush();
     const diff = sent[1]?.msg;
     expect(diff?.type).toBe("screen.diff");
@@ -2330,6 +2526,7 @@ describe("ScreenTracker", () => {
     expect(diff.gen).toBe(2);
     tracker.setViewed("p1", null);
     backend.appendLine("S", "e");
+    tracker.markDirty("S");
     await flush();
     expect(sent.length).toBe(2);
   });
@@ -2340,12 +2537,14 @@ describe("ScreenTracker", () => {
     tracker.setViewed("p1", "S");
     await flush();
     backend.appendLine("S", "d");
+    tracker.markDirty("S");
     await flush();
     const diff = sent[1]?.msg;
     if (diff?.type !== "screen.diff") throw new Error(`expected diff, got ${diff?.type}`);
     expect(diff.scroll).toBe(1);
     expect(diff.scrollbackTotal).toBe(11);
     backend.appendLine("S", "e");
+    tracker.markDirty("S");
     await flush();
     expect((sent[2]?.msg as { scrollbackTotal: number }).scrollbackTotal).toBe(12);
   });
@@ -2354,11 +2553,13 @@ describe("ScreenTracker", () => {
     tracker.setViewed("p1", "S");
     await flush();
     backend.clear("S");
+    tracker.markDirty("S");
     await flush();
     const snap = sent[1]?.msg;
     expect(snap?.type).toBe("screen.snapshot");
     expect((snap as { reset?: boolean }).reset).toBe(true);
     backend.setLines("S", ["x", "y", "z"]);
+    tracker.markDirty("S");
     await flush();
     expect(sent[2]?.msg.type).toBe("screen.snapshot");
     expect((sent[2]?.msg as { reset?: boolean }).reset).toBeUndefined();
@@ -2368,11 +2569,13 @@ describe("ScreenTracker", () => {
     tracker.setViewed("p1", "S");
     await flush();
     backend.appendLine("S", "d");
+    tracker.markDirty("S");
     await flush();
     tracker.setViewed("p2", "S"); // joins at gen 2 → snapshot
     await flush();
     expect(sent.filter((s) => s.conn === "p2").map((s) => s.msg.type)).toEqual(["screen.snapshot"]);
     backend.appendLine("S", "e");
+    tracker.markDirty("S");
     await flush();
     const last = sent.slice(-2).map((s) => [s.conn, s.msg.type].join(":")).sort();
     expect(last).toEqual(["p1:screen.diff", "p2:screen.diff"]);
@@ -2391,6 +2594,7 @@ describe("ScreenTracker", () => {
     await flush();
     const before = backend.getScreenCalls;
     for (let i = 0; i < 10; i++) backend.appendLine("S", `l${i}`);
+    tracker.markDirty("S");
     await flush();
     expect(backend.getScreenCalls - before).toBe(1);
   });
@@ -2400,6 +2604,63 @@ describe("ScreenTracker", () => {
     await flush();
     tracker.sessionRemoved("S");
     expect(tracker.viewedBy("S")).toEqual([]);
+  });
+
+  it("marks dirty from the backend's own screen-changed event, with no explicit markDirty", async () => {
+    tracker.setViewed("p1", "S");
+    await flush();
+    expect(sent).toHaveLength(1);
+    backend.appendLine("S", "d"); // emits screen-changed; the tracker subscribed in start()
+    await flush();
+    expect(sent).toHaveLength(2);
+    expect(sent[1]?.msg.type).toBe("screen.diff");
+  });
+
+  it("caps TOTAL sink calls per second across all viewers and coalesces the rest", async () => {
+    // Plan 02 parked item: every frame leaves through the agent's single relay socket, which the
+    // relay caps at 60 msg/s (close 4429). 10 viewers at 8 fps is 80 msg/s without a GLOBAL bucket;
+    // a per-viewer cap of 40 would not stop it. 7 flushes of 130 ms stay inside one 1 s window.
+    for (let i = 0; i < 10; i++) tracker.setViewed(`v${i}`, "S");
+    for (let t = 0; t < 7; t++) {
+      backend.appendLine("S", `line${t}`);
+      tracker.markDirty("S");
+      await flush();
+    }
+    expect(sent.length).toBeGreaterThanOrEqual(10); // at least one tick was served in full
+    expect(sent.length).toBeLessThanOrEqual(40); // 70 attempts, 40 tokens
+  });
+
+  it("sends a degraded, style-stripped snapshot to a viewer coalesced 3+ consecutive ticks", async () => {
+    // maxFramesPerSecond 1 means exactly one frame per 1 s window; "hog" is first in the viewer map
+    // and takes it every time, so "starved" accumulates coalesced ticks.
+    tracker.stop();
+    sent = [];
+    tracker = new ScreenTracker({ backend, sink: (conn, msg) => sent.push({ conn, msg }), log, maxFramesPerSecond: 1, now: () => Date.now() });
+    tracker.start();
+    tracker.setViewed("hog", "S");
+    tracker.setViewed("starved", "S");
+    // Each pass advances past the 1 s bucket window, so exactly one token is issued per pass.
+    const pass = async () => {
+      backend.appendLine("S", "out");
+      tracker.markDirty("S");
+      await vi.advanceTimersByTimeAsync(1100);
+    };
+    await pass();
+    await pass();
+    await pass();
+    expect(sent.every((x) => x.conn === "hog")).toBe(true); // starved got nothing: 3 coalesced ticks
+    tracker.dropViewer("hog");
+    await pass(); // now "starved" wins the token
+    const starved = sent.filter((x) => x.conn === "starved");
+    expect(starved).toHaveLength(1);
+    const frame = starved[0]?.msg;
+    if (frame?.type !== "screen.snapshot") throw new Error(`expected snapshot, got ${frame?.type}`);
+    expect(frame.degraded).toBe(true);
+    // stripStyles collapses every row to at most one unstyled run
+    for (const line of frame.lines) {
+      expect(line.r.length).toBeLessThanOrEqual(1);
+      expect(line.r[0]?.fg).toBeUndefined();
+    }
   });
 });
 ```
@@ -2425,7 +2686,7 @@ export interface ScreenTrackerOptions {
 }
 
 interface SessionState {
-  viewers: Map<string, { lastSentGen: number; forceSnapshot: boolean }>;
+  viewers: Map<string, { lastSentGen: number; forceSnapshot: boolean; skipped: number }>;
   dirty: boolean;
   inflight: boolean;
   lastKeys: string[];
@@ -2436,7 +2697,7 @@ interface SessionState {
   gen: number;
 }
 
-interface ViewerRate {
+interface Budget {
   windowStart: number;
   count: number;
 }
@@ -2444,11 +2705,15 @@ interface ViewerRate {
 const SNAPSHOT_RATIO = 0.6;
 const OVERLAP_MAX_SHIFT = 16;
 const OVERLAP_MIN_MATCH = 0.8;
+/** Consecutive coalesced ticks after which a viewer's catch-up frame is sent degraded. */
+const COALESCE_DEGRADE_TICKS = 3;
 
 export class ScreenTracker {
   private readonly sessions = new Map<string, SessionState>();
   private readonly viewerSession = new Map<string, string>();
-  private readonly rates = new Map<string, ViewerRate>();
+  /** ONE bucket for every sink call: they all share the agent's single relay socket. */
+  private budget: Budget = { windowStart: 0, count: 0 };
+  private unsubscribe: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
   private readonly now: () => number;
@@ -2462,19 +2727,29 @@ export class ScreenTracker {
 
   start(): void {
     if (this.timer) return;
+    // The tracker subscribes to the backend itself: `screen-changed` is the only event that means
+    // "there is new output", and `session-removed` is the only one that invalidates our state.
+    this.unsubscribe ??= this.opts.backend.on((e) => {
+      if (e.type === "screen-changed") this.markDirty(e.sessionId);
+      else if (e.type === "session-removed") this.sessionRemoved(e.sessionId);
+    });
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    this.unsubscribe?.();
+    this.unsubscribe = null;
   }
 
   setIntervalMs(ms: number): void {
-    this.intervalMs = Math.max(125, ms);
+    const next = Math.max(125, ms);
+    if (next === this.intervalMs) return;
+    this.intervalMs = next;
     if (this.timer) {
-      this.stop();
-      this.start();
+      clearInterval(this.timer);
+      this.timer = setInterval(() => void this.tick(), this.intervalMs);
     }
   }
 
@@ -2486,14 +2761,13 @@ export class ScreenTracker {
     }
     if (!sessionId) return;
     const s = this.state(sessionId);
-    s.viewers.set(connId, { lastSentGen: -1, forceSnapshot: true });
+    s.viewers.set(connId, { lastSentGen: -1, forceSnapshot: true, skipped: 0 });
     s.dirty = true;
     this.viewerSession.set(connId, sessionId);
   }
 
   dropViewer(connId: string): void {
     this.setViewed(connId, null);
-    this.rates.delete(connId);
   }
 
   viewedBy(sessionId: string): string[] {
@@ -2595,34 +2869,45 @@ export class ScreenTracker {
     s.lastRows = screen.rows;
 
     const base = { sessionId, cursor: screen.cursor, scrollbackTotal: s.reported, gen: s.gen };
-    const snapshot = (): InnerMessage => {
-      let msg: InnerMessage = { type: "screen.snapshot", ...base, cols: screen.cols, rows: screen.rows, lines: screen.lines, reset: reset || undefined };
-      if (encodeCbor(msg).byteLength > (this.opts.maxEncodedBytes ?? 262_144)) {
-        msg = { ...msg, type: "screen.snapshot", lines: screen.lines.map(stripStyles), degraded: true };
+    /** `degrade` is forced for a starved viewer; otherwise it is decided by the 256 KB cap. */
+    const snapshot = (degrade: boolean): InnerMessage => {
+      const full: InnerMessage = { type: "screen.snapshot", ...base, cols: screen.cols, rows: screen.rows, lines: screen.lines, reset: reset || undefined };
+      if (degrade || encodeCbor(full).byteLength > (this.opts.maxEncodedBytes ?? 262_144)) {
+        return { ...full, lines: screen.lines.map(stripStyles), degraded: true };
       }
-      return msg;
+      return full;
     };
     const diff: InnerMessage = { type: "screen.diff", ...base, scroll: delta, changed };
 
     for (const [conn, v] of s.viewers) {
-      if (!this.allow(conn)) continue;
-      const upToDate = v.lastSentGen === s.gen - 1 && !v.forceSnapshot && !forceSnapshotAll;
-      this.opts.sink(conn, upToDate ? diff : snapshot());
+      if (!this.spend()) {
+        // Global budget exhausted this tick: coalesce. `lastSentGen` stays stale, so this viewer
+        // is served a snapshot on the next tick it wins the budget.
+        v.skipped += 1;
+        continue;
+      }
+      const starved = v.skipped >= COALESCE_DEGRADE_TICKS;
+      const upToDate = v.lastSentGen === s.gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
+      this.opts.sink(conn, upToDate ? diff : snapshot(starved));
       v.lastSentGen = s.gen;
       v.forceSnapshot = false;
+      v.skipped = 0;
     }
   }
 
-  private allow(conn: string): boolean {
+  /**
+   * One token bucket across every viewer of every session: all frames leave through the agent's
+   * single relay socket, which the relay caps at 60 msg/s per connection (close 4429).
+   */
+  private spend(): boolean {
     const max = this.opts.maxFramesPerSecond ?? 40;
     const now = this.now();
-    const r = this.rates.get(conn);
-    if (!r || now - r.windowStart >= 1000) {
-      this.rates.set(conn, { windowStart: now, count: 1 });
+    if (now - this.budget.windowStart >= 1000) {
+      this.budget = { windowStart: now, count: 1 };
       return true;
     }
-    if (r.count >= max) return false;
-    r.count += 1;
+    if (this.budget.count >= max) return false;
+    this.budget.count += 1;
     return true;
   }
 }
@@ -2666,6 +2951,8 @@ git commit -m "feat(agent): screen tracker with scroll-aligned diffs, overlap de
 - `EventEngineOptions { notifyMinCommandMs; idleQuietMs; idleMinActiveMs; now?: () => number }`
 - `class EventEngine extends EventEmitter<{ event: [InnerMessageOf<"event">]; ring: [{ sessionId; kind: "prompt" | "idle"; exitCode?; durationMs? }] }>`: `onBackendEvent(e: BackendEvent)`, `tick()` (call every 1 s), `stateOf(sessionId): SessionInfo["state"]`, `forget(sessionId)`.
 - `class Notifier { constructor(send: (m: CtrlMessage) => void, log, now?) ; ring(r: Ring): boolean }` — per-session 60 s limit.
+- **Idle ring rule (spec 8.8), exactly.** The 1 s sweep emits the `idle` **event** whenever the quiet/active thresholds are met. It emits the `idle` **ring** only when *both* hold: (a) the session did not ring for `prompt` recently, and (b) `promptState !== "editing"` (the shell is sitting at a prompt; nothing is waiting on the user). "Recently" is `PROMPT_DEDUPE_MS (5 s) + idleQuietMs` rather than a bare 5 s, because the sweep can only fire at least `idleQuietMs` after the last screen change — widening the window by exactly that amount is what implements the spec's "a `prompt` event fired for this session in the last 5 s".
+- **Ordering matters when you write the tests.** The sweep runs on `tick()`, so a test that advances 11 s *through* a `tick()` before delivering `command-end` will see the idle ring fire first — legitimately, since at that moment the command had not ended. Tests that mean "time passed, then the command ended" must advance the clock **without** ticking (`jump`) and tick afterwards.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2685,11 +2972,16 @@ function engine() {
   const rings: string[] = [];
   e.on("event", (ev) => events.push(`${ev.kind}:${ev.sessionId}:${ev.exitCode ?? ""}:${ev.durationMs ?? ""}`));
   e.on("ring", (r) => rings.push(`${r.kind}:${r.sessionId}`));
+  /** Advance the clock AND run the 1 s sweep. */
   const advance = (ms: number) => {
     t += ms;
     e.tick();
   };
-  return { e, events, rings, advance, now: () => t };
+  /** Advance the clock WITHOUT sweeping — models time passing between ticks. */
+  const jump = (ms: number) => {
+    t += ms;
+  };
+  return { e, events, rings, advance, jump, now: () => t };
 }
 
 describe("EventEngine", () => {
@@ -2736,15 +3028,23 @@ describe("EventEngine", () => {
   });
 
   it("idle ring is deduped within 5 s of a prompt ring", () => {
-    const { e, rings, advance, now } = engine();
+    const { e, rings, advance, jump, now } = engine();
     e.onBackendEvent({ type: "command-start", sessionId: "U", command: "x", at: now() });
     e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
-    advance(2000);
+    // `jump`, not `advance`: the command is still running, so no sweep may run yet. Ticking here
+    // would legitimately fire an idle ring before the command ended.
+    jump(2000);
     e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
-    advance(11_000);
+    jump(11_000);
     e.onBackendEvent({ type: "command-end", sessionId: "U", exitCode: 0, at: now() });
     expect(rings).toEqual(["prompt:U"]);
-    advance(1000);
+
+    // The command ended, output resumes, then goes quiet: the idle EVENT fires but the ring is
+    // suppressed because the prompt ring is still inside the dedupe window.
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    jump(2000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "U" });
+    advance(4000);
     expect(rings).toEqual(["prompt:U"]);
   });
 
@@ -3222,7 +3522,9 @@ git commit -m "feat(agent): pairing manager with gated window and human confirma
 **Interfaces:**
 - `class BackendRegistry implements TerminalBackend`: `constructor(log)`, `add(backend: TerminalBackend)`, `remove(name)`, `connected(): { name: BackendName; capabilities: Capabilities }[]`, `nameOf(prefixedId): BackendName | null`; every `TerminalBackend` method prefixes/strips ids (`"<name>:"`), merges events, applies the tmux de-dup rule; `capabilities` of the facade is the OR of members'. `name` is `"iterm2"` (unused by callers).
 - `AgentOptions { paths: Paths; config: AgentConfig; identity: Identity; fp: string; registry: BackendRegistry; log; relay?: RelayClient (injectable for tests); confirm: (fp, name) => Promise<boolean>; appVersion: string }`
-- `class Agent`: `start()`, `stop()`, `openPairing(): { qrText; expiresAt }`, `closePairing()`, `status()`, `unpair(phoneFpOrName): boolean`, getters `relayOnline`, `pairings`, `sessions`. Public for the control server: `onPairingRequest?: (fp, name) => void`.
+- `class Agent`: `start()`, `stop()`, `openPairing(): { qrText; expiresAt }`, `closePairing()`, `unpair(phoneFpOrName): boolean`; getters `relayOnline: boolean`, `pairingList: Pairing[]`, `sessionList: SessionInfo[]`, `connectedPhones: { phoneFp; name; viewed }[]`. These five getters/methods are exactly what `ControlServer` (Task 11) reads — there is no `status()` and no `onPairingRequest` hook.
+- **Links are keyed by `connId`** (spec 6.6, 8.7 and the §12 "Duplicate phone socket" row), with a `connByFp: Map<phoneFp, connId>` side index because relay `e2e` envelopes carry `from: phoneFp`, not the connId. `phone-disconnected { connId }` removes by **connId** and only clears the side index when it still points at that connId, so a superseded socket can never evict the live one.
+- **`minFrameMs`.** Every `auth-ok` calls `tracker.setIntervalMs(Math.max(125, msg.minFrameMs))` (spec 4.2, 8.6).
 
 - [ ] **Step 1: Write `registry.ts`**
 
@@ -3230,7 +3532,7 @@ git commit -m "feat(agent): pairing manager with gated window and human confirma
 ```ts
 import type { BackendName, Capabilities, CreateWhere, Line, SessionInfo } from "@shellbell/protocol";
 import type { Logger } from "../log.js";
-import { SessionGone, type BackendEvent, type Screen, type TerminalBackend } from "./types.js";
+import { BadWindow, SessionGone, type BackendEvent, type Screen, type TerminalBackend } from "./types.js";
 
 export function prefixId(name: BackendName, native: string): string {
   return `${name}:${native}`;
@@ -3338,7 +3640,9 @@ export class BackendRegistry implements TerminalBackend {
     let windowId: string | undefined;
     if (where.windowId) {
       const p = splitId(where.windowId);
-      if (!p || p.name !== where.backend) throw new Error("bad-window");
+      // spec 8.12: a windowId whose prefix does not match `where.backend` must reach the phone as
+      // ack.ok=false, error:"bad-window" -- a typed error, so the Agent can map it exactly.
+      if (!p || p.name !== where.backend) throw new BadWindow(where.windowId);
       windowId = p.native;
     }
     return prefixId(backend.name, await backend.createSession({ kind: "tab", backend: where.backend, windowId }));
@@ -3385,7 +3689,7 @@ describe("BackendRegistry", () => {
     const iterm = new FakeBackend();
     iterm.addSession("A", {});
     iterm.tmuxWindowIds = () => new Set(["@1"]);
-    const tmux = Object.assign(new FakeBackend(), { name: "tmux" as const });
+    const tmux = new FakeBackend("tmux");
     tmux.addSession("%1", {});
     tmux.addSession("%2", {});
     tmux.tmuxWindowIdOf = (id: string) => (id === "%1" ? "@1" : "@2");
@@ -3405,6 +3709,40 @@ describe("BackendRegistry", () => {
     expect(splitId("tmux:%3")).toEqual({ name: "tmux", native: "%3" });
     expect(prefixId("iterm2", "x")).toBe("iterm2:x");
   });
+
+  it("one backend failing does not affect the other (spec 15)", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    const tmux = new FakeBackend("tmux");
+    tmux.addSession("%1", {});
+    reg.add(iterm);
+    reg.add(tmux);
+
+    // iTerm2 blows up on every call; tmux must keep working.
+    iterm.getScreen = async () => {
+      throw new Error("iTerm2 API died");
+    };
+    iterm.sendText = async () => {
+      throw new Error("iTerm2 API died");
+    };
+    await expect(reg.getScreen("iterm2:A")).rejects.toThrow(/iTerm2 API died/);
+    await expect(reg.sendText("iterm2:A", "x")).rejects.toThrow(/iTerm2 API died/);
+    expect((await reg.getScreen("tmux:%1")).rows).toBeGreaterThan(0);
+    await reg.sendText("tmux:%1", "ok");
+    expect(tmux.sentText).toEqual([{ id: "%1", text: "ok" }]);
+
+    // Removing the broken backend leaves the healthy one listed and routable.
+    reg.remove("iterm2");
+    expect((await reg.listSessions()).map((x) => x.id)).toEqual(["tmux:%1"]);
+    await expect(reg.getScreen("iterm2:A")).rejects.toThrow(/session gone/);
+
+    // Events from the survivor still reach subscribers.
+    const seen: string[] = [];
+    reg.on((e) => seen.push("sessionId" in e ? e.sessionId : e.type));
+    tmux.emit({ type: "screen-changed", sessionId: "%1" });
+    expect(seen).toContain("tmux:%1");
+  });
 });
 ```
 
@@ -3413,9 +3751,9 @@ describe("BackendRegistry", () => {
 `apps/agent/src/agent.ts`:
 ```ts
 import {
+  bytesForKey,
   fromBase64Url,
   type CtrlMessage,
-  type CtrlMessageOf,
   type Envelope,
   type Identity,
   type InnerMessage,
@@ -3423,7 +3761,7 @@ import {
   type SessionInfo,
 } from "@shellbell/protocol";
 import type { BackendRegistry } from "./backends/registry.js";
-import { SessionGone, Unsupported, type BackendEvent } from "./backends/types.js";
+import { BadWindow, SessionGone, Unsupported, type BackendEvent } from "./backends/types.js";
 import { loadPairings, savePairings, type AgentConfig, type Pairing, type Paths } from "./config.js";
 import { EventEngine } from "./events.js";
 import type { Logger } from "./log.js";
@@ -3452,12 +3790,14 @@ export class Agent {
   readonly events: EventEngine;
   readonly notifier: Notifier;
   readonly pairing: PairingManager;
-  private links = new Map<string, PhoneLink>(); // by phoneFp (one socket per phone)
+  /** Keyed by relay connId (spec 6.6/8.7/12): a stale socket can never be confused with the live one. */
+  private links = new Map<string, PhoneLink>();
+  /** phoneFp -> connId of that phone's live socket; e2e envelopes only carry the fp. */
+  private connByFp = new Map<string, string>();
   private pairings: Pairing[];
   private sessions: SessionInfo[] = [];
   private tick: NodeJS.Timeout | null = null;
   private sessionsDebounce: NodeJS.Timeout | null = null;
-  private awaitingUnpaired = false;
   private readonly log: Logger;
 
   constructor(private readonly o: AgentOptions) {
@@ -3472,14 +3812,16 @@ export class Agent {
       identity: o.identity, fp: o.fp, computerName: o.config.computerName, accent: o.config.accent, relayUrl,
       sendCtrl: (m) => this.relay.sendCtrl(m), savePairing: (p) => this.addPairing(p), confirm: o.confirm, log: o.log,
     });
-    this.relay.on("auth-ok", () => {
-      this.awaitingUnpaired = true;
+    this.relay.on("auth-ok", (m) => {
+      // spec 4.2/8.6: the relay advertises its minimum frame interval; the flush loop must honour it.
+      this.tracker.setIntervalMs(Math.max(125, m.minFrameMs));
     });
     this.relay.on("ctrl", (m) => void this.onCtrl(m));
     this.relay.on("e2e", (env) => this.onE2E(env));
     this.relay.on("down", () => {
-      for (const l of this.links.values()) this.tracker.dropViewer(l.connId);
+      for (const connId of this.links.keys()) this.tracker.dropViewer(connId);
       this.links.clear();
+      this.connByFp.clear();
     });
     o.registry.on((e) => this.onBackendEvent(e));
     this.events.on("event", (ev) => this.broadcast(ev));
@@ -3494,14 +3836,34 @@ export class Agent {
     this.tick = setInterval(() => {
       this.events.tick();
       this.pairing.tick();
+      this.sweepHandshakes();
     }, 1000);
     void this.refreshSessions();
   }
 
   stop(): void {
     if (this.tick) clearInterval(this.tick);
+    this.tick = null;
+    if (this.sessionsDebounce) clearTimeout(this.sessionsDebounce);
+    this.sessionsDebounce = null;
     this.tracker.stop();
     this.relay.stop();
+  }
+
+  /**
+   * spec 6.6: a phone must send conn.hello within 10 s of connecting. We do not close the socket
+   * (the relay owns it) — we log once and leave the link dormant until a hello actually arrives.
+   */
+  private sweepHandshakes(): void {
+    const now = Date.now();
+    for (const link of this.links.values()) {
+      if (!link.helloOverdue(now)) continue;
+      link.dormant = true;
+      this.log.warn("no conn.hello within 10s; ignoring this link until one arrives", {
+        phone: link.phoneFp.slice(0, 8),
+        conn: link.connId.slice(0, 6),
+      });
+    }
   }
 
   get relayOnline(): boolean {
@@ -3517,6 +3879,12 @@ export class Agent {
     return [...this.links.values()].map((l) => ({ phoneFp: l.phoneFp, name: l.name, viewed: l.viewed }));
   }
 
+  /** Test seam: the live link for a phone fp, or undefined. */
+  linkForPhone(phoneFp: string): PhoneLink | undefined {
+    const connId = this.connByFp.get(phoneFp);
+    return connId ? this.links.get(connId) : undefined;
+  }
+
   openPairing(): { qrText: string; expiresAt: number } {
     return this.pairing.openWindow();
   }
@@ -3530,17 +3898,29 @@ export class Agent {
     this.pairings = this.pairings.filter((x) => x !== p);
     savePairings(this.o.paths, this.pairings);
     this.relay.sendCtrl({ type: "unpair", phoneFp: p.phoneFp });
-    const link = this.links.get(p.phoneFp);
-    if (link) {
-      this.tracker.dropViewer(link.connId);
-      this.links.delete(p.phoneFp);
-    }
+    this.dropLinkFor(p.phoneFp);
     return true;
+  }
+
+  private dropLinkFor(phoneFp: string): void {
+    const connId = this.connByFp.get(phoneFp);
+    if (connId === undefined) return;
+    this.tracker.dropViewer(connId);
+    this.links.delete(connId);
+    this.connByFp.delete(phoneFp);
   }
 
   private addPairing(p: Pairing): void {
     this.pairings = [...this.pairings.filter((x) => x.phoneFp !== p.phoneFp), p];
     savePairings(this.o.paths, this.pairings);
+  }
+
+  /** Local-only removal, for an `unpair` the relay has already applied. */
+  private forgetPairing(phoneFp: string): void {
+    const before = this.pairings.length;
+    this.pairings = this.pairings.filter((x) => x.phoneFp !== phoneFp);
+    if (this.pairings.length !== before) savePairings(this.o.paths, this.pairings);
+    this.dropLinkFor(phoneFp);
   }
 
   // ---- relay ctrl ----
@@ -3551,9 +3931,11 @@ export class Agent {
         if (m.phoneFps.length) {
           this.pairings = this.pairings.filter((p) => !m.phoneFps.includes(p.phoneFp));
           savePairings(this.o.paths, this.pairings);
+          for (const fp of m.phoneFps) this.dropLinkFor(fp);
           this.log.info("applied unpair tombstones", { count: m.phoneFps.length });
         }
-        this.awaitingUnpaired = false;
+        // Order is the contract: the relay clears every tombstone when it handles pairings-sync,
+        // so the tombstones MUST already be applied to `this.pairings` before this send.
         this.relay.sendCtrl({
           type: "pairings-sync",
           phones: this.pairings.slice(0, 10).map((p) => ({ phoneFp: p.phoneFp, ed25519Pub: fromBase64Url(p.ed25519Pub), name: p.name })),
@@ -3567,18 +3949,21 @@ export class Agent {
         this.attach(m.phoneFp, m.connId, m.name);
         return;
       case "phone-disconnected": {
-        const link = this.links.get(m.phoneFp);
-        if (link && link.connId === m.connId) {
-          this.tracker.dropViewer(link.connId);
-          this.links.delete(m.phoneFp);
-        }
+        // Remove by connId: a superseded socket's disconnect must not evict the live one.
+        const link = this.links.get(m.connId);
+        if (!link) return;
+        this.tracker.dropViewer(m.connId);
+        this.links.delete(m.connId);
+        if (this.connByFp.get(link.phoneFp) === m.connId) this.connByFp.delete(link.phoneFp);
         return;
       }
       case "pairing-request":
         await this.pairing.handleRequest(m);
         return;
       case "unpair":
-        this.unpair(m.phoneFp);
+        // The relay already removed its row before forwarding this; just drop our local state.
+        // Do NOT call unpair(), which would echo a redundant `unpair` back to the relay.
+        this.forgetPairing(m.phoneFp);
         return;
       case "error":
         this.log.warn("relay error", { code: m.code, message: m.message });
@@ -3594,14 +3979,17 @@ export class Agent {
       this.log.warn("relay announced an unknown phone; ignoring", { phone: phoneFp.slice(0, 8) });
       return;
     }
-    const old = this.links.get(phoneFp);
-    if (old) this.tracker.dropViewer(old.connId);
+    this.dropLinkFor(phoneFp); // the relay superseded any older socket for this phone (4005)
     const link = new PhoneLink({ phoneFp, connId, name, kPair: fromBase64Url(pairing.kPair), computerFp: this.o.fp, send: (env) => this.relay.sendEnvelope(env), log: this.o.log });
     link.onBroken = () => {
       this.tracker.dropViewer(connId);
-      if (this.links.get(phoneFp) === link) this.links.delete(phoneFp);
+      if (this.links.get(connId) === link) {
+        this.links.delete(connId);
+        if (this.connByFp.get(phoneFp) === connId) this.connByFp.delete(phoneFp);
+      }
     };
-    this.links.set(phoneFp, link);
+    this.links.set(connId, link);
+    this.connByFp.set(phoneFp, connId);
     pairing.lastSeenAt = new Date().toISOString();
     savePairings(this.o.paths, this.pairings);
   }
@@ -3609,7 +3997,9 @@ export class Agent {
   // ---- e2e ----
 
   private onE2E(env: Envelope): void {
-    const link = this.links.get(env.from);
+    // Envelopes carry the phone's fp, so resolve the live connId through the side index.
+    const connId = this.connByFp.get(env.from);
+    const link = connId === undefined ? undefined : this.links.get(connId);
     if (!link) return;
     const wasHandshaken = link.handshaken;
     const msg = link.handleEnvelope(env);
@@ -3641,11 +4031,9 @@ export class Agent {
           this.log.info("input", { kind: "text", len: msg.text.length });
           await reg.sendText(msg.sessionId, msg.text);
           return ack(msg.reqId, true);
-        case "input.key": {
-          const { bytesForKey } = await import("@shellbell/protocol");
+        case "input.key":
           await reg.sendText(msg.sessionId, bytesForKey(msg.key));
           return ack(msg.reqId, true);
-        }
         case "history.get": {
           const h = await reg.getHistory(msg.sessionId, msg.before, msg.count);
           link.send({ type: "history", sessionId: msg.sessionId, before: msg.before, lines: h.lines.slice(-200), oldestAvailable: h.oldestAvailable });
@@ -3668,14 +4056,16 @@ export class Agent {
       }
     } catch (err) {
       const reqId = "reqId" in msg ? msg.reqId : null;
-      const error = err instanceof SessionGone ? "session-gone" : err instanceof Unsupported ? "unsupported" : "failed";
+      // spec 8.12: a mismatched windowId must reach the phone as error:"bad-window", not "failed".
+      const error =
+        err instanceof SessionGone ? "session-gone" : err instanceof Unsupported ? "unsupported" : err instanceof BadWindow ? "bad-window" : "failed";
       this.log.warn("inner message failed", { type: msg.type, error, err: String(err) });
       if (reqId) ack(reqId, false, { error });
     }
   }
 
   private sendTo(connId: string, msg: InnerMessage): void {
-    for (const l of this.links.values()) if (l.connId === connId) l.send(msg);
+    this.links.get(connId)?.send(msg);
   }
 
   private broadcast(msg: InnerMessage): void {
@@ -3686,12 +4076,12 @@ export class Agent {
 
   private onBackendEvent(e: BackendEvent): void {
     this.events.onBackendEvent(e);
+    // NB: the ScreenTracker subscribes to the registry itself (Task 7) and owns `markDirty` /
+    // `sessionRemoved`. Do not mirror those calls here.
     switch (e.type) {
       case "screen-changed":
-        this.tracker.markDirty(e.sessionId);
         return;
       case "session-removed":
-        this.tracker.sessionRemoved(e.sessionId);
         this.scheduleSessions();
         return;
       case "layout-changed":
@@ -3725,7 +4115,6 @@ export class Agent {
 }
 ```
 
-(Replace the dynamic `import("@shellbell/protocol")` in `input.key` with a static import of `bytesForKey` at the top of the file — it is written inline above only to keep the switch readable; the static import is what you commit.)
 
 - [ ] **Step 4: Write the integration test**
 
@@ -3755,24 +4144,19 @@ import {
   type Envelope,
   type InnerMessage,
 } from "@shellbell/protocol";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Agent } from "../src/agent.js";
 import { BackendRegistry } from "../src/backends/registry.js";
-import { loadConfig, paths } from "../src/config.js";
+import { loadConfig, loadPairings, paths, type Paths } from "../src/config.js";
 import { loadOrCreateIdentity } from "../src/identity.js";
 import { createLogger } from "../src/log.js";
 import { FakeBackend } from "./fakes/fake-backend.js";
 import { FakePhone } from "./fakes/fake-phone.js";
 import { FakeRelay } from "./fakes/fake-relay.js";
+import { waitFor } from "./fakes/wait.js";
 
 const log = createLogger({ stdout: false });
-const waitFor = (fn: () => boolean, ms = 4000) =>
-  new Promise<void>((resolve, reject) => {
-    const t0 = Date.now();
-    const tick = () => (fn() ? resolve() : Date.now() - t0 > ms ? reject(new Error("waitFor timeout")) : setTimeout(tick, 10));
-    tick();
-  });
 
 /** A phone-side WebSocket client speaking the relay protocol. */
 class PhoneSocket {
@@ -3821,9 +4205,46 @@ let relay: FakeRelay;
 let backend: FakeBackend;
 let agent: Agent;
 let computerFp: string;
+let agentPaths: Paths;
+
+/** A PhoneSocket that has completed conn.hello, so `phone` is non-null. */
+type ConnectedPhone = PhoneSocket & { phone: FakePhone };
+
+/**
+ * Runs the whole pairing dance for one phone and returns a connected, handshaken phone socket.
+ * Used by every test below so the flow is written exactly once.
+ */
+async function pairAndConnect(): Promise<ConnectedPhone> {
+  const { qrText } = agent.openPairing();
+  const qr = parseQr(qrText, { allowInsecure: true });
+  const pairSock = new PhoneSocket();
+  await pairSock.connect(relay.url, computerFp, "pairing", fromBase64Url(qr.g));
+  const code = fromBase64Url(qr.p);
+  const kPsk = derivePskKey(code, computerFp);
+  const box = seal(
+    kPsk,
+    encodeCbor({ ed25519Pub: pairSock.identity.ed25519.pub, x25519Pub: pairSock.identity.x25519.pub, name: "iPhone", platform: "ios" }),
+    pairingAd("request", computerFp, pairSock.fp),
+  );
+  pairSock.sendCtrl({ type: "pairing-request", phoneFp: pairSock.fp, box });
+  await waitFor(() => pairSock.ctrl.some((m) => m.type === "pairing-response"));
+  const resp = pairSock.ctrl.find((m) => m.type === "pairing-response");
+  if (resp?.type !== "pairing-response") throw new Error("no pairing-response");
+  const inner = decodeCbor(open(kPsk, resp.box, pairingAd("response", computerFp, pairSock.fp))) as { x25519Pub: Uint8Array };
+  const kPair = derivePairKey(pairSock.identity.x25519.priv, inner.x25519Pub, code, computerFp, pairSock.fp);
+  pairSock.ws.close();
+
+  const ph = new PhoneSocket(pairSock.identity);
+  ph.phone = new FakePhone(pairSock.identity, computerFp, kPair);
+  await ph.connect(relay.url, computerFp, "phone");
+  ph.send(ph.phone.hello());
+  await waitFor(() => ph.inner.some((m) => m.type === "sessions"));
+  return ph as ConnectedPhone;
+}
 
 beforeEach(async () => {
   const p = paths(mkdtempSync(join(tmpdir(), "sb-agent-")));
+  agentPaths = p;
   const { identity, fp } = loadOrCreateIdentity(p);
   computerFp = fp;
   relay = new FakeRelay(fp);
@@ -3844,29 +4265,9 @@ afterEach(async () => {
 
 describe("Agent end to end (fake relay, fake backend)", () => {
   it("pairs, handshakes, receives hello+sessions, views a session, types with ack, gets diffs and events", async () => {
-    // --- pair ---
-    const { qrText } = agent.openPairing();
-    const qr = parseQr(qrText);
-    const p = new PhoneSocket();
-    await p.connect(relay.url, computerFp, "pairing", fromBase64Url(qr.g));
-    const code = fromBase64Url(qr.p);
-    const kPsk = derivePskKey(code, computerFp);
-    const box = seal(kPsk, encodeCbor({ ed25519Pub: p.identity.ed25519.pub, x25519Pub: p.identity.x25519.pub, name: "iPhone", platform: "ios" }), pairingAd("request", computerFp, p.fp));
-    p.sendCtrl({ type: "pairing-request", phoneFp: p.fp, box });
-    await waitFor(() => p.ctrl.some((m) => m.type === "pairing-response"));
-    const resp = p.ctrl.find((m) => m.type === "pairing-response");
-    if (resp?.type !== "pairing-response") throw new Error();
-    const inner = decodeCbor(open(kPsk, resp.box, pairingAd("response", computerFp, p.fp))) as { x25519Pub: Uint8Array };
-    const kPair = derivePairKey(p.identity.x25519.priv, inner.x25519Pub, code, computerFp, p.fp);
+    // --- pair, reconnect as a phone, run conn.hello (the dance lives in pairAndConnect) ---
+    const ph = await pairAndConnect();
     expect(agent.pairingList).toHaveLength(1);
-    p.ws.close();
-
-    // --- connect as phone + handshake ---
-    const ph = new PhoneSocket(p.identity);
-    ph.phone = new FakePhone(p.identity, computerFp, kPair);
-    await ph.connect(relay.url, computerFp, "phone");
-    ph.send(ph.phone.hello());
-    await waitFor(() => ph.inner.some((m) => m.type === "sessions"));
     expect(ph.inner[0]).toMatchObject({ type: "hello", computerName: "MBP", backends: [{ name: "iterm2" }] });
     const sessions = ph.inner.find((m) => m.type === "sessions");
     if (sessions?.type !== "sessions") throw new Error();
@@ -3902,13 +4303,80 @@ describe("Agent end to end (fake relay, fake backend)", () => {
     ph.send(ph.phone.seal({ type: "session.focus", reqId: "r2", sessionId: "iterm2:S1" }));
     await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "r2"));
     expect(ph.inner.find((m) => m.type === "ack" && m.reqId === "r2")).toMatchObject({ ok: false, error: "unsupported" });
+
+    // --- a mismatched windowId is acked bad-window, not "failed" (spec 8.12) ---
+    ph.send(ph.phone.seal({ type: "session.create", reqId: "r3", in: { kind: "tab", backend: "tmux", windowId: "iterm2:w1" } }));
+    await waitFor(() => ph.inner.some((m) => m.type === "ack" && m.reqId === "r3"));
+    expect(ph.inner.find((m) => m.type === "ack" && m.reqId === "r3")).toMatchObject({ ok: false, error: "bad-window" });
     ph.ws.close();
   });
 
-  it("unpair removes the pairing and tells the relay", async () => {
-    const { qrText } = agent.openPairing();
-    void qrText;
+  it("applies the relay's minFrameMs to the flush interval", async () => {
+    // FakeRelay advertises minFrameMs 125 in auth-ok; the agent must have applied it (spec 4.2/8.6).
+    const spy = vi.spyOn(agent.tracker, "setIntervalMs");
+    agent.relay.emit("auth-ok", { type: "auth-ok", role: "agent", agentOnline: true, computerName: "FakeMac", serverTime: Date.now(), minFrameMs: 400 });
+    expect(spy).toHaveBeenCalledWith(400);
+    agent.relay.emit("auth-ok", { type: "auth-ok", role: "agent", agentOnline: true, computerName: "FakeMac", serverTime: Date.now(), minFrameMs: 50 });
+    expect(spy).toHaveBeenLastCalledWith(125); // never below the 125 ms floor
+    spy.mockRestore();
+  });
+
+  it("applies unpaired tombstones BEFORE sending pairings-sync (Plan 02 parked item)", async () => {
+    // The relay clears every tombstone when it handles pairings-sync, so a sync that still lists a
+    // tombstoned phone would resurrect it. Order is the whole contract.
+    const ph = await pairAndConnect();
+    const removedFp = ph.fp;
+    expect(agent.pairingList.map((p) => p.phoneFp)).toEqual([removedFp]);
+    ph.ws.close();
+
+    relay.ctrlFromAgent.length = 0;
+    relay.sendToAgent({ type: "unpaired", phoneFps: [removedFp] });
+    await waitFor(() => relay.ctrlFromAgent.some((m) => m.type === "pairings-sync"));
+    const sync = relay.ctrlFromAgent.find((m) => m.type === "pairings-sync");
+    if (sync?.type !== "pairings-sync") throw new Error("no pairings-sync");
+    // The tombstone was applied first: the sync must NOT re-register the removed phone.
+    expect(sync.phones.map((p) => p.phoneFp)).not.toContain(removedFp);
+    expect(agent.pairingList).toHaveLength(0);
+    // And it is written through to disk, not just held in memory.
+    expect(loadPairings(agentPaths)).toHaveLength(0);
+  });
+
+  it("unpair removes the pairing, persists it, drops the link and tells the relay", async () => {
+    const ph = await pairAndConnect();
+    const fp = ph.fp;
+    expect(agent.pairingList.map((p) => p.phoneFp)).toEqual([fp]);
+    await waitFor(() => agent.connectedPhones.length === 1);
+    relay.ctrlFromAgent.length = 0;
+
     expect(agent.unpair("nobody")).toBe(false);
+    expect(agent.unpair(fp.slice(0, 6))).toBe(true); // fp prefix, per spec 8.1
+
+    expect(agent.pairingList).toHaveLength(0);
+    expect(loadPairings(agentPaths)).toHaveLength(0); // persisted
+    expect(agent.connectedPhones).toHaveLength(0); // link dropped
+    await waitFor(() => relay.ctrlFromAgent.some((m) => m.type === "unpair"));
+    expect(relay.ctrlFromAgent.find((m) => m.type === "unpair")).toMatchObject({ type: "unpair", phoneFp: fp });
+    ph.ws.close();
+  });
+
+  it("sends `event` to every handshaken phone, not just the viewer (spec 4.4, 7.4)", async () => {
+    const a = await pairAndConnect();
+    const b = await pairAndConnect();
+    expect(agent.pairingList).toHaveLength(2);
+    // Only `a` is viewing anything.
+    a.send(a.phone.seal({ type: "subscribe", sessionId: "iterm2:S1" }));
+    await waitFor(() => a.inner.some((m) => m.type === "screen.snapshot"));
+
+    backend.emit({ type: "command-start", sessionId: "S1", command: "make", at: Date.now() });
+    backend.emit({ type: "command-end", sessionId: "S1", exitCode: 3, at: Date.now() });
+    await waitFor(() => a.inner.some((m) => m.type === "event") && b.inner.some((m) => m.type === "event"));
+    for (const p of [a, b]) {
+      expect(p.inner.find((m) => m.type === "event")).toMatchObject({ kind: "prompt", sessionId: "iterm2:S1", exitCode: 3 });
+    }
+    // `b` never subscribed, so it got no screen frames at all.
+    expect(b.inner.filter((m) => m.type === "screen.snapshot" || m.type === "screen.diff")).toHaveLength(0);
+    a.ws.close();
+    b.ws.close();
   });
 });
 ```
@@ -3927,13 +4395,14 @@ git commit -m "feat(agent): backend registry and agent orchestrator with end-to-
 ### Task 11: Control socket, CLI, LaunchAgent, doctor, build (spec 8.1, 8.9, 16)
 
 **Files:**
-- Create: `apps/agent/src/control.ts`, `apps/agent/src/cli.ts`, `apps/agent/src/launchd.ts`, `apps/agent/src/doctor.ts`, `apps/agent/tsdown.config.ts`, `apps/agent/README.md`, `apps/agent/test/control.test.ts`
+- Create: `apps/agent/src/control.ts`, `apps/agent/src/cli.ts`, `apps/agent/src/launchd.ts`, `apps/agent/src/doctor.ts`, `apps/agent/tsdown.config.ts`, `apps/agent/README.md`, `apps/agent/test/control.test.ts`, `apps/agent/test/launchd.test.ts`, `apps/agent/test/doctor.test.ts`
 
 **Interfaces:**
 - `control.ts`: `class ControlServer { constructor(sockPath, agent: Agent, log); start(): Promise<void>; stop(): Promise<void>; pairingConfirm: (fp, name) => Promise<boolean> }` — newline-delimited JSON over a Unix socket. Commands: `{ cmd: "status" }` → `{ ok, data: StatusData }`; `{ cmd: "devices" }`; `{ cmd: "unpair", args: { target } }`; `{ cmd: "pair-open" }` → `{ ok, data: { qrText, expiresAt } }` and then, on that same connection, streamed events `{ event: "request", phoneFp, name }` and `{ event: "closed" }`; `{ cmd: "confirm", args: { phoneFp, accept } }`. `controlRequest(sockPath, cmd, args?): Promise<unknown>` for one-shot commands; `controlPairSession(sockPath, handlers)` for the streaming one.
 - `cli.ts`: commander program per spec 8.1. `start` builds the registry (iTerm2 only in this plan; Plan 04 adds tmux), the `Agent`, and a `ControlServer`; when stdin is a TTY and there are no pairings, it opens a window and prints the QR. `pair` uses the control socket if present, else starts an in-process agent and pairs directly.
 - `launchd.ts`: `plistFor({ nodePath, cliPath, logPath }): string`, `install(p: Paths): Promise<string>` (writes `~/Library/LaunchAgents/dev.bilalahmad.shellbell.plist`, runs `launchctl bootstrap gui/<uid> <plist>`), `uninstall(): Promise<void>`, `isGlobalInstall(): boolean` (`process.argv[1]` is not under a directory containing `_npx`).
-- `doctor.ts`: `runDoctor(p: Paths, cfg: AgentConfig): Promise<{ name: string; ok: boolean; detail: string; fix?: string }[]>`.
+- `doctor.ts`: `runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]>` plus two **pure, exported and tested** helpers, `parseTmuxVersion(stdout: string): number | null` and `plistNodeOk(plistText: string, execPath: string): boolean`. `runDoctor` itself is never unit-tested — it shells out to `osascript` and dials the network (see the Human-run step).
+- **Test coverage for this task:** `control.test.ts` (the socket protocol), `launchd.test.ts` (`plistFor` + `isGlobalInstall`, both pure), `doctor.test.ts` (`parseTmuxVersion` + `plistNodeOk`, both pure). `install`/`uninstall` are not tested: they call `launchctl` and would register a real LaunchAgent.
 
 - [ ] **Step 1: Write the control server test**
 
@@ -3967,6 +4436,76 @@ describe("control socket", () => {
     expect(await controlRequest(sock, "unpair", { target: "iPhone" })).toEqual({ removed: true });
     await expect(controlRequest(sock, "nope")).rejects.toThrow(/unknown command/);
     await server.stop();
+  });
+});
+```
+
+- [ ] **Step 1b: Write the pure-unit tests for launchd and doctor**
+
+`apps/agent/test/launchd.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { LABEL, plistFor } from "../src/launchd.js";
+
+describe("plistFor", () => {
+  it("emits a launchd plist with the label, argv, PATH and log paths", () => {
+    const xml = plistFor({ nodePath: "/opt/homebrew/bin/node", cliPath: "/usr/local/bin/shellbell", logPath: "/Users/x/.shellbell/agent.log" });
+    expect(xml.startsWith("<?xml")).toBe(true);
+    expect(xml).toContain(`<key>Label</key><string>${LABEL}</string>`);
+    expect(LABEL).toBe("dev.bilalahmad.shellbell");
+    expect(xml).toContain("<string>/opt/homebrew/bin/node</string>");
+    expect(xml).toContain("<string>/usr/local/bin/shellbell</string>");
+    expect(xml).toContain("<string>start</string>");
+    expect(xml).toContain("<string>--service</string>");
+    expect(xml).toContain("<key>RunAtLoad</key><true/>");
+    expect(xml).toContain("<key>KeepAlive</key><true/>");
+    expect(xml).toContain("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+    expect(xml).toContain("<key>StandardOutPath</key><string>/Users/x/.shellbell/agent.log</string>");
+  });
+
+  it("escapes XML metacharacters in paths", () => {
+    const xml = plistFor({ nodePath: "/a&b/node", cliPath: "/c<d/cli.js", logPath: "/l.log" });
+    expect(xml).toContain("/a&amp;b/node");
+    expect(xml).toContain("/c&lt;d/cli.js");
+    expect(xml).not.toContain("/a&b/node");
+  });
+});
+```
+
+`apps/agent/test/doctor.test.ts`:
+```ts
+import { describe, expect, it } from "vitest";
+import { parseTmuxVersion, plistNodeOk } from "../src/doctor.js";
+
+describe("parseTmuxVersion", () => {
+  it.each([
+    ["tmux 3.2a\n", 3.02],
+    ["tmux 3.4\n", 3.04],
+    ["tmux 3.10\n", 3.1],
+    ["tmux 2.9\n", 2.09],
+  ])("%j -> %s", (stdout, expected) => {
+    expect(parseTmuxVersion(stdout)).toBeCloseTo(expected, 5);
+  });
+
+  it("orders versions so 3.1a < 3.2 <= 3.10", () => {
+    const v = (s: string) => parseTmuxVersion(s) as number;
+    expect(v("tmux 3.1a")).toBeLessThan(v("tmux 3.2"));
+    expect(v("tmux 3.2")).toBeLessThanOrEqual(v("tmux 3.10"));
+  });
+
+  it("returns null for unrecognisable output", () => {
+    expect(parseTmuxVersion("command not found")).toBeNull();
+    expect(parseTmuxVersion("")).toBeNull();
+  });
+});
+
+describe("plistNodeOk", () => {
+  it("accepts the running node path and any absolute node path", () => {
+    expect(plistNodeOk("<string>/opt/homebrew/bin/node</string>", "/opt/homebrew/bin/node")).toBe(true);
+    expect(plistNodeOk("<string>/usr/local/bin/node</string>", "/opt/homebrew/bin/node")).toBe(true);
+  });
+  it("rejects a plist with no node path at all", () => {
+    expect(plistNodeOk("<string>start</string>", "/opt/homebrew/bin/node")).toBe(false);
   });
 });
 ```
@@ -4178,11 +4717,12 @@ export async function uninstall(): Promise<void> {
 `apps/agent/src/doctor.ts`:
 ```ts
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
-import WebSocket from "ws";
 import { relayWsUrl } from "@shellbell/protocol";
-import { ITerm2AuthError, requestCookieAndKey } from "./backends/iterm2/auth.js";
+import WebSocket from "ws";
+import type { ITerm2AuthError } from "./backends/iterm2/auth.js";
+import { requestCookieAndKey } from "./backends/iterm2/auth.js";
 import { DEFAULT_SOCKET } from "./backends/iterm2/client.js";
 import type { AgentConfig, Paths } from "./config.js";
 import { PLIST } from "./launchd.js";
@@ -4193,6 +4733,18 @@ export interface Check {
   ok: boolean;
   detail: string;
   fix?: string;
+}
+
+/** Pure: `tmux -V` output -> a comparable number, or null when it is not recognisable. */
+export function parseTmuxVersion(stdout: string): number | null {
+  const m = /(\d+)\.(\d+)/.exec(stdout);
+  if (!m) return null;
+  return Number(m[1]) + Number(m[2]) / 100;
+}
+
+/** Pure: does this plist point at a node binary that still exists on this machine? */
+export function plistNodeOk(plistText: string, execPath: string): boolean {
+  return plistText.includes(execPath) || /<string>\/[^<]*node<\/string>/.test(plistText);
 }
 
 export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
@@ -4208,8 +4760,8 @@ export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
   }
   try {
     const { stdout } = await run("tmux", ["-V"]);
-    const v = Number.parseFloat(stdout.replace(/[^0-9.]/g, ""));
-    out.push({ name: "tmux", ok: v >= 3.2, detail: stdout.trim(), fix: "brew install tmux (3.2+)" });
+    const v = parseTmuxVersion(stdout);
+    out.push({ name: "tmux", ok: v !== null && v >= 3.02, detail: stdout.trim(), fix: "brew install tmux (3.2+)" });
   } catch {
     out.push({ name: "tmux", ok: false, detail: "not found (optional)", fix: "brew install tmux — needed for Ghostty/Warp/Terminal.app sessions" });
   }
@@ -4224,8 +4776,7 @@ export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
   });
   out.push({ name: "relay", ok: reachable, detail: cfg.relayUrl, fix: "check the relay URL (`shellbell config set relay …`) and your network" });
   if (existsSync(PLIST)) {
-    const text = await import("node:fs").then((fs) => fs.readFileSync(PLIST, "utf8"));
-    const nodeOk = text.includes(process.execPath) || /<string>\/[^<]*node<\/string>/.test(text);
+    const nodeOk = plistNodeOk(readFileSync(PLIST, "utf8"), process.execPath);
     out.push({ name: "LaunchAgent", ok: nodeOk, detail: PLIST, fix: "re-run `shellbell service install` after upgrading Node or Shellbell" });
   }
   return out;
@@ -4298,7 +4849,10 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
   const registry = new BackendRegistry(log);
   const client = new ITerm2Client({ log });
   const iterm = new ITerm2Backend(client, log);
-  const tryConnect = async () => {
+  // ITerm2Backend owns reconnect once it has connected at least once (1 s -> 30 s, spec 8.5.1).
+  // The CLI only retries the FIRST connect, which is what fails while iTerm2 is closed or its
+  // Python API is off — spec 8.12 says re-detect every 10 s while a backend is absent.
+  const firstConnect = async () => {
     try {
       await iterm.connect();
       registry.add(iterm);
@@ -4306,14 +4860,10 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     } catch (err) {
       if (err instanceof BackendUnavailable) log.warn(`iTerm2 unavailable: ${err.message}`, { hint: err.hint });
       else log.warn("iTerm2 connect failed", { err: String(err) });
-      setTimeout(tryConnect, 10_000);
+      setTimeout(() => void firstConnect(), 10_000);
     }
   };
-  client.on("close", () => {
-    registry.remove("iterm2");
-    setTimeout(tryConnect, 2000);
-  });
-  void tryConnect();
+  void firstConnect();
   const control = { server: null as ControlServer | null };
   const agent = new Agent({
     paths: p,
@@ -4481,18 +5031,24 @@ export default defineConfig({
   target: "node22",
   outDir: "dist",
   clean: true,
-  noExternal: ["@shellbell/protocol"],
-  external: ["ws", "@bufbuild/protobuf", "commander", "qrcode-terminal"],
+  // Bundle the workspace package AND its own deps: cborg / @noble/* are NOT runtime deps of the
+  // published `shellbell` tarball, so leaving them external produces a dist/cli.js that imports
+  // packages nobody installs. `zod` stays external because it IS a declared runtime dep.
+  noExternal: [/^@shellbell\//, "cborg", /^@noble\//],
+  external: ["ws", "@bufbuild/protobuf", "commander", "qrcode-terminal", "zod"],
   banner: { js: "#!/usr/bin/env node" },
 });
 ```
 (If `tsdown` rejects `banner`, drop it — `src/cli.ts` already starts with the shebang and tsdown preserves it.)
 
+After building, verify nothing leaked: `node -e "const s=require('node:fs').readFileSync('dist/cli.js','utf8'); for (const m of s.matchAll(/from\s*[\"']([^.\"'][^\"']*)[\"']/g)) console.log(m[1])" | sort -u`
+must print only `ws`, `@bufbuild/protobuf`, `commander`, `qrcode-terminal`, `zod` and `node:*` builtins.
+
 `apps/agent/README.md`:
 ```markdown
 # shellbell
 
-Your terminal rings. You answer. — Mac agent for [Shellbell](https://github.com/bilalahmad/shellbell).
+Your terminal rings. You answer. — Mac agent for [Shellbell](https://github.com/Miambi/shellbell).
 
     npx shellbell            # start, print a QR, scan it with the Shellbell app
     shellbell pair           # open a new pairing window
@@ -4504,12 +5060,23 @@ Magic) and/or tmux 3.2+. Everything between your phone and this agent is end-to-
 encrypted; the relay only routes ciphertext.
 ```
 
-- [ ] **Step 6: Run tests, build, smoke**
+- [ ] **Step 6: Run tests and build**
 
-Run: `pnpm test && pnpm build && node dist/cli.js --help && node dist/cli.js doctor`
-Expected: tests green; `dist/cli.js` exists and prints help; `doctor` lists checks (the relay check may fail until Plan 02 is deployed — that is fine).
+Run: `pnpm test && pnpm build && node dist/cli.js --help`
+Expected: tests green; `dist/cli.js` exists and prints help. `--help` touches nothing outside the process.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Smoke `doctor` — Human-run only**
+
+**Implementers skip this step and report it as "not run (human-run only)".** `shellbell doctor`
+runs `osascript ... request cookie and key`, which pops iTerm2's consent dialog; the M0 spike
+recorded unattended runs hanging for the full ~120 s AppleEvent timeout and then failing with
+`-1712`. It also shells out to `tmux -V` and opens a real WebSocket to the production relay,
+and it exits `1` whenever any check fails — so it can neither be automated nor chained with `&&`.
+
+A human runs `node dist/cli.js doctor` and expects a list of checks (the relay check may fail
+until Plan 02 is deployed — that is fine).
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add apps/agent
@@ -4531,9 +5098,7 @@ import { ITerm2Backend } from "../src/backends/iterm2/backend.js";
 import { ITerm2Client } from "../src/backends/iterm2/client.js";
 import { createLogger } from "../src/log.js";
 
-const live = process.env.SHELLBELL_ITERM_E2E === "1";
-
-describe.skipIf(!live)("live iTerm2", () => {
+describe.skipIf(!process.env.SHELLBELL_LIVE)("live iTerm2", () => {
   it("lists sessions, reads a styled screen, sends text and sees it", async () => {
     const log = createLogger({ stdout: true, verbose: true });
     const client = new ITerm2Client({ log });
@@ -4554,10 +5119,17 @@ describe.skipIf(!live)("live iTerm2", () => {
 });
 ```
 
-- [ ] **Step 2: Run it once for real**
+- [ ] **Step 2: Run it once for real — Human-run only**
 
-Run: `SHELLBELL_ITERM_E2E=1 pnpm vitest run test/live-iterm2.test.ts`
-Expected: PASS, and `shellbell-live-ok` appears in your first iTerm2 session.
+**Implementers skip this step and report it as "not run (human-run only)".** The test needs a real
+iTerm2 with the Python API enabled, triggers `osascript ... request cookie and key` (the M0 spike
+recorded unattended runs hanging ~120 s and failing `-1712` until a human clicked Allow), and it
+**types into the operator's first live iTerm2 session** — which the spike showed can be a TUI, not
+a shell.
+
+A human runs: `SHELLBELL_LIVE=1 pnpm vitest run test/live-iterm2.test.ts`
+Expected: PASS, and `shellbell-live-ok` appears in the first iTerm2 session.
+Without `SHELLBELL_LIVE` the suite is skipped, so `pnpm test` in CI is unaffected.
 
 - [ ] **Step 3: Commit**
 
@@ -4570,6 +5142,105 @@ git commit -m "test(agent): env-gated live iTerm2 integration"
 
 ## Plan self-review
 
-- **Spec coverage:** 8.2/8.3/8.10 → Task 1; 6.5 + 8.7 relay side → Task 2; 6.6/6.7 + 7.4 dedupe → Task 3; 8.5.1 → Task 4; 8.5.5 → Task 5; 8.4/8.5.3/8.5.4/8.5.6 → Task 6; 8.6 → Task 7; 8.8 → Task 8; 6.4 agent side incl. confirmation and 3-failure close → Task 9; 8.12 (iTerm2 half; tmux in Plan 04), 4.2–4.4, 7.4 inputs/acks/at-most-once, `unpaired`→`pairings-sync` ordering, events to all phones → Task 10; 8.1/8.9/16 CLI, control socket, launchd, doctor, build → Task 11; 15 live test → Task 12.
-- **Type consistency:** `TerminalBackend` (Task 6) is what `FakeBackend` (Task 7), `ITerm2Backend` (Task 6) and `BackendRegistry` (Task 10) implement; `Screen` is defined in `types.ts` and produced by `convert.ts`'s `ScreenShape` (identical fields); `Ring` from `events.ts` is consumed by `Notifier`; `PhoneLink.send` returns boolean and `Agent.sendTo` ignores it deliberately; `ControlServer.pairingConfirm` has the same signature as `AgentOptions.confirm`; `StatusData` matches what `cli.ts status` prints.
-- **Placeholders:** none. `DEFAULT_CONNECT_MODE` in `client.ts` is set from the spike result; `VERSION` in `cli.ts` is bumped by Changesets in Plan 06.
+- **Spec coverage:** 8.2/8.3/8.10 → Task 1; 6.5 + 8.7 relay side → Task 2; 6.6 (incl. the 10 s `conn.hello` timeout)/6.7 + 7.4 dedupe → Task 3; 8.5.1 → Task 4; 8.4 (`types.ts`) + 8.5.5 → Task 5; 8.5.1 step 4 reconnect + 8.5.3/8.5.4/8.5.6 → Task 6; 8.6 → Task 7; 8.8 → Task 8; 6.4 agent side incl. confirmation and 3-failure close → Task 9; 8.12 (iTerm2 half; tmux in Plan 04), 4.2–4.4, 7.4 inputs/acks/at-most-once, `unpaired`→`pairings-sync` ordering, events to all phones → Task 10; 8.1/8.9/16 CLI, control socket, launchd, doctor, build → Task 11; 15 live test → Task 12.
+- **Type consistency:** `TerminalBackend` (Task 5's `types.ts`) is what `FakeBackend` (Task 7), `ITerm2Backend` (Task 6) and `BackendRegistry` (Task 10) implement; `Screen` is defined **once**, in `types.ts`, and imported by `convert.ts` — there is no second `ScreenShape`; `Ring` from `events.ts` is consumed by `Notifier`; `PhoneLink.send` returns boolean and `Agent.sendTo` ignores it deliberately; `ControlServer.pairingConfirm` has the same signature as `AgentOptions.confirm`; `StatusData` matches what `cli.ts status` prints; `waitFor` is defined once in `test/fakes/wait.ts`.
+- **Placeholders:** none. `ITerm2Client` has a single connect mode (the `createConnection` hook settled by the M0 spike); `VERSION` in `cli.ts` is bumped by Changesets in Plan 06.
+- **Generated protobuf identifiers** used by Tasks 4–6 were each checked against `apps/agent/src/backends/iterm2/gen/iterm2_pb.ts`: protobuf-es v2 names a **nested** message `Outer_InnerSchema` and strips the enum-name prefix from enum members, but `PromptNotificationCommandStart`/`CommandEnd` are **top-level** messages in `proto/iterm2.proto`, so they are `PromptNotificationCommandEndSchema` (no underscore). Verified present: `ClientOriginatedMessageSchema`, `ServerOriginatedMessageSchema`, `ListSessionsRequest/ResponseSchema`, `ListSessionsResponse_Window/_TabSchema`, `SplitTreeNodeSchema`, `SplitTreeNode_SplitTreeLinkSchema`, `SessionSummarySchema`, `SizeSchema`, `GetBufferRequest/ResponseSchema`, `LineRangeSchema`, `Coord/CoordRange/WindowedCoordRangeSchema`, `LineContentsSchema`, `CellStyleSchema`, `CodePointsPerCellSchema`, `RGBColorSchema`, `NotificationSchema`, `ScreenUpdateNotificationSchema`, `PromptNotificationSchema`, `PromptNotificationCommandEndSchema`, `NotificationRequest/ResponseSchema`, `PromptMonitorRequestSchema`, `VariableMonitorRequestSchema`, `VariableRequest/ResponseSchema`, `FocusRequest/ResponseSchema`, `FocusChangedNotificationSchema`, `SendTextRequest/ResponseSchema`, `CreateTabRequestSchema`, `SplitPaneRequestSchema`, `ActivateRequestSchema`, `ActivateRequest_AppSchema`. Enum members verified: `LineContents_Continuation.SOFT_EOL` / `.HARD_EOL`, `AlternateColor.DEFAULT`, `NotificationType.NOTIFY_ON_{SCREEN_UPDATE,PROMPT,NEW_SESSION,TERMINATE_SESSION,LAYOUT_CHANGE,FOCUS_CHANGE,VARIABLE_CHANGE}`, `PromptMonitorMode.{PROMPT,COMMAND_START,COMMAND_END}`, `VariableScope.SESSION`, `SplitPaneRequest_SplitDirection.{VERTICAL,HORIZONTAL}`.
+
+---
+
+## Pre-execution corrections (2026-09-05)
+
+A pre-flight consistency scan (`.superpowers/sdd/2026-09-03-shellbell-03-agent/preflight-scan.md`)
+checked this plan against the shipped `packages/protocol`, the shipped `apps/relay/src/computer-do.ts`,
+the generated `apps/agent/src/backends/iterm2/gen/iterm2_pb.ts`, `docs/spike-iterm2.md`, and the
+errata of Plans 01 and 02. The plan text above has been corrected in place. What changed and why:
+
+**Blocking defects (would have stopped a task at "run the tests"):**
+
+- **B1 · Task 4 — iTerm2 connect.** The plan defaulted to `connectMode: "unix-url"` and offered
+  `socketPath` as the alternative. `docs/spike-iterm2.md` and Plan 01's errata record that *both*
+  are dead in `ws@8.21.3` (`%20` in "Application Support" is never decoded; `initAsClient` resets
+  `opts.socketPath = undefined`). Replaced with the single `createConnection: () => netConnect({ path })`
+  mode the shipped spike uses; `connectMode` deleted; a Unix-socket test added so the TCP-only tests
+  can no longer hide it.
+- **B2 · Tasks 5 — `LineContents_Continuation.CONTINUATION_SOFT_EOL` does not exist.** protobuf-es v2
+  strips the enum-name prefix; the member is `SOFT_EOL`. Fixed in `convert.ts` and its test.
+- **B3 · Task 6 — `PromptNotification_CommandEndSchema` does not exist.** `PromptNotificationCommandEnd`
+  is a top-level message in `proto/iterm2.proto`, so the export is `PromptNotificationCommandEndSchema`.
+- **B4 · Task 5 — convert expectations contradicted shipped `trimTrailing`.** A trailing space-only
+  run with no `bg` is popped by `screen.ts`, so the "invisible becomes spaces" case could never have
+  produced three runs. Split into two cases: one with a following character (run survives) and one
+  where it is last (run is dropped).
+- **B5 · Task 7 — the ScreenTracker never became dirty.** It did not subscribe to the backend, and
+  the tests only mutated the fake backend, so five of seven tracker tests asserted a second frame
+  that could not exist. `start()` now subscribes and marks dirty on `screen-changed` / drops state on
+  `session-removed`; the tests also call `markDirty` explicitly, and a new test proves the
+  subscription alone is sufficient.
+- **B6 · Task 10 — `registry.test.ts` did not typecheck.** It assigned `tmuxWindowIds` /
+  `tmuxWindowIdOf` onto a `FakeBackend` that declared neither (TS2339), via an `Object.assign`
+  name-override that types `name` as `never`. `FakeBackend` now declares both as optional properties
+  and takes its `name` as a constructor argument.
+- **B7 · Task 1 — undeclared dependencies.** `@shellbell/protocol` and `zod` are imported from Task 1
+  onward but were never added to `apps/agent/package.json`; the plan was relying on pnpm hoisting.
+  Both are now added explicitly.
+- **B8 · Task 8 — the idle-dedupe test was unsatisfiable.** `advance(11_000)` ran the 1 s sweep
+  *before* `command-end`, so an idle ring legitimately fired first. The helper now has `jump` (move
+  the clock without sweeping) and the test uses it, then verifies the dedupe on the tick after the
+  prompt ring. The ring rule is stated explicitly in the task's Interfaces.
+- **B9 · Task 10 — the integration test died on its second line.** It called `parseQr(qrText)` on a
+  QR whose `r` is the fake relay's `ws://127.0.0.1:<port>`; shipped `parseQr` rejects non-`wss://`.
+  It now passes `{ allowInsecure: true }`, which the protocol package already supports — the protocol
+  package itself is unchanged.
+
+**Rulings applied on top:**
+
+- **9 · `minFrameMs`.** The `Agent` ignored it, so the plan's own "flush interval `max(125, minFrameMs)`"
+  constraint was unimplemented. Every `auth-ok` now calls `tracker.setIntervalMs(Math.max(125, minFrameMs))`,
+  asserted in the integration test.
+- **10 · Agent socket budget (Plan 02 parked item).** `maxFramesPerSecond` was a *per-viewer* cap, which
+  does not bound the agent's single relay socket (60 msg/s, close `4429`): 8 viewers at 8 fps = 64 msg/s.
+  It is now one global token bucket over every `sink` call, with per-viewer coalescing; a new test drives
+  10 viewers and asserts ≤ 40 sink calls per second.
+- **11 · Links keyed by `connId`** (spec 6.6, 8.7, §12) with a `connByFp` side index, because `e2e`
+  envelopes carry only the phone fp. `phone-disconnected` removes by `connId`.
+- **12 · `bad-window`.** A mismatched `windowId` threw a bare `Error`, which the `Agent` mapped to
+  `ack.error: "failed"`. A typed `BadWindow` error now maps to `ack.error: "bad-window"` exactly as
+  spec 8.12 requires. (`pairing-reject` was *not* used for this: `bad-window` is an inner `ack` on
+  `session.create`, not a pairing ctrl, and `ack.error` is a free-form string in the shipped schema.)
+- **13 · `conn.hello` 10 s timeout.** `PhoneLink` stamps `openedAt` and exposes `helloOverdue(now)`;
+  the `Agent`'s 1 s tick logs once and marks the link `dormant`, which a late `conn.hello` clears. The
+  socket is never closed — the relay owns it.
+- **14 · Missing spec-§15 tests added:** global 40 fps cap, `degraded` catch-up frame, `event` fan-out
+  to every handshaken link, registry isolation (one backend failing does not affect the other), and the
+  `unpaired` → `pairings-sync` ordering test that Plan 02 parked for this plan. iTerm2 reconnect with
+  1→30 s backoff added to Task 6 with a fake-timer test.
+- **15 · Rubric fixes:** the tautological fixture assertion (`expect(x).toBe(x)`) replaced with five real
+  invariants; the `unpair` test now asserts what its title promises (removed, persisted, link dropped,
+  relay told); `Screen` defined once (`types.ts` moved into Task 5) instead of duplicated as `ScreenShape`;
+  `waitFor` defined once in `test/fakes/wait.ts`; the "write this, then replace it" dynamic-import note in
+  Task 10 removed in favour of the final code; the unused `CtrlMessageOf` import and the never-read
+  `awaitingUnpaired` field removed; the whole pairing dance in the integration test factored into one
+  `pairAndConnect()` helper; pure tests added for `plistFor`, `parseTmuxVersion` and `plistNodeOk`.
+- **16 · Hazards.** Task 11's smoke step is split: the automated half is `pnpm test && pnpm build &&
+  node dist/cli.js --help`, and `doctor` (osascript consent, production relay, `exit 1`) is a new
+  **Human-run only** step. Task 12's live test is gated on `SHELLBELL_LIVE`. Global Constraints now say
+  implementers never run Human-run-only steps.
+- **17 · Housekeeping.** README repo link corrected to `https://github.com/Miambi/shellbell` (Plan 02
+  errata). Global Constraints note that plan code blocks may exceed Biome's 100-column limit and that
+  implementers wrap with `pnpm lint:fix` without changing semantics.
+
+**Deliberately deferred (not defects in this plan):**
+
+- The `ws://localhost:1912` TCP fallback for the iTerm2 API (spec 8.5.1 step 2) is **not** built here;
+  it is deferred to Plan 06. The socket path is the only supported transport in v1.
+- Spec 8.12's "a change in the connected backend set triggers a new `hello`" is not implemented: the
+  `Agent` sends `hello` once per handshake and re-broadcasts `sessions` on every layout change. Phones
+  therefore learn about a backend appearing or disappearing through `sessions`, not `hello`. Revisit in
+  Plan 04, when tmux makes the backend set actually dynamic.
+- The `ScreenTracker` still drops a session locally when `getScreen` throws without asking the `Agent` to
+  re-broadcast `sessions` (spec 8.6, last bullet). The next layout event corrects it.
+- The `FakeRelay` does not model gate validation, the one-`pairing-request`-per-socket rule, the
+  post-reject socket close, the 5-admission cap, or the token bucket. Those are covered by the relay's
+  own tests in Plan 02; the limits are written down in Task 2's Interfaces so nobody mistakes the double
+  for the real thing.
