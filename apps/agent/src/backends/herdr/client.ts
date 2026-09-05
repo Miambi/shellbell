@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Logger } from "../../log.js";
 import { BackendUnavailable } from "../types.js";
-import type { HerdrEvent, Pong } from "./types.js";
+import type { HerdrEvent, HerdrSubscription, Pong } from "./types.js";
 
 /**
  * Spec 8.13: the JSON-API floor is a SEMVER version, not `ping.protocol` (which is herdr's binary
@@ -16,8 +16,12 @@ export const INSTALL_HINT =
   'Install Herdr: curl -fsSL https://herdr.dev/install.sh | sh, then start it with "herdr".';
 export const UPGRADE_HINT =
   "Upgrade Herdr to 0.7.2 or newer: curl -fsSL https://herdr.dev/install.sh | sh, then restart it.";
-/** Herdr's own per-line cap (`src/api/server.rs`): 1 MiB, counted in BYTES. */
+/** Herdr's own per-line cap (`src/api/server.rs`): 1 MiB, counted in BYTES. Applies to outbound
+ * requests and inbound subscription events. */
 const MAX_LINE_BYTES = 1_048_576;
+/** Responses (e.g. `pane.read` on a large scrollback) get more headroom than the 1 MiB the wire
+ * protocol enforces for a single request or event line. */
+const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export class HerdrError extends Error {
   constructor(
@@ -115,9 +119,15 @@ function socketError(err: NodeJS.ErrnoException, method: string, path: string): 
  * Feeds complete NDJSON lines to `onLine`. A `StringDecoder` is required, not `chunk.toString()`:
  * a styled `pane.read` carries multi-byte UTF-8 that can straddle a chunk boundary. Complete lines
  * are drained BEFORE the size check, so a chunk holding many valid lines is never rejected; only an
- * unterminated line longer than 1 MiB (in bytes) trips `onOverflow`.
+ * unterminated line longer than `maxBytes` trips `onOverflow`. Defaults to `MAX_LINE_BYTES`;
+ * `request()` passes the larger `MAX_RESPONSE_BYTES` since a response can carry a large screen.
  */
-function pipeLines(socket: Socket, onLine: (line: string) => void, onOverflow: () => void): void {
+function pipeLines(
+  socket: Socket,
+  onLine: (line: string) => void,
+  onOverflow: () => void,
+  maxBytes: number = MAX_LINE_BYTES,
+): void {
   const decoder = new StringDecoder("utf8");
   let buf = "";
   socket.on("data", (chunk: Buffer) => {
@@ -129,7 +139,7 @@ function pipeLines(socket: Socket, onLine: (line: string) => void, onOverflow: (
       if (line.trim()) onLine(line);
       i = buf.indexOf("\n");
     }
-    if (Buffer.byteLength(buf, "utf8") > MAX_LINE_BYTES) {
+    if (Buffer.byteLength(buf, "utf8") > maxBytes) {
       buf = "";
       onOverflow();
     }
@@ -198,6 +208,7 @@ export class HerdrClient {
           done(null, msg.result as T);
         },
         () => done(new HerdrError("overflow", `${method} answered with an oversized line`)),
+        MAX_RESPONSE_BYTES,
       );
       socket.on("error", (err: NodeJS.ErrnoException) => done(socketError(err, method, path)));
       socket.on("close", () =>
@@ -212,7 +223,10 @@ export class HerdrClient {
    * reaches `onEnd` exactly once. Herdr has no "add subscription" method, so changing the per-pane
    * subscription set means opening a new stream and closing this one (spec 8.13, two-phase).
    */
-  subscribe(subscriptions: unknown[], handlers: HerdrStreamHandlers): Promise<HerdrStream> {
+  subscribe(
+    subscriptions: HerdrSubscription[],
+    handlers: HerdrStreamHandlers,
+  ): Promise<HerdrStream> {
     const id = `sb${this.nextId++}`;
     const timeoutMs = this.opts.requestTimeoutMs ?? 5000;
     const path = this.socketPath;

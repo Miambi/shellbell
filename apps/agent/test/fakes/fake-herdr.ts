@@ -1,7 +1,8 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export interface FakeHerdrRequest {
   method: string;
@@ -114,9 +115,10 @@ export class FakeHerdr {
       this.sockets.add(socket);
       let first = true;
       let buf = "";
+      const decoder = new StringDecoder("utf8");
       socket.on("error", () => {});
       socket.on("data", (chunk: Buffer) => {
-        buf += chunk.toString("utf8");
+        buf += decoder.write(chunk);
         let i = buf.indexOf("\n");
         while (i >= 0) {
           const line = buf.slice(0, i);
@@ -140,7 +142,8 @@ export class FakeHerdr {
   }
 
   /**
-   * Closes the listener and removes the socket file, exactly like a herdr server exiting.
+   * Closes the listener and removes the socket file, exactly like a herdr server exiting; also
+   * removes the temp directory it was created in, so tests don't leak `sb-herdr-*` dirs.
    *
    * Every accepted connection is destroyed first — not just the registered event streams. A
    * connection parked by `silence()` was never added to `streams`, and `server.close()` waits for
@@ -153,8 +156,17 @@ export class FakeHerdr {
     this.sockets.clear();
     const server = this.server;
     this.server = null;
-    if (!server) return Promise.resolve();
-    return new Promise((resolve) => server.close(() => resolve()));
+    const cleanup = () => rmSync(this.dir, { recursive: true, force: true });
+    if (!server) {
+      cleanup();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) =>
+      server.close(() => {
+        cleanup();
+        resolve();
+      }),
+    );
   }
 
   private dispatch(socket: Socket, line: string): void {

@@ -97,6 +97,13 @@ describe("HerdrClient.request", () => {
     const c = new HerdrClient({ log, socketPath: join(herdr.dir, "gone.sock") });
     await expect(c.request("ping", {})).rejects.toMatchObject({ code: "unavailable" });
   });
+
+  it("accepts a 2 MiB response line (responses get their own, larger byte cap)", async () => {
+    const big = "x".repeat(2 * 1024 * 1024);
+    herdr.reply("pane.read", () => ({ type: "pane_read", read: { text: big } }));
+    const result = await client().request<{ read: { text: string } }>("pane.read", {});
+    expect(result.read.text).toHaveLength(big.length);
+  });
 });
 
 describe("HerdrClient.ping", () => {

@@ -1,0 +1,16 @@
+{
+  "id": "sb7",
+  "result": {
+    "type": "pane_read",
+    "read": {
+      "pane_id": "w1:p1",
+      "workspace_id": "w1",
+      "tab_id": "w1:t1",
+      "source": "visible",
+      "format": "ansi",
+      "revision": 0,
+      "truncated": false,
+      "text": "\u001b[1;32m➜\u001b[0m  \u001b[36mshellbell\u001b[0m git:(\u001b[31mmain\u001b[0m)\n$ pnpm -F shellbell test\n\u001b[32m✓\u001b[0m test/herdr-client.test.ts (7)\n\u001b[33m漢字\u001b[0m wide-cell row\n"
+    }
+  }
+}

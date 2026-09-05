@@ -147,3 +147,10 @@ export interface HerdrEvent {
   event: string;
   data: Record<string, unknown>;
 }
+
+/** One entry of `events.subscribe`'s `subscriptions` array (research §2). */
+export interface HerdrSubscription {
+  type: string;
+  pane_id?: string;
+  agent_status?: string;
+}
