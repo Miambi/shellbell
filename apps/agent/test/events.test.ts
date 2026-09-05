@@ -101,6 +101,82 @@ describe("EventEngine", () => {
     expect(events).toEqual(["exit:V::"]);
     expect(rings).toEqual([]);
   });
+
+  it("agent-state: blocked rings on a transition, never on the first sighting", () => {
+    const { e, events, rings, now } = engine();
+    // Bootstrap: the pane is already blocked the first time we see it. State only, no ring.
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "blocked", at: now() });
+    expect(e.stateOf("H")).toBe("blocked");
+    expect(events).toEqual(["blocked:H::"]);
+    expect(rings).toEqual([]);
+
+    // A real transition rings immediately.
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    expect(e.stateOf("H")).toBe("running");
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "blocked", at: now() });
+    expect(rings).toEqual(["blocked:H"]);
+
+    // Repeats are no-ops.
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "blocked", at: now() });
+    expect(rings).toEqual(["blocked:H"]);
+    expect(events).toEqual(["blocked:H::", "blocked:H::"]);
+  });
+
+  it("agent-state: a herdr restart re-adopts a blocked pane without ringing", () => {
+    // spec 8.13: the backend removes every session when its socket dies, so the engine forgets
+    // the pane; when herdr comes back the same pane is a FIRST sighting again, even though it
+    // was `working` before the restart and is `blocked` after it.
+    const { e, rings, now } = engine();
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    e.onBackendEvent({ type: "session-removed", sessionId: "H" });
+    e.onBackendEvent({ type: "session-added", sessionId: "H" });
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "blocked", at: now() });
+    expect(rings).toEqual([]);
+    expect(e.stateOf("H")).toBe("blocked");
+  });
+
+  it("agent-state: working -> idle emits prompt, and rings past notifyMinCommandMs", () => {
+    const { e, events, rings, jump, now } = engine();
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    jump(2000);
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "idle", at: now() });
+    expect(events).toEqual(["prompt:H::2000"]);
+    expect(rings).toEqual([]);
+    expect(e.stateOf("H")).toBe("finished");
+
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    jump(12_000);
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "done", at: now() });
+    expect(events[1]).toBe("prompt:H::12000");
+    expect(rings).toEqual(["prompt:H"]);
+    expect(e.stateOf("H")).toBe("finished");
+  });
+
+  it("agent-state: answering a blocked agent neither rings nor emits", () => {
+    const { e, events, rings, now } = engine();
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "blocked", at: now() });
+    events.length = 0;
+    rings.length = 0;
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "idle", at: now() });
+    expect(events).toEqual([]);
+    expect(rings).toEqual([]);
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "unknown", at: now() });
+    expect(e.stateOf("H")).toBe("unknown");
+  });
+
+  it("agent-state: the idle heuristic does not ring again for the same quiet screen", () => {
+    const { e, rings, advance, jump, now } = engine();
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: now() });
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    jump(2000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    jump(11_000);
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "idle", at: now() });
+    expect(rings).toEqual(["prompt:H"]);
+    advance(5000);
+    expect(rings).toEqual(["prompt:H"]);
+  });
 });
 
 describe("Notifier", () => {
@@ -146,5 +222,24 @@ describe("Notifier", () => {
     // ringing a new session prunes every entry older than 60 s, so the map stays bounded
     n.ring({ sessionId: "V", kind: "idle" });
     expect(n.size).toBe(1);
+  });
+
+  it("forwards a blocked ring as a notify with kind blocked", () => {
+    const sent: CtrlMessage[] = [];
+    const n = new Notifier(
+      (m) => sent.push(m),
+      createLogger({ stdout: false }),
+      () => 0,
+    );
+    expect(n.ring({ sessionId: "herdr:term_a", kind: "blocked" })).toBe(true);
+    expect(sent[0]).toEqual({
+      type: "notify",
+      sessionId: "herdr:term_a",
+      kind: "blocked",
+      exitCode: undefined,
+      durationMs: undefined,
+    });
+    // The 60 s per-session limit covers blocked exactly like every other kind.
+    expect(n.ring({ sessionId: "herdr:term_a", kind: "blocked" })).toBe(false);
   });
 });

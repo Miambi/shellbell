@@ -1,10 +1,10 @@
 import { EventEmitter } from "node:events";
 import type { InnerMessageOf, SessionInfo } from "@shellbell/protocol";
-import type { BackendEvent } from "./backends/types.js";
+import type { AgentState, BackendEvent } from "./backends/types.js";
 
 export interface Ring {
   sessionId: string;
-  kind: "prompt" | "idle";
+  kind: "prompt" | "idle" | "blocked";
   exitCode?: number;
   durationMs?: number;
 }
@@ -23,6 +23,10 @@ interface S {
   lastChangeAt: number;
   activeSince: number | null;
   lastPromptRingAt: number;
+  /** Spec 8.13: the last herdr agent state we saw; `null` until the first `agent-state` event. */
+  agentState: AgentState | null;
+  /** When the agent last entered `working`, for the `prompt` ring's durationMs. */
+  workingSince: number | null;
 }
 
 const PROMPT_DEDUPE_MS = 5000;
@@ -54,6 +58,8 @@ export class EventEngine extends EventEmitter<{ event: [InnerMessageOf<"event">]
         lastChangeAt: 0,
         activeSince: null,
         lastPromptRingAt: Number.NEGATIVE_INFINITY,
+        agentState: null,
+        workingSince: null,
       };
       this.s.set(id, x);
     }
@@ -104,6 +110,57 @@ export class EventEngine extends EventEmitter<{ event: [InnerMessageOf<"event">]
       }
       case "prompt": {
         this.get(e.sessionId).promptState = "editing";
+        return;
+      }
+      case "agent-state": {
+        // Spec 8.13. Herdr has no command lifecycle at all, so this is the whole prompt story for
+        // herdr sessions: `blocked` means "a human is needed now", and working -> idle|done is the
+        // analogue of `command-end` (with a duration, but never an exit code).
+        const x = this.get(e.sessionId);
+        const prev = x.agentState;
+        if (prev === e.state) return;
+        x.agentState = e.state;
+        if (e.state === "working") {
+          x.promptState = "running";
+          x.workingSince = now;
+          return;
+        }
+        if (e.state === "blocked") {
+          x.promptState = "blocked";
+          x.workingSince = null;
+          // The screen is about to go quiet while the agent waits: suppress the idle heuristic so
+          // one blocked agent cannot produce two rings.
+          x.activeSince = null;
+          x.lastPromptRingAt = now;
+          this.emit("event", { type: "event", sessionId: e.sessionId, kind: "blocked", at: now });
+          // `prev === null` means we have never seen this session before: agent start, or a herdr
+          // reconnect (which removes and re-adds every pane, dropping this state). Adopt the
+          // state, but never ring for history.
+          if (prev !== null) this.emit("ring", { sessionId: e.sessionId, kind: "blocked" });
+          return;
+        }
+        if (e.state === "idle" || e.state === "done") {
+          x.promptState = "finished";
+          const startedAt = x.workingSince;
+          x.workingSince = null;
+          if (prev !== "working" || startedAt === null) return;
+          const durationMs = now - startedAt;
+          this.emit("event", {
+            type: "event",
+            sessionId: e.sessionId,
+            kind: "prompt",
+            durationMs,
+            at: now,
+          });
+          if (durationMs >= this.opts.notifyMinCommandMs) {
+            x.lastPromptRingAt = now;
+            x.activeSince = null;
+            this.emit("ring", { sessionId: e.sessionId, kind: "prompt", durationMs });
+          }
+          return;
+        }
+        x.promptState = "unknown";
+        x.workingSince = null;
         return;
       }
       case "session-removed": {

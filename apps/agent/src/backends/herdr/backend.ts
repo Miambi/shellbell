@@ -621,6 +621,7 @@ export class HerdrBackend implements TerminalBackend {
     // about to arrive (review fix 4).
     const requestSeq = this.eventSeq;
     const res = await this.client.request<SessionSnapshotResult>("session.snapshot", {});
+    if (this.closed) return;
     this.applySnapshot(assertSnapshot(res?.snapshot), requestSeq);
   }
 

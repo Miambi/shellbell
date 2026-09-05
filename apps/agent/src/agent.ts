@@ -75,6 +75,8 @@ export class Agent {
    * `pairings.json` on every attempt. */
   private readonly lastSeenSavedAt = new Map<string, number>();
   private readonly log: Logger;
+  /** Last `hello.backends` fingerprint sent, so a backend appearing or dying re-announces itself. */
+  private backendsKey: string | null = null;
 
   constructor(private readonly o: AgentOptions) {
     this.log = o.log.child({ unit: "agent" });
@@ -554,6 +556,9 @@ export class Agent {
       case "session-added":
       case "focus-changed":
       case "title-changed":
+      // spec 8.13: `SessionInfo.state` comes from `EventEngine.stateOf`, which the
+      // `this.events.onBackendEvent(e)` call above has just changed -- the phones need the new list.
+      case "agent-state":
         this.scheduleSessions();
         return;
       default:
@@ -569,12 +574,46 @@ export class Agent {
     }, 100);
   }
 
+  /**
+   * spec 8.12: `hello.backends` lists the CONNECTED backends, and a change to that set must reach
+   * every phone. Herdr makes the set genuinely dynamic (it appears when the user starts herdr and
+   * disappears when the socket dies), so this runs on every debounced refresh.
+   */
+  private broadcastHelloIfBackendsChanged(): void {
+    const backends = this.o.registry.connected();
+    const key = backends
+      .map((b) => b.name)
+      .sort()
+      .join(",");
+    if (key === this.backendsKey) return;
+    const first = this.backendsKey === null;
+    this.backendsKey = key;
+    if (first) return; // the per-phone `hello` sent at handshake already carries this set
+    for (const l of this.links.values())
+      l.send({
+        type: "hello",
+        agentVersion: this.o.appVersion,
+        backends,
+        computerName: this.o.config.computerName,
+        accent: this.o.config.accent,
+      });
+  }
+
   private async refreshSessions(): Promise<void> {
     try {
       const list = await this.o.registry.listSessions();
-      this.sessions = list.map((s) => ({ ...s, state: this.events.stateOf(s.id) }));
+      // spec 8.12/8.13: a backend can know a session's state before any event has been processed
+      // (herdr's first snapshot reports `blocked` outright). The EventEngine is authoritative once
+      // it has an opinion; `"unknown"` is not an opinion.
+      this.sessions = list.map((s) => {
+        const known = this.events.stateOf(s.id);
+        return known === "unknown" ? s : { ...s, state: known };
+      });
+      this.broadcastHelloIfBackendsChanged();
       this.broadcast({ type: "sessions", list: this.sessions });
     } catch (err) {
+      // Unchanged from the shipped code -- keep the error NAME, never `String(err)`: a backend's
+      // error message can quote a session title or a command line (spec 8.10, log names/lengths).
       this.log.warn("listSessions failed", { err: err instanceof Error ? err.name : "unknown" });
     }
   }
