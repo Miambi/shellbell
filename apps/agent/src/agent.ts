@@ -600,6 +600,12 @@ export class Agent {
   }
 
   private async refreshSessions(): Promise<void> {
+    // M-2: this used to sit inside the `try` below, after `listSessions()`. `registry.listSessions`
+    // already isolates every member's own failure (`registry.ts` `safeListSessions`), so this needs
+    // the registry facade itself to throw -- unlikely, but if it ever does on exactly the refresh
+    // where Herdr appeared or died, skipping the hello here silently defers it to "whenever
+    // something else happens to schedule another refresh", which may be never. Running it in a
+    // `finally` means a failing member can never suppress the one signal that actually matters.
     try {
       const list = await this.o.registry.listSessions();
       // spec 8.12/8.13: a backend can know a session's state before any event has been processed
@@ -609,12 +615,13 @@ export class Agent {
         const known = this.events.stateOf(s.id);
         return known === "unknown" ? s : { ...s, state: known };
       });
-      this.broadcastHelloIfBackendsChanged();
       this.broadcast({ type: "sessions", list: this.sessions });
     } catch (err) {
       // Unchanged from the shipped code -- keep the error NAME, never `String(err)`: a backend's
       // error message can quote a session title or a command line (spec 8.10, log names/lengths).
       this.log.warn("listSessions failed", { err: err instanceof Error ? err.name : "unknown" });
+    } finally {
+      this.broadcastHelloIfBackendsChanged();
     }
   }
 }

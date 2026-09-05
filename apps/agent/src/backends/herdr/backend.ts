@@ -172,6 +172,8 @@ interface StreamState {
   live: boolean;
   buffer: HerdrEvent[];
   stream: HerdrStream | null;
+  /** M-6: set once this bootstrap has already logged an overflow, so a storm logs only once. */
+  overflowed: boolean;
 }
 
 export interface HerdrBackendOptions {
@@ -373,15 +375,13 @@ export class HerdrBackend implements TerminalBackend {
       // full-screen TUI anyway. Fall back to what we can always get -- the visible screen -- and
       // tell the phone to stop paging.
       if (err instanceof HerdrError && err.code === "agent_not_idle") {
+        // M-7: a visible read can come back TALLER than the cached rect (Ghostty usually trims, so
+        // this is the exception, not the rule). Those extra rows are CURRENT screen content, not
+        // scrollback -- returning them here would place them at coordinates that claim otherwise
+        // (spec 7.4). The honest answer when herdr refuses a deep read is "no history available",
+        // so this never attaches any lines, visible or not.
         this.log.debug("herdr refused a deep read while the agent is busy", { want });
-        const visible = await this.call<PaneReadResult>(sessionId, "pane.read", {
-          pane_id: pane.paneId,
-          source: "visible",
-          format: "ansi",
-        });
-        const rows = parseAnsiLines(visible?.read?.text ?? "");
-        const page = rows.slice(0, Math.max(0, rows.length - pane.rows));
-        return { lines: page, oldestAvailable: before };
+        return { lines: [], oldestAvailable: before };
       }
       throw err;
     }
@@ -460,6 +460,12 @@ export class HerdrBackend implements TerminalBackend {
    * Spec 8.13: Herdr pushes nothing when a screen changes, so we probe `pane.copy_motion` — the one
    * side-effect-free call that returns the terminal's real content counter — but only for panes a
    * phone is viewing. `setWatched([])` stops the timer entirely.
+   *
+   * M-3: this is also what genuinely re-arms polling after a reconnect in the wired agent. Every
+   * `session-removed` the disconnect storm emits drives `ScreenTracker.setWatched([])` (via the
+   * registry) before this backend can ever apply a reconnect snapshot, so a fresh `setWatched([…])`
+   * call after the phone's `session.view` resubscribes — not `applySnapshot`'s `NaN` re-seed — is
+   * what production relies on to resume probing under the pane's new native id.
    */
   setWatched(nativeIds: string[]): void {
     const next = new Set(nativeIds);
@@ -572,7 +578,13 @@ export class HerdrBackend implements TerminalBackend {
    */
   private async openStream(paneIds?: string[]): Promise<void> {
     const ids = paneIds ?? [...this.byPaneId.keys()];
-    const state: StreamState = { cancelled: false, live: false, buffer: [], stream: null };
+    const state: StreamState = {
+      cancelled: false,
+      live: false,
+      buffer: [],
+      stream: null,
+      overflowed: false,
+    };
     const stream = await this.client.subscribe(herdrSubscriptions(ids), {
       onEvent: (e) => {
         if (state.cancelled) return;
@@ -580,7 +592,20 @@ export class HerdrBackend implements TerminalBackend {
           this.onEvent(e);
           return;
         }
-        if (state.buffer.length < MAX_BUFFERED_EVENTS) state.buffer.push(e);
+        if (state.buffer.length < MAX_BUFFERED_EVENTS) {
+          state.buffer.push(e);
+          return;
+        }
+        // M-6: a storm past the cap drops events with no compensating action; log once (count
+        // only, never event content) and make sure the round ends with a fresh snapshot so
+        // whatever a dropped hint would have told us gets picked up anyway.
+        if (!state.overflowed) {
+          state.overflowed = true;
+          this.log.warn("herdr bootstrap event buffer overflowed; dropping events", {
+            max: MAX_BUFFERED_EVENTS,
+          });
+        }
+        this.scheduleSync("snapshot");
       },
       onEnd: (reason) => {
         if (!state.cancelled && this.active === state) this.onStreamEnd(reason);
@@ -719,6 +744,11 @@ export class HerdrBackend implements TerminalBackend {
     const next = new Map<string, Pane>();
     const byPaneId = new Map<string, string>();
     const changed: { id: string; state: AgentState; agent?: string }[] = [];
+    // I-1: the snapshot is the sole writer of `title`/`cwd`, so it is the only place that can
+    // notice one changed on a pane that merely got renamed/`cd`ed -- the event path already emits
+    // `title-changed` for its own title updates (`pane.agent_status_changed`), this closes the gap
+    // for `pane.updated`/`tab.renamed`/`pane.moved`, all of which only ever schedule a snapshot.
+    const titleChanged = new Set<string>();
     for (const info of snap.panes) {
       const id = info.terminal_id ?? info.pane_id;
       const was = prev.get(id);
@@ -731,13 +761,16 @@ export class HerdrBackend implements TerminalBackend {
       const staleStatus = statusSeq > requestSeq;
       const state = staleStatus ? (was?.agentStatus ?? snapshotState) : snapshotState;
       const viewportRows = info.scroll?.viewport_rows;
+      const title = titleOf(info);
+      const cwd = info.foreground_cwd ?? info.cwd;
+      if (was && (was.title !== title || was.cwd !== cwd)) titleChanged.add(id);
       next.set(id, {
         terminalId: id,
         paneId: info.pane_id,
         workspaceId: info.workspace_id,
         tabId: info.tab_id,
-        title: titleOf(info),
-        cwd: info.foreground_cwd ?? info.cwd,
+        title,
+        cwd,
         cols: rect?.cols ?? was?.cols ?? 80,
         rows: Math.max(1, rect?.rows ?? viewportRows ?? was?.rows ?? 24),
         rowsFromRect: rect !== undefined,
@@ -771,7 +804,7 @@ export class HerdrBackend implements TerminalBackend {
       this.watched.delete(id);
     }
 
-    // Review fix 1: a pane the phone is still watching may have lost its `ProbeState` --
+    // Review fix 1 / M-3: a pane the phone is still watching may have lost its `ProbeState` --
     // `onStreamEnd` clears `probes` on every disconnect but deliberately leaves `watched` alone
     // (the terminal_id is stable across a pane_id renumbering), so without this a watched pane
     // that survives a reconnect would poll nothing forever (the interval keeps ticking but
@@ -780,6 +813,18 @@ export class HerdrBackend implements TerminalBackend {
     // post-reconnect probe reads as a change and emits `screen-changed` immediately -- unlike a
     // brand-new `setWatched` probe's silent baseline -- because the phone's on-screen content may
     // already be stale after the gap and the tracker needs to re-snapshot it.
+    //
+    // M-3 (final review): wired through `ScreenTracker`, this loop is defence-in-depth rather than
+    // the primary path. `onStreamEnd` emits `session-removed` for every pane SYNCHRONOUSLY, the
+    // tracker's `sessionRemoved` reacts to each one and calls `setWatched([])` through the registry
+    // before the reconnect timer even arms -- which empties `this.watched` (see `setWatched` below)
+    // before this snapshot ever runs. In that wiring, polling instead resumes because the phone's
+    // renewed `session.view` after the pane comes back as `session-added` drives a fresh
+    // `setWatched([...])` call, which seeds an ordinary (non-`NaN`) baseline probe -- proven by the
+    // integration test in `herdr-agent.test.ts` ("re-arms polling via a fresh setWatched after a
+    // herdr restart"). This loop still matters for any caller of `HerdrBackend` that watches panes
+    // directly, without a tracker clearing `watched` on `session-removed` (see the direct-backend
+    // regression test in this file), so it is kept rather than deleted.
     const seedAt = Date.now();
     for (const id of this.watched) {
       if (this.panes.has(id) && !this.probes.has(id))
@@ -803,6 +848,10 @@ export class HerdrBackend implements TerminalBackend {
       if (c)
         this.emit({ type: "agent-state", sessionId: c.id, state: c.state, agent: c.agent, at });
     }
+    // I-1: a retained pane whose title or cwd moved gets the same event the event path emits for
+    // its own title updates, so `Agent.onBackendEvent` re-broadcasts `sessions` either way.
+    for (const id of this.order)
+      if (titleChanged.has(id)) this.emit({ type: "title-changed", sessionId: id });
     if (removed.length > 0 || addedSet.size > 0) this.emit({ type: "layout-changed" });
 
     // Herdr has no incremental subscription call, so a changed pane set means a new stream.

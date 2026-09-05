@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HerdrBackend } from "../src/backends/herdr/backend.js";
 import { HerdrClient } from "../src/backends/herdr/client.js";
 import { type BackendEvent, BadWindow, SessionGone } from "../src/backends/types.js";
-import { createLogger } from "../src/log.js";
+import { createLogger, type Logger } from "../src/log.js";
 import { FakeHerdr } from "./fakes/fake-herdr.js";
 import { waitFor } from "./fakes/wait.js";
 
@@ -275,20 +275,20 @@ describe("HerdrBackend.getScreen / getHistory", () => {
     expect(herdr.called("pane.read").at(-1)?.params.lines).toBe(1000);
   });
 
-  it("falls back to a visible read when herdr refuses a deep read", async () => {
+  it("answers 'no history available' when herdr refuses a deep read (M-7)", async () => {
     const b = await connect();
-    // Only the deep read is refused (a busy recognised agent); `visible` still answers.
+    // A busy recognised agent refuses the deep read; the fallback used to re-fetch the visible
+    // screen and republish whatever didn't fit the viewport as "history" -- which, per spec 7.4,
+    // is current screen content at coordinates that claim otherwise. The honest answer is "no
+    // history available", so this no longer re-reads the pane at all.
     herdr.reply("pane.read", (p) =>
       p.source === "recent"
         ? { __error: { code: "agent_not_idle", message: "agent is working" } }
         : VISIBLE.result,
     );
     const page = await b.getHistory("term_a", 120, 10);
-    // The visible screen is 4 rows in a 24-row viewport, so there is nothing above it to page:
-    // an empty page plus `oldestAvailable = before` is how the phone learns to stop asking.
-    expect(page.lines).toEqual([]);
-    expect(page.oldestAvailable).toBe(120);
-    expect(herdr.called("pane.read").at(-1)?.params.source).toBe("visible");
+    expect(page).toEqual({ lines: [], oldestAvailable: 120 });
+    expect(herdr.called("pane.read").at(-1)?.params.source).toBe("recent");
   });
 });
 
@@ -401,6 +401,42 @@ describe("HerdrBackend event handling", () => {
     expect(idsOf("session-removed")).toEqual([]);
     // No pane appeared or vanished, so no stream rebuild either.
     expect(herdr.called("events.subscribe")).toHaveLength(1);
+  });
+
+  it("emits title-changed when a snapshot refresh alone renames a pane or moves its cwd (I-1)", async () => {
+    // The snapshot is the sole writer of title/cwd; `pane.updated`/`tab.renamed`/`pane.moved` are
+    // all mapped to a debounced snapshot refresh with no pane-set change, so before this fix the
+    // phone never learned a pane was renamed or `cd`ed until something unrelated refreshed it.
+    const b = await connect();
+    events.length = 0;
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: { panes: { pane_id: string; title?: string; cwd?: string }[] };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p2");
+      if (pane) {
+        pane.title = "npm run dev";
+        pane.cwd = "/Users/dev/code/shellbell/apps/agent";
+      }
+      return snap;
+    });
+    // A pure metadata hint -- no pane created/closed/moved -- so the pane set never changes.
+    herdr.pushEvent("tab_renamed", { tab_id: "w1:t1", workspace_id: "w1", label: "renamed" });
+    await waitFor(() => idsOf("title-changed").includes("term_b"), 3000);
+    // Only the pane that actually changed fires -- term_a and term_c are untouched by this
+    // snapshot and must not appear.
+    expect(idsOf("title-changed")).toEqual(["term_b"]);
+    expect((await b.listSessions()).find((s) => s.id === "term_b")).toMatchObject({
+      title: "npm run dev",
+    });
+
+    // A refresh where nothing's title or cwd moved emits nothing.
+    events.length = 0;
+    const snapshotsBefore = herdr.called("session.snapshot").length;
+    herdr.pushEvent("pane_updated", { pane: { pane_id: "w1:p1" } });
+    await waitFor(() => herdr.called("session.snapshot").length > snapshotsBefore, 3000);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(idsOf("title-changed")).toEqual([]);
   });
 
   it("adds a pane only when the snapshot shows it, then re-subscribes exactly once", async () => {
@@ -793,5 +829,117 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     // ...and its first post-reconnect probe is treated as a change (an unknown baseline, not a
     // silent one), so a viewer whose screen went stale while the socket was down gets refreshed.
     await waitFor(() => idsOf("screen-changed").includes("term_a"), 3000);
+  });
+});
+
+describe("HerdrBackend bootstrap event buffer (M-6)", () => {
+  it("logs once (count only) and forces a follow-up snapshot when the buffer overflows", async () => {
+    const warns: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const captureLog: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn: (msg, fields) => warns.push({ msg, fields }),
+      error: () => {},
+      child: () => captureLog,
+    };
+    const client = new HerdrClient({
+      log: captureLog,
+      socketPath: herdr.path,
+      requestTimeoutMs: 2000,
+    });
+    const b = new HerdrBackend({
+      client,
+      log: captureLog,
+      reconnectMs: 30,
+      revisionPollMs: 20,
+      syncDebounceMs: 20,
+      scrollRefreshMs: 0,
+    });
+    backend = b;
+    events = [];
+    b.on((e) => events.push(e));
+    await b.connect(); // normal bootstrap: 3 panes, 1 live stream, 2 session.snapshot calls so far.
+
+    // Force a resubscribe (a pane appears), exactly like the "adds a pane" test above, so a SECOND
+    // `openStream()` bootstraps a NEW, not-yet-live stream we can flood.
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as { snapshot: { panes: unknown[] } };
+      snap.snapshot.panes.push({
+        pane_id: "w1:p4",
+        terminal_id: "term_d",
+        workspace_id: "w1",
+        tab_id: "w1:t1",
+        focused: false,
+        agent_status: "idle",
+        revision: 0,
+        title: "new pane",
+        scroll: { offset_from_bottom: 0, max_offset_from_bottom: 0, viewport_rows: 24 },
+      });
+      return snap;
+    });
+    const releaseSubscribe = herdr.gate("events.subscribe");
+    herdr.pushEvent("pane_created", { pane: { pane_id: "w1:p4" } });
+    // The pane_created hint's own (ungated) snapshot lands, discovers the new pane, and schedules
+    // a resubscribe -- whose `openStream()` immediately dispatches this SECOND `events.subscribe`,
+    // now gated (unambiguously the resubscribe's own call: the first already finished above).
+    await waitFor(() => herdr.called("events.subscribe").length === 2, 3000);
+
+    // Gate the NEXT `session.snapshot` too -- unambiguously `openStream`'s own bootstrap snapshot
+    // for this new stream, since it can only be dispatched after the subscribe ack below is
+    // processed, and nothing else calls `session.snapshot` in between.
+    const releaseSnapshot = herdr.gate("session.snapshot");
+    // Queue more events than the cap into the SAME chunk as the ack (`ackRider`, see
+    // herdr-client.test.ts): they reach `onEvent` while this new stream is still non-live.
+    for (let i = 0; i < 1005; i++) {
+      herdr.ackRider.push({ event: "pane_focused", data: { pane_id: "w1:p1" } });
+    }
+    releaseSubscribe();
+    // Give every chunk of that (~50 KB) write time to actually arrive over the socket before the
+    // gated `session.snapshot` -- which would flip this stream live -- is allowed to answer.
+    await new Promise((r) => setTimeout(r, 200));
+    releaseSnapshot();
+
+    // Proves the stream actually went live and replayed its buffer: each buffered `pane_focused`
+    // (routed to the already-known pane w1:p1/term_a) fires a `focus-changed`.
+    await waitFor(() => events.some((e) => e.type === "focus-changed"), 3000);
+
+    const overflowWarns = warns.filter((w) => w.msg.includes("overflow"));
+    expect(overflowWarns).toHaveLength(1);
+    // Count only -- never the dropped events' own content.
+    expect(overflowWarns[0]?.fields).toEqual({ max: 1000 });
+
+    // 2 initial snapshots (connect) + the pane_created hint's snapshot + this resubscribe's own
+    // bootstrap snapshot = 4; the overflow schedules a follow-up fifth, which the 20 ms debounce
+    // and the 200 ms drain above have likely already let through by the time we get here.
+    expect(herdr.called("session.snapshot").length).toBeGreaterThanOrEqual(4);
+    await waitFor(() => herdr.called("session.snapshot").length >= 5, 3000);
+  });
+});
+
+describe("HerdrBackend getHistory agent_not_idle fallback shape (M-7)", () => {
+  it("never republishes visible rows as history, even when the visible read is taller than the pane", async () => {
+    // Ghostty normally trims a visible read to the pane's own row count, but if it ever comes back
+    // TALLER (more rows than `pane.rows`), those extra rows are CURRENT screen content, not
+    // scrollback -- attaching them at `oldestAvailable`-relative coordinates would misrepresent
+    // them as history the phone can page into (spec 7.4).
+    const tallVisible = {
+      type: "pane_read",
+      read: {
+        pane_id: "w1:p1",
+        source: "visible",
+        format: "ansi",
+        revision: 0,
+        truncated: false,
+        text: `${Array.from({ length: 30 }, (_, i) => `row ${i}`).join("\n")}\n`,
+      },
+    };
+    const b = await connect();
+    herdr.reply("pane.read", (p) =>
+      p.source === "recent"
+        ? { __error: { code: "agent_not_idle", message: "agent is working" } }
+        : tallVisible,
+    );
+    const page = await b.getHistory("term_a", 120, 10);
+    expect(page).toEqual({ lines: [], oldestAvailable: 120 });
   });
 });

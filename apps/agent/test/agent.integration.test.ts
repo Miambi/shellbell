@@ -809,4 +809,66 @@ describe("Agent end to end (fake relay, fake backend)", () => {
       }
     },
   );
+
+  it(
+    "M-2: the hello re-broadcast still runs on a refresh where registry.listSessions() itself " +
+      "rejects, as long as the connected backend set changed",
+    async () => {
+      // `registry.listSessions()` already isolates every MEMBER's own failure (`safeListSessions`
+      // in registry.ts), so this needs the registry FACADE itself to throw -- unlikely, but the
+      // fix must not depend on it never happening: `broadcastHelloIfBackendsChanged()` must run
+      // regardless, not only on the `try`'s happy path.
+      const p5 = paths(mkdtempSync(join(tmpdir(), "sb-agent-m2-")));
+      const { identity: id5, fp: fp5 } = loadOrCreateIdentity(p5);
+      const relay5 = new FakeRelay(fp5);
+      await relay5.start();
+      const registry5 = new BackendRegistry(log);
+      const iterm5 = new FakeBackend();
+      registry5.add(iterm5);
+      const config5 = { ...loadConfig(p5), computerName: "MBP5" };
+      const agent5 = new Agent({
+        paths: p5,
+        config: config5,
+        identity: id5,
+        fp: fp5,
+        registry: registry5,
+        log,
+        confirm: async () => true,
+        appVersion: "0.0.1-test",
+        relayUrlOverride: relay5.url,
+      });
+      agent5.start();
+      try {
+        await waitFor(() => agent5.relayOnline);
+        const ph = await pairAndConnect({ agent: agent5, relay: relay5, computerFp: fp5 });
+        const hellos = () => ph.inner.filter((m) => m.type === "hello");
+        expect(hellos()).toHaveLength(1);
+
+        // Make the registry facade itself reject exactly once, then adding a second backend
+        // changes the connected set on that SAME refresh.
+        const realListSessions = registry5.listSessions.bind(registry5);
+        let thrown = false;
+        registry5.listSessions = async () => {
+          if (!thrown) {
+            thrown = true;
+            throw new Error("registry facade exploded");
+          }
+          return realListSessions();
+        };
+        const tmux5 = new FakeBackend("tmux");
+        registry5.add(tmux5);
+
+        // Despite the rejection, the phone still gets the fresh hello for the new backend set.
+        await waitFor(() => hellos().length === 2, 3000);
+        expect(hellos().at(-1)).toMatchObject({
+          backends: [{ name: "iterm2" }, { name: "tmux" }],
+        });
+
+        ph.ws.close();
+      } finally {
+        agent5.stop();
+        await relay5.stop();
+      }
+    },
+  );
 });

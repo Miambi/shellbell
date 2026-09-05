@@ -116,8 +116,12 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
     try {
       await backend.connect();
     } catch (err) {
+      // M-1: every other site in this branch logs the error NAME, never the message -- the
+      // message reaching here is `BackendUnavailable`'s, which embeds the herdr error text and the
+      // socket path (which contains the OS username). Only `ping` and `session.snapshot` can fail
+      // here, but the branch should not carry the one exception to its own rule.
       log.debug("herdr not available", {
-        error: err instanceof Error ? err.message : String(err),
+        error: err instanceof Error ? err.name : "unknown",
       });
       if (opts.onUnavailable && !announcedUnavailable && err instanceof BackendUnavailable) {
         announcedUnavailable = true;
@@ -126,12 +130,21 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
       schedule();
       return;
     }
-    if (stopped) return;
-    log.info("herdr connected");
-    if (opts.onConnected && !announced) {
-      announced = true;
-      const sessions = await backend.listSessions().catch(() => []);
-      opts.onConnected(sessions.length);
+    // M-5: a separate try/catch so a throw from `onConnected` (the CLI's buffered `print` closure)
+    // cannot become an unhandled rejection on the `void attempt()` call below -- and, since the
+    // backend is already connected at this point, a failure here must not re-schedule a retry.
+    try {
+      if (stopped) return;
+      log.info("herdr connected");
+      if (opts.onConnected && !announced) {
+        announced = true;
+        const sessions = await backend.listSessions().catch(() => []);
+        opts.onConnected(sessions.length);
+      }
+    } catch (err) {
+      log.debug("herdr post-connect setup failed", {
+        error: err instanceof Error ? err.name : "unknown",
+      });
     }
   };
 

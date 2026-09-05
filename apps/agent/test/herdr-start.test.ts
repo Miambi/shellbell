@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkHerdr, startHerdrBackend } from "../src/backends/herdr/start.js";
 import { BackendRegistry } from "../src/backends/registry.js";
-import { createLogger } from "../src/log.js";
+import { createLogger, type Logger } from "../src/log.js";
 import { FakeHerdr } from "./fakes/fake-herdr.js";
 import { waitFor } from "./fakes/wait.js";
 
@@ -155,4 +155,67 @@ describe("startHerdrBackend", () => {
     expect(connectedPanes).toBe(0);
     expect(unavailableCalls).toBe(1); // still exactly once -- success does not retroactively fire it
   });
+
+  it("logs the error NAME, never the message, when herdr cannot be reached (M-1)", async () => {
+    // No FakeHerdr is ever started: `client.ping()` fails with `BackendUnavailable`, whose message
+    // embeds both herdr's own error text and this socket path (which carries the OS username).
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-start-m1-"));
+    const socketPath = join(dir, "herdr.sock");
+    const registry = new BackendRegistry(log);
+    const calls: { msg: string; fields?: Record<string, unknown> }[] = [];
+    const captureLog: Logger = {
+      debug: (msg, fields) => calls.push({ msg, fields }),
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+      child: () => captureLog,
+    };
+    handle = startHerdrBackend({
+      registry,
+      log: captureLog,
+      socketPath,
+      retryMs: 20,
+      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+    });
+    await waitFor(() => calls.some((c) => c.msg === "herdr not available"));
+    const call = calls.find((c) => c.msg === "herdr not available");
+    expect(call?.fields).toEqual({ error: "BackendUnavailable" });
+    expect(JSON.stringify(call?.fields)).not.toContain(socketPath);
+  });
+
+  it(
+    "guards everything after connect(): a throwing onConnected is logged, never an unhandled " +
+      "rejection, and never re-triggers a retry (M-5)",
+    async () => {
+      const rejections: unknown[] = [];
+      const onRejection = (err: unknown) => rejections.push(err);
+      process.on("unhandledRejection", onRejection);
+      try {
+        const dir = mkdtempSync(join(tmpdir(), "sb-herdr-start-m5-"));
+        const socketPath = join(dir, "herdr.sock");
+        const registry = new BackendRegistry(log);
+        handle = startHerdrBackend({
+          registry,
+          log,
+          socketPath,
+          retryMs: 20,
+          backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+          onConnected: () => {
+            throw new Error("CLI banner print blew up");
+          },
+        });
+        server = new FakeHerdr(socketPath);
+        server.reply("session.snapshot", emptySnapshot);
+        await server.start();
+        await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
+        // Let any unhandled rejection surface, and give a (wrongly re-armed) retry time to fire.
+        await new Promise((r) => setTimeout(r, 80));
+        expect(rejections).toHaveLength(0);
+        // Still connected -- the throw in onConnected must not have looked like a failed attempt.
+        expect(registry.connected().some((b) => b.name === "herdr")).toBe(true);
+      } finally {
+        process.removeListener("unhandledRejection", onRejection);
+      }
+    },
+  );
 });

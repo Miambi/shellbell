@@ -8,6 +8,7 @@ import type { BackendEvent } from "../src/backends/types.js";
 import { EventEngine, type Ring } from "../src/events.js";
 import { createLogger } from "../src/log.js";
 import { Notifier } from "../src/notifier.js";
+import { ScreenTracker } from "../src/screen-tracker.js";
 import { FakeHerdr } from "./fakes/fake-herdr.js";
 import { waitFor } from "./fakes/wait.js";
 
@@ -126,4 +127,83 @@ describe("herdr through the agent's units", () => {
     expect((await h.sessions()).find((s) => s.id === "herdr:term_a")?.state).toBe("blocked");
     expect(h.rings).toEqual([]);
   });
+
+  it(
+    "re-arms polling via a fresh setWatched once the phone re-subscribes after a herdr restart " +
+      "(M-3: the disconnect storm empties `watched` through the real ScreenTracker/registry wiring, " +
+      "so applySnapshot's own NaN re-seed cannot be what resumes it here)",
+    async () => {
+      const h = harness();
+      // The real wiring in miniature, ScreenTracker included: it subscribes to `session-removed`
+      // through the SAME registry the backend is added to, exactly like `Agent` composes them.
+      const tracker = new ScreenTracker({
+        backend: h.registry,
+        sink: () => {},
+        log,
+        intervalMs: 30,
+      });
+      tracker.start();
+      handle = startHerdrBackend({
+        registry: h.registry,
+        log,
+        socketPath: server.path,
+        retryMs: 20,
+        backendOptions: { reconnectMs: 30, revisionPollMs: 20, syncDebounceMs: 20 },
+      });
+      try {
+        await waitFor(() => h.registry.connected().some((b) => b.name === "herdr"), 3000);
+
+        // The phone views term_a: `setViewed` -> `pushWatched` -> `registry.setWatched` fans out
+        // the NATIVE id to the herdr backend, and polling starts against pane w1:p1.
+        tracker.setViewed("phone-1", "herdr:term_a");
+        await waitFor(
+          () => server.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:p1"),
+          3000,
+        );
+
+        // Herdr restarts with every pane renumbered. The disconnect storm's `session-removed`
+        // events reach the tracker through the registry SYNCHRONOUSLY -- before the backend's own
+        // reconnect timer even arms -- so by the time a reconnect snapshot could re-seed anything,
+        // `watched` is already empty (see the comment on `setWatched` in backend.ts).
+        const path = server.path;
+        await server.stop();
+        await waitFor(() => h.seen.some((e) => e.type === "session-removed"), 3000);
+
+        server = new FakeHerdr(path);
+        server.reply("session.snapshot", () => {
+          const snap = snapshot() as {
+            snapshot: {
+              panes: { pane_id: string }[];
+              layouts: { panes: { pane_id: string }[] }[];
+            };
+          };
+          for (const p of snap.snapshot.panes) p.pane_id = p.pane_id.replace(":p", ":q");
+          for (const l of snap.snapshot.layouts)
+            for (const p of l.panes) p.pane_id = p.pane_id.replace(":p", ":q");
+          return snap;
+        });
+        await server.start();
+        await waitFor(
+          () => h.seen.some((e) => e.type === "session-added" && e.sessionId === "herdr:term_a"),
+          5000,
+        );
+
+        // No probe has run since the restart: proves the pane came back with an ordinary,
+        // untouched probe state rather than anything `applySnapshot` re-seeded on its own.
+        expect(server.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:q1")).toBe(
+          false,
+        );
+
+        // The phone re-subscribes now that the session is back -- a FRESH `setViewed`/`setWatched`
+        // call, exactly what a real phone does after seeing the session reappear.
+        tracker.setViewed("phone-1", "herdr:term_a");
+        await waitFor(
+          () => server.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:q1"),
+          3000,
+        );
+      } finally {
+        tracker.stop();
+      }
+    },
+  );
 });

@@ -147,7 +147,10 @@ async function main(): Promise<void> {
   const path = herdrSocketPath();
   const clientSockSibling = path.replace(/\.sock$/, "-client.sock");
   const socketExists = existsSync(path);
-  console.log("socket:", path, "HERDR_SESSION:", process.env.HERDR_SESSION ?? "(unset)");
+  // M-4: `path` contains $HOME and the OS username -- `sanitize()` already scrubs every fixture
+  // before it is written, so the console output and the paste-ready summary below must go through
+  // it too, not just the files.
+  console.log("socket:", sanitize(path), "HERDR_SESSION:", process.env.HERDR_SESSION ?? "(unset)");
   console.log(
     "socket exists:",
     socketExists,
@@ -326,6 +329,12 @@ async function main(): Promise<void> {
       });
       try {
         if (!scratchPaneId) throw new Error("tab.create returned no root_pane.pane_id");
+        // M-4: `enter` is only safe here because it happens to be the FIRST entry in `NAMED_KEYS`
+        // (packages/protocol/src/keys.ts), so it fires before `up` ever recalls a shell history
+        // line into this pane. That ordering is unrelated to this file and could change silently,
+        // so send `ctrl+c` to the scratch pane after EVERY probed key (not just `up`/`down`) —
+        // it clears whatever the previous key put on the line, so `enter` can never submit
+        // anything but an empty prompt, independent of NAMED_KEYS' iteration order.
         for (const name of Object.keys(NAMED_KEYS) as NamedKey[]) {
           const candidate = HERDR_KEYS[name] ?? name.replace(/^ctrl-/, "ctrl+").replace(/-/g, "");
           try {
@@ -335,6 +344,18 @@ async function main(): Promise<void> {
             keysRejected.push(
               `${name} -> ${candidate}: ${err instanceof Error ? err.message : err}`,
             );
+          } finally {
+            try {
+              await client.request("pane.send_keys", {
+                pane_id: scratchPaneId,
+                keys: [HERDR_KEYS["ctrl-c"] ?? "ctrl+c"],
+              });
+            } catch (err) {
+              failures.push({
+                step: `key probe: ctrl+c after ${name}`,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
         }
       } finally {
@@ -411,7 +432,7 @@ async function main(): Promise<void> {
   lines.push("");
   lines.push("========== SPIKE SUMMARY (paste into docs/spike-herdr.md) ==========");
   lines.push(
-    `Q1 socket path: ${path} (exists=${socketExists}); HERDR_SESSION=${process.env.HERDR_SESSION ?? "(unset)"}; -client.sock sibling exists=${existsSync(clientSockSibling)}`,
+    `Q1 socket path: ${sanitize(path)} (exists=${socketExists}); HERDR_SESSION=${process.env.HERDR_SESSION ?? "(unset)"}; -client.sock sibling exists=${existsSync(clientSockSibling)}`,
   );
   lines.push(
     `Q2 ping: version=${pong?.version ?? "(no successful ping)"} protocol=${pong?.protocol ?? "?"} capabilities=${JSON.stringify(pong?.capabilities ?? null)} semverGate=${versionGate}`,
@@ -437,7 +458,7 @@ async function main(): Promise<void> {
     `Q10 agent state event: ${agentStatusSample ? `event="${(agentStatusSample as { event: string }).event}" data=${JSON.stringify((agentStatusSample as { data: Record<string, unknown> }).data)} arrived +${(agentStatusSample as { atMs: number }).atMs.toFixed(0)}ms into the subscription window` : "no pane.agent_status_changed event observed this run — re-run and make an agent block/unblock during the 30s window"}. Working->blocked and blocked->idle latency needs the human's own action timestamp compared to this line.`,
   );
   lines.push(
-    `Q11 keys (HERDR_SPIKE_KEYS=1 only): ${process.env.HERDR_SPIKE_KEYS === "1" ? `accepted=[${keysAccepted.join(", ")}] rejected=[${keysRejected.join(", ")}]` : "not run this pass (set HERDR_SPIKE_KEYS=1)"}`,
+    `Q11 keys (HERDR_SPIKE_KEYS=1 only): ${process.env.HERDR_SPIKE_KEYS === "1" ? `accepted=[${keysAccepted.join(", ")}] rejected=[${keysRejected.join(", ")}]` : "not run this pass (set HERDR_SPIKE_KEYS=1)"}. Safety: ctrl+c is sent to the scratch pane immediately after EVERY probed key (not just up/down), so \`enter\` can never submit a recalled history line regardless of NAMED_KEYS' iteration order.`,
   );
   lines.push(
     "Q12 restart: not exercised by this script — human-run only (stop the herdr server with a subscription open and observe the socket file and connection EOF, per Step 3 item 12).",

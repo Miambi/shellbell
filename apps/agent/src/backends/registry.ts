@@ -41,7 +41,15 @@ export class BackendRegistry implements TerminalBackend {
   constructor(private readonly log: Logger) {}
 
   get capabilities(): Capabilities {
-    const all = [...this.members.values()].map((b) => b.capabilities);
+    // M-8: computed only over members that are actually connected right now, the same way
+    // `connected()` excludes a disconnected member from `hello.backends` -- `startHerdrBackend`
+    // registers before `connect()` (ruling 11), so a Herdr that is not yet (or no longer) reachable
+    // must not permanently degrade the aggregate for every OTHER, unrelated backend. A member whose
+    // transport is down still routes calls (`target()` below does not consult `isConnected`); only
+    // this AGGREGATE view treats it as absent.
+    const all = [...this.members.values()]
+      .filter((b) => b.isConnected !== false)
+      .map((b) => b.capabilities);
     const or = (k: keyof Capabilities) => all.some((c) => c[k]);
     return {
       subscribe: or("subscribe"),
@@ -49,8 +57,8 @@ export class BackendRegistry implements TerminalBackend {
       createSession: or("createSession"),
       focus: or("focus"),
       history: or("history"),
-      // `Array.every` on an empty array is vacuously true; with no backends connected there is no
-      // basis to claim absolute line numbering, so an empty registry must report `false` here.
+      // `Array.every` on an empty array is vacuously true; with no backend connected there is no
+      // basis to claim absolute line numbering, so an empty set must report `false` here.
       absoluteLines: all.length > 0 && all.every((c) => c.absoluteLines),
     };
   }

@@ -87,6 +87,28 @@ describe("BackendRegistry", () => {
     expect(reg.capabilities.absoluteLines).toBe(false);
   });
 
+  it("excludes a registered-but-disconnected member from the aggregate capabilities (M-8)", () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    reg.add(iterm);
+    expect(reg.capabilities.absoluteLines).toBe(true);
+
+    // Mirrors `startHerdrBackend`: registered before `connect()` (ruling 11), unconditionally, on
+    // every machine -- including one with no Herdr installed.
+    const herdr = new FakeBackend("herdr");
+    herdr.capabilities = { ...herdr.capabilities, absoluteLines: false };
+    herdr.isConnected = false;
+    reg.add(herdr);
+    // A Herdr that never connects must not permanently degrade the aggregate for an iTerm2-only
+    // view forever.
+    expect(reg.capabilities.absoluteLines).toBe(true);
+
+    // Once it genuinely connects, the aggregate reflects it like any other member again.
+    herdr.isConnected = true;
+    expect(reg.capabilities.absoluteLines).toBe(false);
+  });
+
   it("close() closes every member and clears them from the registry", async () => {
     const reg = new BackendRegistry(createLogger({ stdout: false }));
     const iterm = new FakeBackend();
