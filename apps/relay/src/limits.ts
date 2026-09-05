@@ -41,7 +41,7 @@ export class TokenBucket {
     if (this.last !== null && now > this.last) {
       this.tokens = Math.min(this.burst, this.tokens + ((now - this.last) / 1000) * this.rate);
     }
-    this.last = now;
+    if (this.last === null || now > this.last) this.last = now;
     if (this.tokens < 1) return false;
     this.tokens -= 1;
     return true;
