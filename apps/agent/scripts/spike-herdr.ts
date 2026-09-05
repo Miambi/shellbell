@@ -45,9 +45,14 @@ function sanitize<T>(value: T): T {
   const user = userInfo().username;
   const host = hostname();
   const shortHost = host.split(".")[0] ?? host;
-  let text = JSON.stringify(value).split(home).join("/Users/dev").split(user).join("dev");
-  text = text.split(host).join("<host>");
-  if (shortHost && shortHost !== host) text = text.split(shortHost).join("<host>");
+  // Paths are replaced as substrings; identifiers (user, host) only at word boundaries so a short
+  // hostname such as "mac" cannot corrupt words like "package" inside captured pane text.
+  const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = (v: string) => new RegExp(`(?<![A-Za-z0-9_])${escape(v)}(?![A-Za-z0-9_])`, "g");
+  let text = JSON.stringify(value).split(home).join("/Users/dev");
+  if (user) text = text.replace(word(user), "dev");
+  text = text.replace(word(host), "<host>");
+  if (shortHost && shortHost !== host) text = text.replace(word(shortHost), "<host>");
   return JSON.parse(text) as T;
 }
 
@@ -319,8 +324,8 @@ async function main(): Promise<void> {
         tab_id: scratchTabId,
         pane_id: scratchPaneId,
       });
-      if (!scratchPaneId) throw new Error("tab.create returned no root_pane.pane_id");
       try {
+        if (!scratchPaneId) throw new Error("tab.create returned no root_pane.pane_id");
         for (const name of Object.keys(NAMED_KEYS) as NamedKey[]) {
           const candidate = HERDR_KEYS[name] ?? name.replace(/^ctrl-/, "ctrl+").replace(/-/g, "");
           try {
