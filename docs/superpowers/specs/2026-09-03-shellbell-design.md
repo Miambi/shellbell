@@ -470,7 +470,7 @@ Every WebSocket connection to a `ComputerDO` begins:
    `sig = Ed25519.sign(priv, utf8("shellbell-auth-v1|" + connId + "|" + role + "|" + fp + "|" + base64url(nonce)))`.
 3. DO verifies: `sha256(ed25519Pub)` → `fp`; signature valid; and
    - `agent`: `fp == DO name`. First-ever agent connect stores `ed25519Pub` in the
-     `computer` row; later connects must match it. An existing agent socket is closed
+     `computer` row; later connects must match it (enforced by construction: `fp = base32(sha256(pub))[0..26]` is checked against `pub` on every auth, so a matching fp implies the same key). An existing agent socket is closed
      with `4005` ("superseded") — the newest process wins.
    - `phone`: `fp` present in `pairings`, and `ed25519Pub` equals the stored one. An
      existing socket for the same `fp` is closed with `4005` — **one live socket per
@@ -554,7 +554,7 @@ socket with `4400` (relay).
 | `e2e` from agent | 1 MB |
 
 Exceeding a limit closes the socket with `4413`. Per socket, a token bucket of **60
-messages/s, burst 200** applies to everything except control frames; exceeding it closes
+messages/s, burst 200** applies to every application message (ctrl and e2e envelopes alike) — only WebSocket protocol-level ping/pong frames are exempt, and those never reach the DO; exceeding it closes
 with `4429`.
 
 ### 7.2 Envelope
@@ -1189,7 +1189,7 @@ Row caps: `pairings` ≤ 10 (`pairing-add` beyond that is ignored with an `error
 
 - `fetch()` → `new WebSocketPair()`; `this.ctx.acceptWebSocket(server)`; send `challenge`;
   `ws.serializeAttachment({ state: "unauth", connId, nonce, since, fp: null, name: null, leaseUntil: 0 })`
-  (attachments are ≤ 16 KB and may be re-serialized at any time). Then schedule the alarm
+  (attachments are ≤ 2 KiB — the runtime limit; ours is ~200 bytes — and may be re-serialized at any time). Then schedule the alarm
   (below).
 - `this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"))` in the
   constructor. Protocol-level ping frames are answered by the runtime and never reach
@@ -1211,7 +1211,7 @@ Row caps: `pairings` ≤ 10 (`pairing-add` beyond that is ignored with an `error
 - **Alarm scheduling:** after every accept and at the end of every sweep, compute the
   earliest pending deadline among unauth sockets (`since + 10 s`), pairing sockets
   (`since + 90 s`), the pairing window (`expires_at`), and the storage-GC deadline
-  (`computer.last_seen + 90 days`), and `setAlarm(min(deadline, now + 5 s))` if any exist.
+  (`computer.last_seen + 90 days`), and `setAlarm(max(now + 1 s, earliest deadline))` if any exist — never a short polling clamp (a 5 s clamp would wake every DO 17 280×/day). The GC deadline is only considered while no agent socket is open; the last agent's disconnect refreshes `last_seen` and re-arms the alarm. A DO whose fingerprint never authenticated an agent (no `computer` row) is deleted by the alarm 60 s after its last socket closes, so unauthenticated hits cannot accumulate storage.
   The sweep closes expired sockets (`4408`), closes an expired window, and deletes all
   storage of a computer whose agent has not connected for 90 days.
 - **Pairing window:** `pairing-open` upserts `pairing_window`; `pairing-close`, agent

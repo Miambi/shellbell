@@ -6,9 +6,53 @@
 
 **Architecture:** One Worker route (`GET /ws/:fp`) upgrades WebSockets and hands them to a Durable Object named by the computer fingerprint. The DO uses the WebSocket Hibernation API, SQLite storage, a single alarm scheduled for the earliest deadline, and `fetch` to Expo's push API. It never decrypts anything.
 
-**Tech Stack:** wrangler 4.129, `@cloudflare/workers-types` 5.x, `@cloudflare/vitest-pool-workers` 0.22, vitest 5, `@shellbell/protocol` (Plan 01).
+**Tech Stack:** wrangler 4.129, `@cloudflare/workers-types` 5.x, `@cloudflare/vitest-pool-workers` 0.22, vitest 4.1 (relay only — see errata), `@shellbell/protocol` (Plan 01).
 
 **Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — sections 6.4 (relay-side steps), 6.5, 7.1–7.3, 9, 11.3, 12, 13, 14, 15 (relay tests). Plan 01 must be complete.
+
+## Post-execution errata (2026-09-05)
+
+This plan was executed on branch `sdd/plan-02-relay` (7 tasks, 2 fix rounds, 1 final fix wave;
+whole-branch review in the SDD ledger). Where the text below still differs from the shipped code,
+the code is the authority. A literal re-run of the plan must apply these:
+
+- **Toolchain (Task 1):** `@cloudflare/vitest-pool-workers@0.22.0` peer-depends on `vitest ^4.1`,
+  so the relay pins `vitest 4.1.11` (rest of the repo stays on 5.0.0); `workerd: true` is added
+  to `allowBuilds` in `pnpm-workspace.yaml`; `vitest.config.ts` uses the `cloudflareTest` Vite
+  plugin (`defineWorkersConfig` no longer exists); tsconfig `types` is
+  `@cloudflare/vitest-pool-workers/types`; `compatibility_date` is `2026-08-22` (the pool's
+  `workerd@1.20260815.1` caps it; the lockfile also carries wrangler 4.129's newer workerd); the
+  `docs:` URL is `https://github.com/Miambi/shellbell`.
+- **Task 3 Interfaces:** the helper is `phoneSockets(fp): WebSocket[]`, not `phoneSocket(fp)`.
+  `PairingRow`/`WindowRow` are `type` aliases (TS implicit-index-signature rule for
+  `SqlStorage.exec<T>`); the test helper sets `ws.binaryType = "arraybuffer"` (workerd defaults
+  to `Blob`) and `next()` removes its waiter on timeout / rejects on close.
+- **Alarm (Task 3):** `scheduleAlarm` uses `setAlarm(Math.max(now + 1000, earliest))` — no
+  `now + 5 s` clamp; the GC deadline is included only when no agent socket exists; the last
+  agent's `webSocketClose` writes `computer.last_seen` and re-arms the alarm; a DO with no
+  `computer` row is `deleteAll()`-ed 60 s after its last socket closes (`ORPHAN_GC_MS`).
+- **Supersede / close (Tasks 3–4):** `setState` runs before the 4005 loop; `webSocketClose`
+  skips window-close/`presence:false` when another agent socket remains; `webSocketClose`
+  completes the close handshake with a guarded `ws.close()` in `try/finally` (required on the
+  Hibernation API even with `web_socket_auto_reply_to_close` on — client-initiated closes never
+  completed otherwise).
+- **Error path:** non-`ProtocolError` throws in `webSocketMessage` log the error *name* only and
+  close `1011`.
+- **`minFrameMs`:** clamped to 50..2000 (`Math.round`, fallback 125) before it is sent in
+  `auth-ok`.
+- **Task 6 tests:** `cloudflare:test` has no `fetchMock`; tests stub the global with
+  `vi.stubGlobal("fetch", …)` (throws for any URL other than the Expo endpoint) and the
+  push-disabled / lease-held phases assert zero calls. `sendExpoPush` never logs
+  `ticket.message` (Expo embeds tokens in it), and `onNotify` wraps the fetch in `try/catch` so a
+  network failure cannot close the agent socket. Added test: 21 notifies → 20 pushes (hourly cap).
+- **Spec 15 tests the plan did not assign:** `test/abuse.test.ts` covers `4413` (oversized frame
+  before auth), `4429` (ctrl flood past burst 200) and `4408` (unauth socket swept by the alarm,
+  real-time 10 s wait).
+- **Parked (not defects, recorded for Plan 03):** the agent's single socket shares one 60 msg/s
+  bucket, so fan-out to more than ~7 viewers at 8 fps would trip `4429` — Plan 03 should raise
+  the agent bucket or coalesce frames; `pairings-sync` clears all tombstones, so the agent must
+  process `unpaired` before sending its sync; `admitted >= 5` refuses further admissions rather
+  than deleting the window row (equivalent).
 
 ## Global Constraints
 
