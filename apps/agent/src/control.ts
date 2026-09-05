@@ -1,4 +1,4 @@
-import { existsSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { createInterface } from "node:readline";
 import type { Agent } from "./agent.js";
@@ -13,6 +13,19 @@ export interface StatusData {
   connected: { phoneFp: string; name: string; viewed: string | null }[];
 }
 
+/** True if `pid` names a process we could plausibly signal (alive, ours or not). */
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists but we can't signal it -- still alive. ESRCH (or anything else):
+    // no such process, i.e. a stale pid file left behind by a crash.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export class ControlServer {
   private server: Server | null = null;
   private pending = new Map<string, (accept: boolean) => void>();
@@ -20,6 +33,19 @@ export class ControlServer {
   /** The agent's confirm hook: resolves when a `confirm` command arrives (or after 60 s → false). */
   readonly pairingConfirm = (phoneFp: string, name: string): Promise<boolean> =>
     new Promise((resolve) => {
+      if (this.pending.has(phoneFp)) {
+        // Should not happen: PairingManager itself refuses a second concurrent request
+        // (`pendingFp !== null` -> "too-many"). Guard anyway rather than clobber the first
+        // caller's resolver.
+        this.log.warn(
+          "pairing confirm requested twice for the same phone; declining the newer one",
+          {
+            phone: phoneFp.slice(0, 8),
+          },
+        );
+        resolve(false);
+        return;
+      }
       const timer = setTimeout(() => {
         this.pending.delete(phoneFp);
         resolve(false);
@@ -37,25 +63,57 @@ export class ControlServer {
     private readonly sockPath: string,
     private readonly agent: Agent,
     private readonly log: Logger,
+    /** Optional pid-file path: when given, `start()` refuses to run over a still-live daemon and
+     * `stop()` cleans it up alongside the socket. */
+    private readonly pidPath?: string,
   ) {}
 
+  get hasPairClients(): boolean {
+    return this.pairClients.size > 0;
+  }
+
+  /** Broadcasts `{event:"closed"}` to every client currently watching a pairing window, then
+   * stops tracking them -- a fresh `pair-open` re-subscribes. Call whenever the window closes
+   * (expiry, explicit close, a completed pairing, too many bad codes). */
+  notifyClosed(): void {
+    for (const c of this.pairClients) c.write(`${JSON.stringify({ event: "closed" })}\n`);
+    this.pairClients.clear();
+  }
+
   async start(): Promise<void> {
+    if (this.pidPath && existsSync(this.pidPath)) {
+      const pid = Number(readFileSync(this.pidPath, "utf8").trim());
+      if (isProcessAlive(pid)) {
+        throw new Error(
+          `shellbell is already running (pid ${pid}); stop it first or remove ${this.pidPath}`,
+        );
+      }
+      unlinkSync(this.pidPath);
+    }
     if (existsSync(this.sockPath)) unlinkSync(this.sockPath);
     this.server = createServer((socket) => this.handle(socket));
     await new Promise<void>((resolve, reject) => {
       this.server?.once("error", reject);
       this.server?.listen(this.sockPath, () => resolve());
     });
+    // §8.2: agent.sock must be 0600. `listen()` creates it as 0777 & ~umask.
+    chmodSync(this.sockPath, 0o600);
   }
 
   async stop(): Promise<void> {
     for (const c of this.pairClients) c.destroy();
+    this.pairClients.clear();
     await new Promise<void>((r) => this.server?.close(() => r()));
     if (existsSync(this.sockPath)) unlinkSync(this.sockPath);
+    if (this.pidPath && existsSync(this.pidPath)) unlinkSync(this.pidPath);
   }
 
   private handle(socket: Socket): void {
     const rl = createInterface({ input: socket });
+    // See the comment in `controlRequest`: readline's own emitter needs its own error listener,
+    // separate from the socket's -- an abrupt client disconnect (ECONNRESET) must not crash the
+    // whole agent process.
+    rl.on("error", () => {});
     rl.on("line", (line) => {
       let req: Req;
       try {
@@ -116,21 +174,49 @@ export class ControlServer {
   }
 }
 
+const REQUEST_TIMEOUT_MS = 5_000;
+
 export function controlRequest(
   sockPath: string,
   cmd: string,
   args?: Record<string, unknown>,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const socket = createConnection(sockPath);
-    socket.once("error", reject);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(new Error("control socket timed out"));
+    }, REQUEST_TIMEOUT_MS);
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    socket.on("error", (err) => finish(() => reject(err)));
     socket.once("connect", () => socket.write(`${JSON.stringify({ cmd, args })}\n`));
     const rl = createInterface({ input: socket });
+    // readline's own EventEmitter throws if its input stream errors and nothing is listening on
+    // the *Interface* itself -- the socket's own "error" listener above does not cover this; it
+    // is a separate emitter. The real handling happens above; this just prevents a second,
+    // unhandled "error" event on `rl` from crashing the process.
+    rl.on("error", () => {});
     rl.once("line", (line) => {
       socket.end();
-      const res = JSON.parse(line) as { ok: boolean; data?: unknown; error?: string };
-      if (res.ok) resolve(res.data);
-      else reject(new Error(res.error ?? "control error"));
+      finish(() => {
+        let res: { ok: boolean; data?: unknown; error?: string };
+        try {
+          res = JSON.parse(line) as { ok: boolean; data?: unknown; error?: string };
+        } catch {
+          reject(new Error("control socket sent a malformed response"));
+          return;
+        }
+        if (res.ok) resolve(res.data);
+        else reject(new Error(res.error ?? "control error"));
+      });
     });
   });
 }
@@ -141,15 +227,19 @@ export function controlPairSession(
   handlers: {
     onOpen: (qrText: string, expiresAt: number) => void;
     onRequest: (phoneFp: string, name: string) => Promise<boolean>;
+    /** The pairing window this session opened has closed (expiry, success, or explicit close). */
+    onClose: () => void;
     onError: (e: Error) => void;
   },
 ): { close: () => void } {
   const socket = createConnection(sockPath);
-  socket.once("error", handlers.onError);
+  socket.on("error", handlers.onError);
   socket.once("connect", () => socket.write(`${JSON.stringify({ cmd: "pair-open" })}\n`));
   const rl = createInterface({ input: socket });
+  // See the comment in `controlRequest`: readline's own emitter needs its own listener too.
+  rl.on("error", () => {});
   rl.on("line", (line) => {
-    const m = JSON.parse(line) as {
+    let m: {
       ok?: boolean;
       data?: { qrText: string; expiresAt: number };
       event?: string;
@@ -157,6 +247,12 @@ export function controlPairSession(
       name?: string;
       error?: string;
     };
+    try {
+      m = JSON.parse(line);
+    } catch {
+      handlers.onError(new Error("control socket sent a malformed message"));
+      return;
+    }
     if (m.event === "request" && m.phoneFp) {
       void handlers
         .onRequest(m.phoneFp, m.name ?? "")
@@ -165,6 +261,8 @@ export function controlPairSession(
             `${JSON.stringify({ cmd: "confirm", args: { phoneFp: m.phoneFp, accept } })}\n`,
           ),
         );
+    } else if (m.event === "closed") {
+      handlers.onClose();
     } else if (m.ok && m.data?.qrText) handlers.onOpen(m.data.qrText, m.data.expiresAt);
     else if (m.ok === false) handlers.onError(new Error(m.error ?? "control error"));
   });

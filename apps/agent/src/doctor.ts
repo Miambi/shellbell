@@ -24,9 +24,13 @@ export function parseTmuxVersion(stdout: string): number | null {
   return Number(m[1]) + Number(m[2]) / 100;
 }
 
-/** Pure: does this plist point at a node binary that still exists on this machine? */
+/** Does this plist point at a node binary that still exists on this machine? The currently
+ * running interpreter is trusted without a filesystem check (it exists by construction); any
+ * other `<string>…node</string>` path found in the plist is checked with `existsSync`. */
 export function plistNodeOk(plistText: string, execPath: string): boolean {
-  return plistText.includes(execPath) || /<string>\/[^<]*node<\/string>/.test(plistText);
+  if (plistText.includes(execPath)) return true;
+  const path = /<string>(\/[^<]*node)<\/string>/.exec(plistText)?.[1];
+  return path !== undefined && existsSync(path);
 }
 
 export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {

@@ -37,6 +37,8 @@ export interface PairingManagerOptions {
   windowMs?: number;
   /** How long to wait for a human to answer the confirmation prompt. Default 60 s. */
   confirmTimeoutMs?: number;
+  /** Called whenever an open window transitions to closed (expiry, explicit close, success, or 3 bad codes). */
+  onClose?: () => void;
 }
 
 const Key32 = z
@@ -104,6 +106,7 @@ export class PairingManager {
     this.window = null;
     this.opts.sendCtrl({ type: "pairing-close" });
     this.log.info("pairing window closed");
+    this.opts.onClose?.();
   }
 
   /** Call once per second. */

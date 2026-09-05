@@ -38,6 +38,10 @@ export interface AgentOptions {
   relayUrlOverride?: string;
   /** spec §12: "old exits with a message" when a newer agent process supersedes this one. */
   onSuperseded?: () => void;
+  /** Fires whenever the pairing window closes (expiry, explicit close, a completed pairing, or
+   * too many bad codes) -- lets a control-socket client watching `pair-open` learn the window is
+   * gone instead of idling out its own timer. */
+  onPairingClosed?: () => void;
 }
 
 export class Agent {
@@ -106,6 +110,7 @@ export class Agent {
       confirm: o.confirm,
       pairingCount: () => this.pairings.length,
       log: o.log,
+      onClose: () => this.o.onPairingClosed?.(),
     });
     this.relay.on("auth-ok", (m) => {
       this.safe("auth-ok", () => {

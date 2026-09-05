@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { LABEL, plistFor } from "../src/launchd.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { isGlobalInstall, LABEL, plistFor } from "../src/launchd.js";
 
 describe("plistFor", () => {
   it("emits a launchd plist with the label, argv, PATH and log paths", () => {
@@ -28,5 +28,22 @@ describe("plistFor", () => {
     expect(xml).toContain("/a&amp;b/node");
     expect(xml).toContain("/c&lt;d/cli.js");
     expect(xml).not.toContain("/a&b/node");
+  });
+});
+
+describe("isGlobalInstall", () => {
+  const original = process.argv[1] ?? "";
+  afterEach(() => {
+    process.argv[1] = original;
+  });
+
+  it("is true for a normal global/local install path", () => {
+    process.argv[1] = "/opt/homebrew/lib/node_modules/shellbell/dist/cli.js";
+    expect(isGlobalInstall()).toBe(true);
+  });
+
+  it("is false when run through npx's cache", () => {
+    process.argv[1] = "/Users/x/.npm/_npx/abc123/node_modules/shellbell/dist/cli.js";
+    expect(isGlobalInstall()).toBe(false);
   });
 });

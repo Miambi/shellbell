@@ -1,31 +1,54 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  openSync,
+  readSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import qrcode from "qrcode-terminal";
+import pkg from "../package.json" with { type: "json" };
 import { Agent } from "./agent.js";
 import { ITerm2Backend } from "./backends/iterm2/backend.js";
 import { ITerm2Client } from "./backends/iterm2/client.js";
 import { BackendRegistry } from "./backends/registry.js";
 import { BackendUnavailable } from "./backends/types.js";
-import { ACCENTS, type AgentConfig, loadConfig, paths, saveConfig } from "./config.js";
+import {
+  ACCENTS,
+  type AgentConfig,
+  AgentConfigSchema,
+  loadConfig,
+  paths,
+  saveConfig,
+} from "./config.js";
 import { ControlServer, controlPairSession, controlRequest } from "./control.js";
 import { runDoctor } from "./doctor.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import { install, uninstall } from "./launchd.js";
 import { createLogger, type Logger } from "./log.js";
 
-const VERSION = "0.1.0";
+const VERSION = pkg.version;
 const program = new Command()
   .name("shellbell")
   .version(VERSION)
   .option("--relay <url>", "override relay url")
   .option("--json", "machine output")
-  .option("--verbose", "debug logging");
+  .option("--verbose", "debug logging")
+  .option("--insecure", "allow a ws:// relay url (LAN dev only)");
 
 function ctx() {
-  const opts = program.opts<{ relay?: string; json?: boolean; verbose?: boolean }>();
+  const opts = program.opts<{
+    relay?: string;
+    json?: boolean;
+    verbose?: boolean;
+    insecure?: boolean;
+  }>();
   const p = paths();
   const cfg = loadConfig(p);
   const log = createLogger({
@@ -54,11 +77,14 @@ function askYesNo(question: string, timeoutMs: number): Promise<boolean> {
   });
 }
 
-function printQr(qrText: string, expiresAt: number, cfg: AgentConfig, fp: string): void {
+function printPairHeader(cfg: AgentConfig, fp: string): void {
+  console.log(
+    `\n  Computer   ${cfg.computerName}  (${fpShort(fp)})\n  Relay      ${cfg.relayUrl}\n\n  Scan this with the Shellbell app:\n`,
+  );
+}
+
+function printQr(qrText: string, expiresAt: number): void {
   qrcode.generate(qrText, { small: true }, (qr) => {
-    console.log(
-      `\n  Computer   ${cfg.computerName}  (${fpShort(fp)})\n  Relay      ${cfg.relayUrl}\n\n  Scan this with the Shellbell app:\n`,
-    );
     console.log(
       qr
         .split("\n")
@@ -69,6 +95,98 @@ function printQr(qrText: string, expiresAt: number, cfg: AgentConfig, fp: string
       `\n  Pairing window closes in ${Math.round((expiresAt - Date.now()) / 60000)} min\n`,
     );
   });
+}
+
+/** Reads only the tail of a file (bounded I/O for a long-lived, rotated agent.log) and returns
+ * its last `maxLines` lines. */
+export function tailFile(path: string, maxBytes: number, maxLines: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    if (len > 0) readSync(fd, buf, 0, len, start);
+    // Drop exactly one trailing newline (every log record ends with one) so the split below
+    // yields real lines only -- without this, `slice(-maxLines)` counts the trailing "" as a
+    // line and silently drops the actual last line of the file.
+    const text = buf.toString("utf8").replace(/\n$/, "");
+    return text.length === 0 ? "" : text.split("\n").slice(-maxLines).join("\n");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Pure: is `value` an acceptable relay url? `ws://` is only allowed for LAN dev, via
+ * `--insecure` or `SHELLBELL_ALLOW_INSECURE_RELAY=1`. Returns an error message, or null if ok. */
+export function validateRelayUrl(value: string, allowInsecure: boolean): string | null {
+  let u: URL;
+  try {
+    u = new URL(value);
+  } catch {
+    return "must be a valid URL, e.g. wss://relay.example.com";
+  }
+  if (u.protocol === "wss:") return null;
+  if (u.protocol === "ws:") {
+    if (allowInsecure) return null;
+    return "ws:// is insecure; pass --insecure or set SHELLBELL_ALLOW_INSECURE_RELAY=1 for LAN dev";
+  }
+  return "relay url must use wss:// (ws:// only with --insecure, for LAN dev)";
+}
+
+/** True if a control-socket daemon answers at `sockPath`. A stale socket file (nothing
+ * listening, or nothing there at all) is removed and this returns false — spec 8.1: `pair`
+ * falls back to an in-process agent whenever no daemon is actually reachable. */
+export async function socketAlive(sockPath: string): Promise<boolean> {
+  try {
+    await controlRequest(sockPath, "status");
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ECONNREFUSED" || code === "ENOENT") {
+      try {
+        if (existsSync(sockPath)) unlinkSync(sockPath);
+      } catch {
+        // best effort
+      }
+      return false;
+    }
+    // Any other failure (timeout, a malformed reply) still proves *something* is listening;
+    // do not treat it as a stale socket and do not touch the file.
+    return true;
+  }
+}
+
+/**
+ * Routes a pairing confirmation to whichever surface can actually show it: a connected
+ * `pair-open` control-socket client (there is a human watching that terminal for exactly this),
+ * falling back to this process's own TTY only when no such client is connected. Never reads the
+ * daemon's stdin when a pair client is present, even if the daemon itself has a TTY (critical
+ * fix: a foreground `start` with a TTY must not swallow a `pair`-triggered request).
+ */
+export function chooseConfirm(
+  box: { server: ControlServer | null },
+  yes: boolean,
+  askYesNoFn: (phoneFp: string, name: string) => Promise<boolean>,
+): (phoneFp: string, name: string) => Promise<boolean> {
+  return async (phoneFp, name) => {
+    if (yes) return true;
+    if (box.server?.hasPairClients) return box.server.pairingConfirm(phoneFp, name);
+    return askYesNoFn(phoneFp, name);
+  };
+}
+
+/** One shutdown path for `start`: stops the agent and the control server (which removes
+ * `agent.sock` and `agent.pid`), then exits. Shared by SIGINT/SIGTERM and `onSuperseded` so
+ * neither leaves stale files behind. */
+export async function shutdown(
+  agent: Agent,
+  control: ControlServer,
+  exit: (code: number) => void = process.exit,
+): Promise<void> {
+  agent.stop();
+  await control.stop();
+  exit(0);
 }
 
 async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
@@ -85,17 +203,29 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     try {
       await iterm.connect();
       registry.add(iterm);
+      const sessions = await iterm.listSessions().catch(() => []);
+      console.log(
+        `  iTerm2     connected · ${sessions.length} session${sessions.length === 1 ? "" : "s"}`,
+      );
       log.info("iTerm2 connected");
     } catch (err) {
-      if (err instanceof BackendUnavailable)
+      if (err instanceof BackendUnavailable) {
+        // spec 8.1's exact text for a disabled Python API.
+        console.log(
+          "\n  iTerm2's Python API is off. Turn it on:\n  iTerm2 → Settings → General → Magic → ✓ Enable Python API\n  then run `shellbell` again.\n",
+        );
         log.warn(`iTerm2 unavailable: ${err.message}`, { hint: err.hint });
-      else log.warn("iTerm2 connect failed", { err: String(err) });
+      } else {
+        console.log("  iTerm2     unavailable — connect failed");
+        log.warn("iTerm2 connect failed", { err: String(err) });
+      }
       setTimeout(() => void firstConnect(), 10_000);
     }
   };
   void firstConnect();
-  const control = { server: null as ControlServer | null };
-  const agent = new Agent({
+  const control: { server: ControlServer | null } = { server: null };
+  let agent: Agent;
+  agent = new Agent({
     paths: p,
     config: cfg,
     identity,
@@ -104,18 +234,17 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     log,
     appVersion: VERSION,
     relayUrlOverride: relayOverride,
-    confirm: async (phoneFp, name) => {
-      if (yes) return true;
-      if (control.server && !process.stdin.isTTY)
-        return control.server.pairingConfirm(phoneFp, name);
-      return askYesNo(`\n  Pair "${name}" (fp ${fpShort(phoneFp)})?  [y/N]  (60 s) `, 60_000);
-    },
+    confirm: chooseConfirm(control, yes, (phoneFp, name) =>
+      askYesNo(`\n  Pair "${name}" (fp ${fpShort(phoneFp)})?  [y/N]  (60 s) `, 60_000),
+    ),
+    onPairingClosed: () => control.server?.notifyClosed(),
     onSuperseded: () => {
       console.log("  another shellbell agent took over; exiting");
-      process.exit(0);
+      if (control.server) void shutdown(agent, control.server, () => process.exit(0));
+      else process.exit(0);
     },
   });
-  control.server = new ControlServer(p.sock, agent, log);
+  control.server = new ControlServer(p.sock, agent, log, p.pid);
   return { agent, control: control.server, p, cfg, fp };
 }
 
@@ -126,24 +255,35 @@ program
   .action(async (o: { service?: boolean }) => {
     const { opts, log } = ctx();
     const { agent, control, p, cfg, fp } = await buildAgent(log, opts.relay);
-    writeFileSync(p.pid, String(process.pid), { mode: 0o600 });
-    await control.start();
-    agent.start();
-    console.log(
-      `\n  Shellbell agent v${VERSION}\n  Computer   ${cfg.computerName}  (${fpShort(fp)})\n  Relay      ${cfg.relayUrl}\n`,
-    );
-    if (agent.pairingList.length === 0 && !o.service && process.stdin.isTTY) {
-      console.log("  No phones paired yet.");
-      const { qrText, expiresAt } = agent.openPairing();
-      printQr(qrText, expiresAt, cfg, fp);
+    try {
+      await control.start();
+    } catch (err) {
+      console.error(`  ${(err as Error).message}`);
+      process.exit(1);
     }
-    const shutdown = async () => {
-      agent.stop();
-      await control.stop();
-      process.exit(0);
-    };
-    process.on("SIGINT", () => void shutdown());
-    process.on("SIGTERM", () => void shutdown());
+    writeFileSync(p.pid, String(process.pid), { mode: 0o600 });
+    agent.start();
+
+    // spec 8.1's exact first-run block (Relay/iTerm2/tmux lines are updated in place as their
+    // state changes -- a line per transition -- rather than only printed once).
+    console.log(
+      `\n  Shellbell agent v${VERSION}\n  Computer   ${cfg.computerName}  (${fpShort(fp)})`,
+    );
+    console.log(
+      `  Relay      ${cfg.relayUrl}   ${agent.relayOnline ? "connected" : "connecting…"}`,
+    );
+    agent.relay.on("auth-ok", () => console.log(`  Relay      ${cfg.relayUrl}   connected`));
+    agent.relay.on("down", () => console.log(`  Relay      ${cfg.relayUrl}   connecting…`));
+    console.log("  tmux       not running"); // Plan 04 adds the tmux backend.
+
+    if (agent.pairingList.length === 0 && !o.service && process.stdin.isTTY) {
+      console.log("\n  No phones paired yet. Scan this with the Shellbell app:\n");
+      const { qrText, expiresAt } = agent.openPairing();
+      printQr(qrText, expiresAt);
+    }
+    const onSignal = () => void shutdown(agent, control);
+    process.on("SIGINT", onSignal);
+    process.on("SIGTERM", onSignal);
   });
 
 program
@@ -153,36 +293,50 @@ program
   .action(async (o: { yes?: boolean }) => {
     const { opts, p, cfg, log } = ctx();
     const { fp } = loadOrCreateIdentity(p);
-    if (existsSync(p.sock)) {
-      const session = controlPairSession(p.sock, {
-        onOpen: (qrText, expiresAt) => printQr(qrText, expiresAt, cfg, fp),
-        onRequest: (phoneFp, name) =>
-          o.yes
-            ? Promise.resolve(true)
-            : askYesNo(`\n  Pair "${name}" (fp ${fpShort(phoneFp)})?  [y/N]  (60 s) `, 60_000),
-        onError: (e) => {
-          console.error(`  ${e.message}`);
-          process.exit(1);
-        },
-      });
-      setTimeout(
-        () => {
-          session.close();
-          process.exit(0);
-        },
-        5 * 60_000 + 1000,
-      );
+
+    const startInProcess = async () => {
+      const { agent, control } = await buildAgent(log, opts.relay, o.yes);
+      try {
+        await control.start();
+      } catch (err) {
+        console.error(`  ${(err as Error).message}`);
+        process.exit(1);
+      }
+      agent.start();
+      const { qrText, expiresAt } = agent.openPairing();
+      printPairHeader(cfg, fp);
+      printQr(qrText, expiresAt);
+      setTimeout(() => void shutdown(agent, control, () => process.exit(0)), 5 * 60_000 + 1000);
+    };
+
+    // spec 8.1: talks to a running agent's control socket; a dead/stale socket falls back to an
+    // in-process agent rather than failing outright.
+    if (!(await socketAlive(p.sock))) {
+      await startInProcess();
       return;
     }
-    const { agent, control } = await buildAgent(log, opts.relay, o.yes);
-    await control.start();
-    agent.start();
-    const { qrText, expiresAt } = agent.openPairing();
-    printQr(qrText, expiresAt, cfg, fp);
+
+    const session = controlPairSession(p.sock, {
+      onOpen: (qrText, expiresAt) => {
+        printPairHeader(cfg, fp);
+        printQr(qrText, expiresAt);
+      },
+      onRequest: (phoneFp, name) =>
+        o.yes
+          ? Promise.resolve(true)
+          : askYesNo(`\n  Pair "${name}" (fp ${fpShort(phoneFp)})?  [y/N]  (60 s) `, 60_000),
+      onClose: () => {
+        console.log("  pairing window closed");
+        process.exit(0);
+      },
+      onError: (e) => {
+        console.error(`  ${e.message}`);
+        process.exit(1);
+      },
+    });
     setTimeout(
-      async () => {
-        agent.stop();
-        await control.stop();
+      () => {
+        session.close();
         process.exit(0);
       },
       5 * 60_000 + 1000,
@@ -250,9 +404,44 @@ program
   .action((o: { follow?: boolean }) => {
     const { p } = ctx();
     if (o.follow) spawn("tail", ["-f", p.log], { stdio: "inherit" });
-    else if (existsSync(p.log))
-      process.stdout.write(readFileSync(p.log, "utf8").split("\n").slice(-200).join("\n"));
+    else if (existsSync(p.log)) process.stdout.write(tailFile(p.log, 64 * 1024, 200));
   });
+
+/**
+ * Pure: resolves `shellbell config set <key> <value>` against the current config into either a
+ * friendly one-line error or the new, schema-validated config to save. `relay` gets its own
+ * wss://-only check (ws:// only with `allowInsecure`, for LAN dev); every key -- including a
+ * relay url that passed that check -- is then re-validated against `AgentConfigSchema` so a bad
+ * `name`/`accent` (or any future schema tightening) surfaces the same friendly, one-line message
+ * instead of a raw ZodError dump.
+ */
+export function resolveConfigSet(
+  cfg: AgentConfig,
+  key: string,
+  value: string,
+  allowInsecure: boolean,
+): { error: string } | { next: AgentConfig } {
+  let next: AgentConfig;
+  if (key === "relay") {
+    const err = validateRelayUrl(value, allowInsecure);
+    if (err) return { error: err };
+    next = { ...cfg, relayUrl: value };
+  } else if (key === "name") {
+    next = { ...cfg, computerName: value };
+  } else if (key === "accent") {
+    if (!(ACCENTS as readonly string[]).includes(value)) {
+      return { error: `unknown accent ${value} (must be one of ${ACCENTS.join(", ")})` };
+    }
+    next = { ...cfg, accent: value };
+  } else {
+    return { error: `unknown key ${key} (expected relay, name, or accent)` };
+  }
+  const result = AgentConfigSchema.safeParse(next);
+  if (!result.success) {
+    return { error: result.error.issues.map((i) => i.message).join("; ") };
+  }
+  return { next: result.data };
+}
 
 program
   .command("config")
@@ -261,17 +450,14 @@ program
   .argument("<key>")
   .argument("<value>")
   .action((op: string, key: string, value: string) => {
-    const { p, cfg } = ctx();
+    const { opts, p, cfg } = ctx();
     if (op !== "set")
       return void console.error("  usage: shellbell config set <relay|name|accent> <value>");
-    if (key === "relay") saveConfig(p, { ...cfg, relayUrl: value });
-    else if (key === "name") saveConfig(p, { ...cfg, computerName: value });
-    else if (key === "accent" && (ACCENTS as readonly string[]).includes(value))
-      saveConfig(p, { ...cfg, accent: value });
-    else
-      return void console.error(
-        `  unknown key ${key} (accent must be one of ${ACCENTS.join(", ")})`,
-      );
+    const allowInsecure =
+      Boolean(opts.insecure) || process.env.SHELLBELL_ALLOW_INSECURE_RELAY === "1";
+    const result = resolveConfigSet(cfg, key, value, allowInsecure);
+    if ("error" in result) return void console.error(`  ${result.error}`);
+    saveConfig(p, result.next);
     console.log("  saved");
   });
 
@@ -289,7 +475,11 @@ program
     process.exit(checks.every((c) => c.ok) ? 0 : 1);
   });
 
-program.parseAsync().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+// Only run the CLI when this file is the process entry point -- e.g. `node dist/cli.js` or
+// `tsx src/cli.ts` -- never when a test imports the pure/exported helpers above.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  program.parseAsync().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

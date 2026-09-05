@@ -7,11 +7,20 @@ export default defineConfig({
   target: "node22",
   outDir: "dist",
   clean: true,
-  // Bundle the workspace package AND its own deps: cborg / @noble/* are NOT runtime deps of the
-  // published `shellbell` tarball, so leaving them external produces a dist/cli.js that imports
-  // packages nobody installs. `zod` stays external because it IS a declared runtime dep.
-  noExternal: [/^@shellbell\//, "cborg", /^@noble\//],
-  external: ["ws", "@bufbuild/protobuf", "commander", "qrcode-terminal", "zod"],
+  // This is a CLI bin, not a library -- nobody imports types from `dist/cli.js`. Declarations
+  // also trip up tsdown's dts bundler on @shellbell/protocol's re-exports (SessionInfo,
+  // BackendName, Capabilities, CreateWhere resolve fine for `tsc --noEmit` but not through
+  // rolldown's separate dts-rollup pass), so skip dts generation entirely rather than fight it.
+  dts: false,
+  deps: {
+    // Bundle the workspace package AND its own deps: cborg / @noble/* are NOT runtime deps of
+    // the published `shellbell` tarball, so leaving them external produces a dist/cli.js that
+    // imports packages nobody installs. `zod` stays external because it IS a declared runtime
+    // dep. (`neverBundle`/`alwaysBundle` replace tsdown's deprecated top-level `external` /
+    // `noExternal`.)
+    neverBundle: ["ws", "@bufbuild/protobuf", "commander", "qrcode-terminal", "zod"],
+    alwaysBundle: [/^@shellbell\//, "cborg", /^@noble\//],
+  },
   // tsdown 0.23's default `fixedExtension: true` (for platform: "node") always emits `.mjs`
   // regardless of the package's `"type": "module"`; the package's bin field is `dist/cli.js`
   // (matching this repo's other packages), so force the extension tsdown would otherwise pick

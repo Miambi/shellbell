@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseTmuxVersion, plistNodeOk } from "../src/doctor.js";
 
@@ -24,15 +25,29 @@ describe("parseTmuxVersion", () => {
 });
 
 describe("plistNodeOk", () => {
-  it("accepts the running node path and any absolute node path", () => {
-    expect(plistNodeOk("<string>/opt/homebrew/bin/node</string>", "/opt/homebrew/bin/node")).toBe(
-      true,
-    );
-    expect(plistNodeOk("<string>/usr/local/bin/node</string>", "/opt/homebrew/bin/node")).toBe(
-      true,
-    );
+  // The currently running interpreter is trusted without a filesystem check -- it exists by
+  // construction, so this branch must stay true regardless of the test machine's disk layout.
+  it("accepts the running node path without checking the filesystem", () => {
+    expect(plistNodeOk(`<string>${process.execPath}</string>`, process.execPath)).toBe(true);
   });
+
+  it("accepts a different node path that still exists on disk", () => {
+    // Deterministic stand-in for "some other node install": the running interpreter's own path,
+    // checked as if it were a *different* recorded execPath so the regex branch (not the
+    // exact-match branch) is what's exercised.
+    expect(existsSync(process.execPath)).toBe(true);
+    expect(
+      plistNodeOk(`<string>${process.execPath}</string>`, "/definitely/not/the/running/node"),
+    ).toBe(true);
+  });
+
+  it("rejects a node path that no longer exists on disk", () => {
+    expect(
+      plistNodeOk("<string>/definitely/not/a/real/node/binary</string>", process.execPath),
+    ).toBe(false);
+  });
+
   it("rejects a plist with no node path at all", () => {
-    expect(plistNodeOk("<string>start</string>", "/opt/homebrew/bin/node")).toBe(false);
+    expect(plistNodeOk("<string>start</string>", process.execPath)).toBe(false);
   });
 });
