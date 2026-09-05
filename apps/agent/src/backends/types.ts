@@ -17,6 +17,9 @@ export interface Screen {
   scrollbackTotal: number;
 }
 
+/** Spec 8.13: the semantic state Herdr reports per pane. Shared with the `agent-state` event. */
+export type AgentState = "working" | "blocked" | "idle" | "done" | "unknown";
+
 export type BackendEvent =
   | { type: "screen-changed"; sessionId: string }
   | { type: "layout-changed" }
@@ -26,7 +29,13 @@ export type BackendEvent =
   | { type: "title-changed"; sessionId: string }
   | { type: "command-start"; sessionId: string; command: string; at: number }
   | { type: "command-end"; sessionId: string; exitCode: number; at: number }
-  | { type: "prompt"; sessionId: string; at: number };
+  | { type: "prompt"; sessionId: string; at: number }
+  /**
+   * Spec 8.13: Herdr's semantic per-pane agent state. Only the herdr backend emits it; the
+   * `EventEngine` turns it into `blocked` and `prompt` rings (Task 5). Herdr has no command
+   * lifecycle, so this replaces `command-start`/`command-end` rather than supplementing them.
+   */
+  | { type: "agent-state"; sessionId: string; state: AgentState; agent?: string; at: number };
 
 export class BackendUnavailable extends Error {
   constructor(
@@ -75,8 +84,23 @@ export interface TerminalBackend {
   on(handler: (e: BackendEvent) => void): () => void;
   tmuxWindowIds?(): Set<string>;
   tmuxWindowIdOf?(nativeId: string): string | undefined;
-  /** Per-session capabilities, when this backend can distinguish (e.g. `BackendRegistry` fanning
-   * out to distinct member backends by id prefix). Optional: a single-backend implementation can
-   * omit it, and callers fall back to the aggregate `capabilities` getter above. */
+  /** SHIPPED — do not remove. Per-session capabilities, when this backend can distinguish (e.g.
+   * `BackendRegistry` fanning out to distinct member backends by id prefix). Optional: a
+   * single-backend implementation can omit it, and callers fall back to the aggregate
+   * `capabilities` getter above. `ScreenTracker.processScreen` already consults this for its
+   * per-session `absoluteLines` decision. */
   capabilitiesOf?(sessionId: string): Capabilities | null;
+  /**
+   * Spec 8.13: the complete set of native session ids at least one phone is currently viewing.
+   * A backend with no screen-change push (herdr) polls only these. `ScreenTracker` calls it
+   * through the registry on every viewer change, always with the full set (never a delta), and
+   * with `[]` when nothing is viewed. Backends that push screen changes ignore it.
+   */
+  setWatched?(nativeIds: string[]): void;
+  /**
+   * Spec 8.12/8.13: `false` while the backend's transport is down. The registry keeps such a
+   * member registered (it reconnects itself) but leaves it out of `hello.backends`. A backend
+   * that omits this property is always considered connected.
+   */
+  readonly connected?: boolean;
 }
