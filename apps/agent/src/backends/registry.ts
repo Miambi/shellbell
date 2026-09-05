@@ -1,9 +1,10 @@
-import type {
-  BackendName,
-  Capabilities,
-  CreateWhere,
-  Line,
-  SessionInfo,
+import {
+  type BackendName,
+  BackendNameSchema,
+  type Capabilities,
+  type CreateWhere,
+  type Line,
+  type SessionInfo,
 } from "@shellbell/protocol";
 import type { Logger } from "../log.js";
 import {
@@ -18,12 +19,17 @@ export function prefixId(name: BackendName, native: string): string {
   return `${name}:${native}`;
 }
 
+/** Spec 8.12 ordering: iTerm2 first, then tmux, then herdr. */
+const BACKEND_ORDER: BackendName[] = ["iterm2", "tmux", "herdr"];
+
 export function splitId(id: string): { name: BackendName; native: string } | null {
   const i = id.indexOf(":");
   if (i <= 0) return null;
-  const name = id.slice(0, i);
-  if (name !== "iterm2" && name !== "tmux") return null;
-  return { name, native: id.slice(i + 1) };
+  // Validated against the schema rather than a hard-coded list: adding a backend name to the
+  // protocol must never silently leave its ids unroutable here.
+  const name = BackendNameSchema.safeParse(id.slice(0, i));
+  if (!name.success) return null;
+  return { name: name.data, native: id.slice(i + 1) };
 }
 
 export class BackendRegistry implements TerminalBackend {
@@ -66,8 +72,15 @@ export class BackendRegistry implements TerminalBackend {
     this.emit({ type: "layout-changed" });
   }
 
+  /**
+   * spec 8.12/8.13: only the backends that can actually serve a phone right now. A member whose
+   * transport is down (`connected === false`) stays registered -- it reconnects itself and its
+   * sessions must keep routing -- but it is not advertised in `hello.backends`.
+   */
   connected(): { name: BackendName; capabilities: Capabilities }[] {
-    return [...this.members.values()].map((b) => ({ name: b.name, capabilities: b.capabilities }));
+    return [...this.members.values()]
+      .filter((b) => b.isConnected !== false)
+      .map((b) => ({ name: b.name, capabilities: b.capabilities }));
   }
 
   nameOf(id: string): BackendName | null {
@@ -89,7 +102,6 @@ export class BackendRegistry implements TerminalBackend {
 
   async listSessions(): Promise<SessionInfo[]> {
     const iterm = this.members.get("iterm2");
-    const tmux = this.members.get("tmux");
     let hidden = new Set<string>();
     if (iterm) {
       try {
@@ -100,19 +112,21 @@ export class BackendRegistry implements TerminalBackend {
         });
       }
     }
-    // spec 8.12/15: one backend's failure must never affect the other -- settle each member's
+    // spec 8.12/15: one backend's failure must never affect the others -- settle each member's
     // `listSessions()` independently, log the failure, and return whatever the survivors have.
-    const [itermSessions, tmuxSessions] = await Promise.all([
-      this.safeListSessions(iterm, "iterm2"),
-      this.safeListSessions(tmux, "tmux"),
-    ]);
+    const lists = await Promise.all(
+      BACKEND_ORDER.map((name) => this.safeListSessions(this.members.get(name), name)),
+    );
     const out: SessionInfo[] = [];
-    for (const s of itermSessions) out.push(withPrefix("iterm2", s));
-    for (const s of tmuxSessions) {
-      const w = tmux?.tmuxWindowIdOf?.(s.id);
-      if (w && hidden.has(w)) continue;
-      out.push(withPrefix("tmux", s));
-    }
+    BACKEND_ORDER.forEach((name, i) => {
+      for (const s of lists[i] as SessionInfo[]) {
+        if (name === "tmux") {
+          const w = this.members.get("tmux")?.tmuxWindowIdOf?.(s.id);
+          if (w && hidden.has(w)) continue;
+        }
+        out.push(withPrefix(name, s));
+      }
+    });
     return out;
   }
 
@@ -189,6 +203,30 @@ export class BackendRegistry implements TerminalBackend {
   async focus(id: string): Promise<void> {
     const { backend, native } = this.target(id);
     return backend.focus(native);
+  }
+  /**
+   * Spec 8.13: fan the tracker's watched set out to every member, each with its own native ids.
+   * Every member is called on every change, including with an empty array -- that is how a backend
+   * learns that its last viewer went away and it can stop polling.
+   */
+  setWatched(ids: string[]): void {
+    const byBackend = new Map<BackendName, string[]>();
+    for (const name of this.members.keys()) byBackend.set(name, []);
+    for (const id of ids) {
+      const p = splitId(id);
+      if (!p) continue;
+      byBackend.get(p.name)?.push(p.native);
+    }
+    for (const [name, natives] of byBackend) {
+      try {
+        this.members.get(name)?.setWatched?.(natives);
+      } catch (err) {
+        this.log.warn("setWatched failed for backend", {
+          backend: name,
+          err: err instanceof Error ? err.name : String(err),
+        });
+      }
+    }
   }
   on(handler: (e: BackendEvent) => void): () => void {
     this.handlers.add(handler);

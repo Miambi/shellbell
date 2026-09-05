@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { relayWsUrl } from "@shellbell/protocol";
 import WebSocket from "ws";
+import { checkHerdr } from "./backends/herdr/start.js";
 import type { ITerm2AuthError } from "./backends/iterm2/auth.js";
 import { requestCookieAndKey } from "./backends/iterm2/auth.js";
 import { DEFAULT_SOCKET } from "./backends/iterm2/client.js";
@@ -79,6 +80,9 @@ export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
       fix: "brew install tmux — needed for Ghostty/Warp/Terminal.app sessions",
     });
   }
+  // spec 8.13 (ruling 14): herdr is optional — absent is a PASS, only a broken/old running herdr
+  // fails. `checkHerdr` already returns this module's `Check` shape.
+  out.push(await checkHerdr());
   const url = relayWsUrl(cfg.relayUrl, "a".repeat(26));
   const reachable = await new Promise<boolean>((resolve) => {
     const ws = new WebSocket(url, { handshakeTimeout: 5000 });

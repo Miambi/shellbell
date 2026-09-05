@@ -177,6 +177,23 @@ describe("EventEngine", () => {
     advance(5000);
     expect(rings).toEqual(["prompt:H"]);
   });
+
+  it("ruling R44: a known agent state suppresses tick()'s idle heuristic entirely", () => {
+    const { e, events, rings, advance } = engine();
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "working", at: 0 });
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(3000);
+    expect(events).toEqual([]);
+    // Past idleQuietMs (4000) since the last screen-changed: the plain idle heuristic would fire
+    // here (see the "idle path" test above), but this pane's agent state is known, so it must not.
+    advance(1500);
+    expect(events).toEqual([]);
+    expect(rings).toEqual([]);
+  });
 });
 
 describe("Notifier", () => {

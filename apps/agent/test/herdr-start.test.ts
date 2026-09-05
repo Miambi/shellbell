@@ -1,0 +1,97 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { checkHerdr, startHerdrBackend } from "../src/backends/herdr/start.js";
+import { BackendRegistry } from "../src/backends/registry.js";
+import { createLogger } from "../src/log.js";
+import { FakeHerdr } from "./fakes/fake-herdr.js";
+import { waitFor } from "./fakes/wait.js";
+
+const log = createLogger({ stdout: false });
+let server: FakeHerdr | null = null;
+let handle: { stop(): void } | null = null;
+
+afterEach(async () => {
+  handle?.stop();
+  handle = null;
+  await server?.stop();
+  server = null;
+});
+
+const emptySnapshot = () => ({
+  type: "session_snapshot",
+  snapshot: {
+    version: "0.8.2",
+    protocol: 22,
+    workspaces: [],
+    tabs: [],
+    panes: [],
+    layouts: [],
+    agents: [],
+  },
+});
+
+describe("checkHerdr", () => {
+  it("reports the version and protocol when herdr answers", async () => {
+    server = new FakeHerdr();
+    server.reply("session.snapshot", emptySnapshot);
+    await server.start();
+    expect(await checkHerdr({ log, socketPath: server.path })).toEqual({
+      name: "herdr",
+      ok: true,
+      detail: "v0.8.2 protocol 22",
+    });
+  });
+
+  it("PASSES when herdr is not installed at all (it is optional)", async () => {
+    // spec 8.13 (ruling 14): `doctor` exits 1 if any check fails, and most users have no herdr.
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-doctor-"));
+    const check = await checkHerdr({ log, socketPath: join(dir, "herdr.sock") });
+    expect(check).toEqual({ name: "herdr", ok: true, detail: "not installed (optional)" });
+  });
+
+  it("FAILS when a running herdr is too old, with the upgrade fix", async () => {
+    server = new FakeHerdr();
+    server.reply("ping", () => ({ type: "pong", version: "0.6.9", protocol: 22 }));
+    await server.start();
+    const check = await checkHerdr({ log, socketPath: server.path });
+    expect(check.ok).toBe(false);
+    expect(check.fix).toMatch(/0\.7\.2/);
+  });
+
+  it("FAILS when a running herdr has no session.snapshot", async () => {
+    server = new FakeHerdr();
+    server.fail("session.snapshot", "invalid_request", "unknown method");
+    await server.start();
+    const check = await checkHerdr({ log, socketPath: server.path });
+    expect(check.ok).toBe(false);
+    expect(check.detail).toMatch(/session\.snapshot/);
+  });
+});
+
+describe("startHerdrBackend", () => {
+  it("registers the backend BEFORE connecting, then keeps retrying until herdr appears", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-start-"));
+    const socketPath = join(dir, "herdr.sock");
+    const registry = new BackendRegistry(log);
+    handle = startHerdrBackend({
+      registry,
+      log,
+      socketPath,
+      retryMs: 20,
+      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+    });
+    // spec 8.12 (ruling 11): the member is registered immediately, so the agent is subscribed to
+    // its events before `connect()` can emit any -- but it is NOT advertised while it is down.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(registry.connected()).toEqual([]);
+    expect(registry.nameOf("herdr:x")).toBe("herdr");
+
+    server = new FakeHerdr(socketPath);
+    server.reply("session.snapshot", emptySnapshot);
+    await server.start();
+    await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
+    expect(registry.connected().find((b) => b.name === "herdr")?.capabilities.prompts).toBe(false);
+  });
+});

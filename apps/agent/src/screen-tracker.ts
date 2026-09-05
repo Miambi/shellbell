@@ -61,6 +61,8 @@ export class ScreenTracker {
   private intervalMs: number;
   /** Guards against a `getScreen` in flight at `stop()` time still reaching the sink. */
   private stopped = true;
+  /** Last watched set pushed to the backend, joined; guards against re-sending an equal set. */
+  private watchedKey = "";
   private readonly now: () => number;
   private readonly log: Logger;
 
@@ -89,6 +91,13 @@ export class ScreenTracker {
     this.timer = null;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    // A stopped tracker must never leave a backend polling on our behalf.
+    this.watchedKey = "stopped";
+    try {
+      this.opts.backend.setWatched?.([]);
+    } catch (err) {
+      this.log.warn("setWatched failed", { err: err instanceof Error ? err.name : String(err) });
+    }
   }
 
   setIntervalMs(ms: number): void {
@@ -107,11 +116,13 @@ export class ScreenTracker {
       this.sessions.get(prev)?.viewers.delete(connId);
       this.viewerSession.delete(connId);
     }
-    if (!sessionId) return;
-    const s = this.state(sessionId);
-    s.viewers.set(connId, { lastSentGen: -1, forceSnapshot: true, skipped: 0 });
-    s.dirty = true;
-    this.viewerSession.set(connId, sessionId);
+    if (sessionId) {
+      const s = this.state(sessionId);
+      s.viewers.set(connId, { lastSentGen: -1, forceSnapshot: true, skipped: 0 });
+      s.dirty = true;
+      this.viewerSession.set(connId, sessionId);
+    }
+    this.pushWatched();
   }
 
   dropViewer(connId: string): void {
@@ -139,6 +150,27 @@ export class ScreenTracker {
     if (!s) return;
     for (const conn of s.viewers.keys()) this.viewerSession.delete(conn);
     this.sessions.delete(sessionId);
+    this.pushWatched();
+  }
+
+  /**
+   * Spec 8.13: tells the backend which sessions at least one phone is viewing. Backends that push
+   * screen changes ignore it; the herdr backend polls exactly this set and nothing else. The full
+   * set is sent every time it changes, never a delta.
+   */
+  private pushWatched(): void {
+    const ids = [...this.sessions.entries()]
+      .filter(([, s]) => s.viewers.size > 0)
+      .map(([id]) => id)
+      .sort();
+    const key = ids.join(" ");
+    if (key === this.watchedKey) return;
+    this.watchedKey = key;
+    try {
+      this.opts.backend.setWatched?.(ids);
+    } catch (err) {
+      this.log.warn("setWatched failed", { err: err instanceof Error ? err.name : String(err) });
+    }
   }
 
   private state(sessionId: string): SessionState {

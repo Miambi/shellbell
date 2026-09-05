@@ -15,6 +15,12 @@ The relay is a single Cloudflare Worker with one Durable Object class. It fits t
 
 Load shedding: set the `MIN_FRAME_MS` var (default 125) to 250 or 500 to reduce request usage.
 
+Shellbell also works with [Herdr](https://herdr.dev) 0.7.2 or newer: if a Herdr server is running
+for your user, the agent finds its socket (`$HERDR_SOCKET_PATH`, else `$HERDR_SESSION`'s socket,
+else `$XDG_CONFIG_HOME/herdr/herdr.sock`, else `~/.config/herdr/herdr.sock`) and mirrors its panes
+automatically, ringing you when an agent is blocked. Nothing to configure, and no Herdr code is
+bundled — Shellbell just speaks its local socket API.
+
 The relay never sees terminal content: everything between phone and Mac is end-to-end encrypted.
 It stores: computer name, paired phone public keys and names, Expo push tokens, leases, and
 rate-limit counters. Storage for a computer is deleted 90 days after its agent last connected.

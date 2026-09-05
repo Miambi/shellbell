@@ -15,6 +15,7 @@ import { Command } from "commander";
 import qrcode from "qrcode-terminal";
 import pkg from "../package.json" with { type: "json" };
 import { Agent } from "./agent.js";
+import { startHerdrBackend } from "./backends/herdr/start.js";
 import { ITerm2Backend } from "./backends/iterm2/backend.js";
 import { ITerm2Client } from "./backends/iterm2/client.js";
 import { BackendRegistry } from "./backends/registry.js";
@@ -291,12 +292,26 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     }
   };
   void firstConnect();
+  // spec 8.12/8.13: herdr is optional and usually absent, so this never blocks startup and never
+  // prints an error -- it registers the backend, retries every 10 s, and announces itself if and
+  // when it connects. Buffered through `print` like the iTerm2 line, for the same reason.
+  const herdr = startHerdrBackend({
+    registry,
+    log,
+    onConnected: (n) => print(`  herdr      connected · ${n} pane${n === 1 ? "" : "s"}`),
+  });
   // Minor: without this, the retry timer above outlives `stop()`/`shutdown()` -- harmless for the
   // CLI (every shutdown path calls `process.exit`) but it means `buildAgent` can't be reused in a
   // long-lived host. `shutdown()` calls this as its `cleanup` step.
   const stopFirstConnect = () => {
     if (firstConnectTimer) clearTimeout(firstConnectTimer);
     firstConnectTimer = null;
+  };
+  // `shutdown()`'s `cleanup` argument: cancel the iTerm2 first-connect retry AND stop the herdr
+  // detector. Passed wherever `stopFirstConnect` used to be passed, so no exit path leaks either.
+  const stopBackendDetectors = () => {
+    stopFirstConnect();
+    herdr.stop();
   };
   const control: { server: ControlServer | null } = { server: null };
   let agent: Agent;
@@ -319,14 +334,24 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     onSuperseded: () => {
       console.log("  another shellbell agent took over; exiting");
       if (control.server) {
-        void shutdown(agent, control.server, () => process.exit(0), stopFirstConnect).catch(() =>
-          process.exit(1),
+        void shutdown(agent, control.server, () => process.exit(0), stopBackendDetectors).catch(
+          () => process.exit(1),
         );
       } else process.exit(0);
     },
   });
   control.server = new ControlServer(p.sock, agent, log, p.pid);
-  return { agent, control: control.server, p, cfg, fp, releaseOutput, stopFirstConnect };
+  return {
+    agent,
+    control: control.server,
+    p,
+    cfg,
+    fp,
+    releaseOutput,
+    stopFirstConnect,
+    stopBackendDetectors,
+    herdr,
+  };
 }
 
 program
@@ -335,7 +360,7 @@ program
   .option("--service", "running under launchd")
   .action(async (o: { service?: boolean }) => {
     const { opts, log } = ctx();
-    const { agent, control, p, cfg, fp, releaseOutput, stopFirstConnect } = await buildAgent(
+    const { agent, control, p, cfg, fp, releaseOutput, stopBackendDetectors } = await buildAgent(
       log,
       opts.relay,
     );
@@ -359,6 +384,7 @@ program
     agent.relay.on("auth-ok", () => console.log(`  Relay      ${cfg.relayUrl}   connected`));
     agent.relay.on("down", () => console.log(`  Relay      ${cfg.relayUrl}   connecting…`));
     console.log("  tmux       not running"); // Plan 04 adds the tmux backend.
+    console.log("  herdr      detecting…"); // followed up by startHerdrBackend's onConnected line
     // The header above is up: any iTerm2 line `buildAgent`'s firstConnect() queued while it was
     // still connecting can now be printed without interleaving spec 8.1's exact-text block.
     releaseOutput();
@@ -379,7 +405,9 @@ program
         return;
       }
       shuttingDown = true;
-      void shutdown(agent, control, process.exit, stopFirstConnect).catch(() => process.exit(1));
+      void shutdown(agent, control, process.exit, stopBackendDetectors).catch(() =>
+        process.exit(1),
+      );
     };
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
@@ -402,7 +430,7 @@ program
         cfg: agentCfg,
         fp: agentFp,
         releaseOutput,
-        stopFirstConnect,
+        stopBackendDetectors,
       } = await buildAgent(log, opts.relay, o.yes);
       try {
         await control.start();
@@ -417,7 +445,7 @@ program
       releaseOutput();
       setTimeout(
         () =>
-          void shutdown(agent, control, () => process.exit(0), stopFirstConnect).catch(() =>
+          void shutdown(agent, control, () => process.exit(0), stopBackendDetectors).catch(() =>
             process.exit(1),
           ),
         5 * 60_000 + 1000,

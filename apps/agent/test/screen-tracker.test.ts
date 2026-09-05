@@ -144,6 +144,23 @@ describe("ScreenTracker", () => {
     expect(tracker.viewedBy("S")).toEqual([]);
   });
 
+  it("pushes the viewed set to the backend and stops when the last viewer leaves", async () => {
+    backend.addSession("T", { rows: 3, lines: ["x", "y", "z"] });
+    tracker.setViewed("p1", "S");
+    expect(backend.watched.at(-1)).toEqual(["S"]);
+    tracker.setViewed("p2", "T");
+    expect(backend.watched.at(-1)).toEqual(["S", "T"]);
+    // A second viewer on a session already watched changes nothing, so nothing is re-sent.
+    const calls = backend.watched.length;
+    tracker.setViewed("p3", "S");
+    expect(backend.watched.length).toBe(calls);
+    tracker.setViewed("p1", null);
+    tracker.setViewed("p3", null);
+    expect(backend.watched.at(-1)).toEqual(["T"]);
+    tracker.sessionRemoved("T");
+    expect(backend.watched.at(-1)).toEqual([]);
+  });
+
   it("marks dirty from the backend's own screen-changed event, with no explicit markDirty", async () => {
     tracker.setViewed("p1", "S");
     await flush();

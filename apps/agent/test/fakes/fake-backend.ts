@@ -33,6 +33,10 @@ export class FakeBackend implements TerminalBackend {
   saturated = false;
   sentText: { id: string; text: string }[] = [];
   getScreenCalls = 0;
+  /** Every `setWatched` call the tracker or registry made, in order (spec 8.13). */
+  watched: string[][] = [];
+  /** Spec 8.12: `false` hides this backend from `hello.backends` without unregistering it. */
+  isConnected = true;
   /**
    * Declared as optional properties (not methods) so tests can assign them. `TerminalBackend`
    * declares them as optional methods, which a property of function type satisfies.
@@ -149,6 +153,9 @@ export class FakeBackend implements TerminalBackend {
   }
   async focus(_id: string): Promise<void> {
     if (!this.capabilities.focus) throw new Unsupported("focus");
+  }
+  setWatched(ids: string[]): void {
+    this.watched.push([...ids]);
   }
   on(handler: (e: BackendEvent) => void): () => void {
     this.handlers.add(handler);

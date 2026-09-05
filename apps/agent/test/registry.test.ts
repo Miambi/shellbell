@@ -96,4 +96,44 @@ describe("BackendRegistry", () => {
     expect(reg.connected()).toEqual([]);
     await expect(reg.getScreen("iterm2:A")).rejects.toThrow(/session gone/);
   });
+
+  it("routes herdr ids and fans setWatched out to every member as native ids", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    const herdr = new FakeBackend("herdr");
+    herdr.addSession("term_a", {});
+    reg.add(iterm);
+    reg.add(herdr);
+
+    expect((await reg.listSessions()).map((s) => s.id)).toEqual(["iterm2:A", "herdr:term_a"]);
+    expect(splitId("herdr:term_a")).toEqual({ name: "herdr", native: "term_a" });
+    await reg.sendText("herdr:term_a", "x");
+    expect(herdr.sentText).toEqual([{ id: "term_a", text: "x" }]);
+    expect(reg.capabilitiesOf("herdr:term_a")).toBe(herdr.capabilities);
+
+    reg.setWatched(["herdr:term_a", "iterm2:A", "bogus"]);
+    expect(herdr.watched.at(-1)).toEqual(["term_a"]);
+    expect(iterm.watched.at(-1)).toEqual(["A"]);
+    // A backend with no watchers still gets a call -- that is how it learns to stop polling.
+    reg.setWatched([]);
+    expect(herdr.watched.at(-1)).toEqual([]);
+    expect(iterm.watched.at(-1)).toEqual([]);
+  });
+
+  it("hides a disconnected member from connected() but keeps routing to it", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("A", {});
+    const herdr = new FakeBackend("herdr");
+    herdr.addSession("term_a", {});
+    reg.add(iterm);
+    reg.add(herdr);
+    expect(reg.connected().map((b) => b.name)).toEqual(["iterm2", "herdr"]);
+    // spec 8.12/8.13: its socket died; it stays registered (it reconnects itself) but the phones
+    // must not be told it is available.
+    herdr.isConnected = false;
+    expect(reg.connected().map((b) => b.name)).toEqual(["iterm2"]);
+    expect(reg.capabilitiesOf("herdr:term_a")).toBe(herdr.capabilities);
+  });
 });
