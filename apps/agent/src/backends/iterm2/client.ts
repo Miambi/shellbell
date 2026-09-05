@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { connect as netConnect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -82,11 +83,40 @@ export class ITerm2Client extends EventEmitter<{ notification: [Notification]; c
         });
     this.ws = ws;
     await new Promise<void>((resolve, reject) => {
-      ws.once("open", () => resolve());
-      ws.once("error", (e) => reject(e));
-      ws.once("unexpected-response", (_req, res) =>
-        reject(new Error(`iTerm2 API responded HTTP ${res.statusCode}`)),
-      );
+      const cleanup = () => {
+        ws.off("open", onOpen);
+        ws.off("error", onError);
+        ws.off("unexpected-response", onUnexpectedResponse);
+        ws.off("close", onClose);
+      };
+      // Settles the connect promise on any failure path (socket error, a non-101 HTTP
+      // response, or the socket closing before the handshake completed — including a
+      // `close()` call made while this connect() is still in flight). Frees the failed
+      // socket so a later connect() attempt starts clean, and swallows any further
+      // internal `error` emissions that `terminate()`/`abortHandshake` may schedule for
+      // the next tick — without a listener, those would otherwise crash the process.
+      const fail = (err: Error) => {
+        cleanup();
+        ws.on("error", () => {});
+        ws.terminate();
+        if (this.ws === ws) this.ws = null;
+        reject(err);
+      };
+      const onOpen = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (e: Error) => fail(e);
+      const onUnexpectedResponse = (req: ClientRequest, res: IncomingMessage) => {
+        res.destroy();
+        req.destroy();
+        fail(new Error(`iTerm2 API responded HTTP ${res.statusCode}`));
+      };
+      const onClose = () => fail(new Error("iTerm2 connection closed before open"));
+      ws.once("open", onOpen);
+      ws.once("error", onError);
+      ws.once("unexpected-response", onUnexpectedResponse);
+      ws.once("close", onClose);
     });
     ws.on("message", (data, isBinary) => {
       if (!isBinary) return;
@@ -101,7 +131,9 @@ export class ITerm2Client extends EventEmitter<{ notification: [Notification]; c
         this.emit("notification", msg.submessage.value);
         return;
       }
-      if (msg.id === undefined) return;
+      // proto2 `optional int64 id` is typed `bigint`, defaulting to `0n` rather than
+      // `undefined`, when absent. `nextId` starts at `1n`, so `0n` (and any other id with
+      // no matching entry) simply misses the lookup below and is dropped.
       const p = this.pending.get(msg.id);
       if (!p) return;
       clearTimeout(p.timer);

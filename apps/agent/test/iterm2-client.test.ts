@@ -1,6 +1,6 @@
 import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
@@ -129,4 +129,39 @@ describe("ITerm2Client", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(closed).toBe(1);
   });
+
+  it("settles connect() when close() is called while the connection is still in flight", async () => {
+    // A raw TCP server that accepts the connection but never writes anything back, so the
+    // WebSocket handshake never completes on its own — only close() can end it.
+    const sockets: Socket[] = [];
+    const stallServer = createNetServer((s) => sockets.push(s));
+    await new Promise<void>((r) => stallServer.listen(0, "127.0.0.1", r));
+    const stallUrl = `ws://127.0.0.1:${(stallServer.address() as AddressInfo).port}`;
+    const c = new ITerm2Client({ log, url: stallUrl, cookieProvider, requestTimeoutMs: 5000 });
+    const p = c.connect();
+    await new Promise((r) => setTimeout(r, 20));
+    c.close();
+    await expect(p).rejects.toThrow(/closed/);
+    for (const s of sockets) s.destroy();
+    await new Promise<void>((r) => stallServer.close(() => r()));
+  }, 2000);
+
+  it("frees the socket and rejects when the handshake gets a non-101 response", async () => {
+    let liveConnections = 0;
+    const authServer = createServer((_req, res) => {
+      res.writeHead(401);
+      res.end();
+    });
+    authServer.on("connection", (s) => {
+      liveConnections++;
+      s.on("close", () => liveConnections--);
+    });
+    await new Promise<void>((r) => authServer.listen(0, "127.0.0.1", r));
+    const authUrl = `ws://127.0.0.1:${(authServer.address() as AddressInfo).port}`;
+    const c = new ITerm2Client({ log, url: authUrl, cookieProvider, requestTimeoutMs: 500 });
+    await expect(c.connect()).rejects.toThrow(/401/);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(liveConnections).toBe(0);
+    await new Promise<void>((r) => authServer.close(() => r()));
+  }, 2000);
 });
