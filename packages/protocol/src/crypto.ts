@@ -52,10 +52,24 @@ export function identityToJson(id: Identity): IdentityJson {
 }
 
 export function identityFromJson(j: unknown): Identity {
-  const p = IdentityJsonSchema.parse(j);
+  const r = IdentityJsonSchema.safeParse(j);
+  if (!r.success) throw new ProtocolError("malformed", `identity: ${z.prettifyError(r.error)}`);
+  const p = r.data;
+  const ed25519Pub = fromBase64Url(p.ed25519.pub);
+  const ed25519Priv = fromBase64Url(p.ed25519.priv);
+  const x25519Pub = fromBase64Url(p.x25519.pub);
+  const x25519Priv = fromBase64Url(p.x25519.priv);
+  if (
+    ed25519Pub.length !== 32 ||
+    ed25519Priv.length !== 32 ||
+    x25519Pub.length !== 32 ||
+    x25519Priv.length !== 32
+  ) {
+    throw new ProtocolError("malformed", "identity: key length");
+  }
   return {
-    ed25519: { pub: fromBase64Url(p.ed25519.pub), priv: fromBase64Url(p.ed25519.priv) },
-    x25519: { pub: fromBase64Url(p.x25519.pub), priv: fromBase64Url(p.x25519.priv) },
+    ed25519: { pub: ed25519Pub, priv: ed25519Priv },
+    x25519: { pub: x25519Pub, priv: x25519Priv },
     createdAt: p.createdAt,
   };
 }
@@ -90,6 +104,7 @@ export interface Box {
   c: Uint8Array;
 }
 
+/** Deterministic AEAD for golden vectors and tests ONLY. Never call this from runtime code: reusing a (key, nonce) pair with XChaCha20-Poly1305 leaks the keystream and MAC key. Use seal(). */
 export function sealWithNonce(
   key: Uint8Array,
   nonce: Uint8Array,

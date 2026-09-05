@@ -48,6 +48,21 @@ describe("identity", () => {
     expect(back.ed25519.priv).toEqual(id.ed25519.priv);
     expect(back.x25519.pub).toEqual(id.x25519.pub);
   });
+  it("identityFromJson rejects incomplete JSON with ProtocolError", () => {
+    expect(() => identityFromJson({ v: 1 })).toThrow(/malformed/);
+  });
+  it("identityFromJson rejects keys with wrong length", () => {
+    const id = generateIdentity();
+    const json = identityToJson(id);
+    const invalidJson = {
+      ...json,
+      ed25519: {
+        ...json.ed25519,
+        pub: "AAAA", // 3 bytes when decoded
+      },
+    };
+    expect(() => identityFromJson(invalidJson)).toThrow(/malformed/);
+  });
 });
 
 describe("signatures", () => {
