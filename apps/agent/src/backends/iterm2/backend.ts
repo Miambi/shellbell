@@ -328,12 +328,17 @@ export class ITerm2Backend implements TerminalBackend {
   }
 
   private async drainLayout(): Promise<void> {
-    while (this.layoutDirty) {
-      const layout = this.layoutDirty;
-      this.layoutDirty = null;
-      await this.runApplyLayout(layout);
+    try {
+      while (this.layoutDirty) {
+        const layout = this.layoutDirty;
+        this.layoutDirty = null;
+        await this.runApplyLayout(layout);
+      }
+    } finally {
+      // Never leave the single-flight lock held: a throw here would wedge every later
+      // layout refresh and every reconnect that awaits applyLayout().
+      this.layoutBusy = false;
     }
-    this.layoutBusy = false;
   }
 
   private async runApplyLayout(layout: ListSessionsResponse): Promise<void> {
