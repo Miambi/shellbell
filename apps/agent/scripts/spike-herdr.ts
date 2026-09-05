@@ -1,18 +1,30 @@
 /*
  * Spike: the Herdr socket API from Node. Run with `pnpm -F shellbell spike:herdr` while a real
  * herdr server is running for this user, ideally with at least one coding agent pane. It writes
- * sanitized fixtures into test/fixtures/ and prints the measurements docs/spike-herdr.md wants.
+ * sanitized fixtures into test/fixtures/ and prints a paste-ready summary for docs/spike-herdr.md.
  *
- * Read-only by default. Set HERDR_SPIKE_KEYS=1 to also probe `pane.send_keys` — that TYPES INTO A
- * REAL PANE, so only do it against a scratch pane you created for the spike.
+ * Read-only by default. Set HERDR_SPIKE_KEYS=1 to also probe `pane.send_keys` — the probe creates
+ * its OWN scratch tab (`tab.create`, unfocused) and closes it in a `finally`; it never sends a key
+ * to a pane it did not create itself.
+ *
+ * Every capture step below runs through `step()` (or the step-aware `timed()`), which try/catches
+ * it, records a failure into `failures` instead of throwing, and lets the rest of the run
+ * continue — a stale pane or an unsupported method on one step never aborts the whole spike, and
+ * fixtures already written (synchronous `writeFileSync`) survive regardless of what fails later.
  */
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { connect as netConnect } from "node:net";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname, userInfo } from "node:os";
 import { join } from "node:path";
 import { NAMED_KEYS, type NamedKey } from "@shellbell/protocol";
-import { HerdrClient, herdrSocketPath, semverAtLeast } from "../src/backends/herdr/client.js";
+import {
+  HerdrClient,
+  HerdrError,
+  herdrSocketPath,
+  semverAtLeast,
+} from "../src/backends/herdr/client.js";
 import { HERDR_KEYS } from "../src/backends/herdr/keys.js";
+import type { PaneInfoResult, TabCreatedResult } from "../src/backends/herdr/types.js";
 import { createLogger } from "../src/log.js";
 
 const log = createLogger({ stdout: true, verbose: true });
@@ -20,11 +32,22 @@ const client = new HerdrClient({ log, requestTimeoutMs: 5000 });
 const outDir = join(import.meta.dirname, "..", "test", "fixtures");
 mkdirSync(outDir, { recursive: true });
 
-/** Replace this machine's identity before anything is written to disk. */
+const writtenFixtures: string[] = [];
+interface Failure {
+  step: string;
+  error: string;
+}
+const failures: Failure[] = [];
+
+/** Replace this machine's identity before anything is written to disk or printed. */
 function sanitize<T>(value: T): T {
   const home = homedir();
   const user = userInfo().username;
-  const text = JSON.stringify(value).split(home).join("/Users/dev").split(user).join("dev");
+  const host = hostname();
+  const shortHost = host.split(".")[0] ?? host;
+  let text = JSON.stringify(value).split(home).join("/Users/dev").split(user).join("dev");
+  text = text.split(host).join("<host>");
+  if (shortHost && shortHost !== host) text = text.split(shortHost).join("<host>");
   return JSON.parse(text) as T;
 }
 
@@ -32,22 +55,54 @@ function save(name: string, value: unknown): void {
   const file = join(outDir, name);
   writeFileSync(file, `${JSON.stringify(sanitize(value), null, 2)}\n`);
   console.log("wrote", file);
+  writtenFixtures.push(file);
 }
 
-async function timed<T>(label: string, n: number, fn: () => Promise<T>): Promise<T> {
+/** Runs one capture step; records a failure instead of throwing so the rest of the spike keeps
+ * going and fixtures captured so far still get written. */
+async function step<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    const code = err instanceof HerdrError ? err.code : undefined;
+    const message = err instanceof Error ? err.message : String(err);
+    failures.push({ step: label, error: code ? `${code}: ${message}` : message });
+    console.error(`!! step "${label}" failed:`, code ? `${code}: ${message}` : message);
+    return undefined;
+  }
+}
+
+/** Same as `step()`, but for a repeated latency sample: one failed sample is recorded and
+ * skipped rather than aborting the remaining samples. */
+async function timed<T>(label: string, n: number, fn: () => Promise<T>): Promise<T | undefined> {
   const times: number[] = [];
   let last: T | undefined;
   for (let i = 0; i < n; i++) {
     const t0 = performance.now();
-    last = await fn();
+    try {
+      last = await fn();
+    } catch (err) {
+      const code = err instanceof HerdrError ? err.code : undefined;
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push({
+        step: `${label} (sample ${i + 1}/${n})`,
+        error: code ? `${code}: ${message}` : message,
+      });
+      console.error(`!! ${label} sample ${i + 1}/${n} failed:`, message);
+      continue;
+    }
     times.push(performance.now() - t0);
+  }
+  if (times.length === 0) {
+    console.log(`${label}: no successful samples (n=${n})`);
+    return last;
   }
   times.sort((a, b) => a - b);
   const p50 = times[Math.floor(times.length / 2)] ?? 0;
   console.log(
-    `${label}: p50 ${p50.toFixed(1)} ms, max ${(times.at(-1) ?? 0).toFixed(1)} ms (n=${n})`,
+    `${label}: p50 ${p50.toFixed(1)} ms, max ${(times.at(-1) ?? 0).toFixed(1)} ms (n=${times.length}/${n})`,
   );
-  return last as T;
+  return last;
 }
 
 /** Research §10.1: prove the server really does read exactly one line per connection. */
@@ -65,13 +120,39 @@ function twoRequestsOnOneConnection(path: string): Promise<string[]> {
   });
 }
 
+interface PaneRow {
+  pane_id: string;
+  terminal_id?: string;
+  scroll?: Record<string, unknown>;
+}
+
+interface LayoutRow {
+  panes?: { pane_id: string; rect?: { width?: number; height?: number } }[];
+}
+
+function findPaneRectHeight(layouts: LayoutRow[], paneId: string): number | undefined {
+  for (const l of layouts) {
+    const p = l.panes?.find((pp) => pp.pane_id === paneId);
+    if (p?.rect?.height !== undefined) return p.rect.height;
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const path = herdrSocketPath();
+  const clientSockSibling = path.replace(/\.sock$/, "-client.sock");
+  const socketExists = existsSync(path);
   console.log("socket:", path, "HERDR_SESSION:", process.env.HERDR_SESSION ?? "(unset)");
+  console.log(
+    "socket exists:",
+    socketExists,
+    "  -client.sock sibling exists:",
+    existsSync(clientSockSibling),
+  );
   // Spike question 1 is blocking: the macOS default (`~/.config/herdr/…`, no
   // `~/Library/Application Support` branch) is read from the Rust source but never observed on a
   // Mac. Say so loudly rather than dying with a bare ENOENT that reads like "herdr isn't running".
-  if (!existsSync(path)) {
+  if (!socketExists) {
     console.error(
       `\n!! No socket at ${path}\n` +
         "!! If a herdr server IS running, herdrSocketPath() is WRONG for this platform.\n" +
@@ -83,117 +164,288 @@ async function main(): Promise<void> {
   }
 
   const pong = await timed("ping", 5, () =>
-    client.request<{ version?: string; protocol?: number }>("ping", {}),
+    client.request<{ version?: string; protocol?: number; capabilities?: unknown }>("ping", {}),
   );
-  console.log("version gate:", pong.version, "->", semverAtLeast(pong.version ?? "", [0, 7, 2]));
-  save("herdr-ping.json", { id: "sb1", result: pong });
+  const versionGate = pong ? semverAtLeast(pong.version ?? "", [0, 7, 2]) : undefined;
+  if (pong) {
+    console.log("version gate:", pong.version, "->", versionGate);
+    console.log("capabilities:", JSON.stringify(pong.capabilities ?? null).slice(0, 300));
+    save("herdr-ping.json", { id: "sb1", result: pong });
+  }
 
   const snapshot = await timed("session.snapshot", 5, () =>
     client.request<{ snapshot: Record<string, unknown> }>("session.snapshot", {}),
   );
-  save("herdr-session-snapshot.json", { id: "sb2", result: snapshot });
+  if (snapshot) save("herdr-session-snapshot.json", { id: "sb2", result: snapshot });
 
-  const panes = (snapshot.snapshot.panes ?? []) as {
-    pane_id: string;
-    terminal_id?: string;
-    scroll?: Record<string, unknown>;
-  }[];
+  const panes = (snapshot?.snapshot.panes ?? []) as PaneRow[];
+  const layouts = (snapshot?.snapshot.layouts ?? []) as LayoutRow[];
+  const allHaveTerminalId = panes.length > 0 && panes.every((p) => Boolean(p.terminal_id));
   console.log(
     "panes:",
     panes.map((p) => `${p.pane_id}/${p.terminal_id ?? "NO terminal_id"}`),
   );
+  console.log("every pane carries terminal_id:", allHaveTerminalId);
   console.log("scroll on pane 0:", JSON.stringify(panes[0]?.scroll ?? null));
-  console.log("layouts:", JSON.stringify(snapshot.snapshot.layouts).slice(0, 400));
+  const firstLayout = layouts[0] as unknown;
+  console.log(
+    "layout rect field names (pane 0 of layout 0):",
+    firstLayout
+      ? Object.keys(
+          ((firstLayout as LayoutRow).panes?.[0] as { rect?: object } | undefined)?.rect ?? {},
+        )
+      : "(no layouts)",
+  );
+  console.log("layouts:", JSON.stringify(layouts).slice(0, 400));
   const paneId = panes[0]?.pane_id;
-  if (!paneId) throw new Error("no panes: open one in herdr first");
+  if (!paneId) failures.push({ step: "pane selection", error: "no panes in session.snapshot" });
 
-  const visible = await timed("pane.read visible ansi", 20, () =>
-    client.request("pane.read", { pane_id: paneId, source: "visible", format: "ansi" }),
-  );
-  save("herdr-pane-read-visible.json", { id: "sb7", result: visible });
-  const text = (visible as { read: { text?: string } }).read.text ?? "";
-  // Built from a string, not a regex literal: an ESC char in a `/.../ ` regex trips Biome's
-  // noControlCharactersInRegex rule, but we need to match the real CSI escape byte here.
-  const csiFinal = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*([A-Za-z])`, "g");
-  const escapes = [...text.matchAll(csiFinal)].map((m) => m[1]);
-  console.log("escape finals seen (expect only 'm'):", [...new Set(escapes)].join(" "));
-  console.log("rows returned:", text.split("\n").length);
+  let visibleRows: number | undefined;
+  let csiFinals: string[] = [];
+  if (paneId) {
+    const visible = await timed("pane.read visible ansi", 20, () =>
+      client.request("pane.read", { pane_id: paneId, source: "visible", format: "ansi" }),
+    );
+    if (visible) {
+      save("herdr-pane-read-visible.json", { id: "sb7", result: visible });
+      const text = (visible as { read: { text?: string } }).read.text ?? "";
+      // Built from a string, not a regex literal: an ESC char in a `/.../ ` regex trips Biome's
+      // noControlCharactersInRegex rule, but we need to match the real CSI escape byte here.
+      const csiFinal = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*([A-Za-z])`, "g");
+      csiFinals = [...new Set([...text.matchAll(csiFinal)].map((m) => m[1] ?? ""))];
+      console.log("escape finals seen (expect only 'm'):", csiFinals.join(" "));
+      visibleRows = text.split("\n").length;
+      console.log("rows returned:", visibleRows);
+      const expectedHeight = findPaneRectHeight(layouts, paneId);
+      console.log(
+        "row count vs layout rect height:",
+        visibleRows,
+        "vs",
+        expectedHeight ?? "(no rect found)",
+      );
+    }
 
-  const recent = await timed("pane.read recent ansi 200", 5, () =>
-    client.request("pane.read", { pane_id: paneId, source: "recent", format: "ansi", lines: 200 }),
-  );
-  save("herdr-pane-read-recent.json", { id: "sb8", result: recent });
+    const recent = await timed("pane.read recent ansi 200", 5, () =>
+      client.request("pane.read", {
+        pane_id: paneId,
+        source: "recent",
+        format: "ansi",
+        lines: 200,
+      }),
+    );
+    if (recent) save("herdr-pane-read-recent.json", { id: "sb8", result: recent });
+  }
 
-  const motion = await timed("pane.copy_motion", 20, () =>
-    client.request("pane.copy_motion", {
-      pane_id: paneId,
-      cursor: { row: 0, col: 0 },
-      motion: "line_end",
-    }),
-  );
-  save("herdr-copy-motion.json", { id: "sb9", result: motion });
+  const copyMotionRevisions: number[] = [];
+  let motion: unknown;
+  if (paneId) {
+    motion = await timed("pane.copy_motion", 20, async () => {
+      const r = await client.request<{ content_revision?: number }>("pane.copy_motion", {
+        pane_id: paneId,
+        cursor: { row: 0, col: 0 },
+        motion: "line_end",
+      });
+      if (typeof r.content_revision === "number") copyMotionRevisions.push(r.content_revision);
+      return r;
+    });
+    if (motion) save("herdr-copy-motion.json", { id: "sb9", result: motion });
+    console.log(
+      "content_revision samples across the 20-call latency loop:",
+      copyMotionRevisions,
+      "-> ",
+      new Set(copyMotionRevisions).size > 1 ? "advanced" : "held constant",
+      copyMotionRevisions.some((v) => v % 2 === 1) ? "(odd values observed)" : "(all even)",
+    );
 
-  // Poll cost at scale: the adaptive poller opens one connection per watched pane per tick.
+    const paneGet = await step("pane.get", () =>
+      client.request<PaneInfoResult>("pane.get", { pane_id: paneId }),
+    );
+    if (paneGet) {
+      save("herdr-pane-get.json", { id: "sb10", result: paneGet });
+      console.log(
+        "pane.get scroll (pane.scroll_changed fallback path):",
+        JSON.stringify(paneGet.pane?.scroll ?? null),
+      );
+    }
+  }
+
+  // Poll cost at scale: the adaptive poller opens one connection per watched pane per tick. Each
+  // pane's request is caught individually so one stale pane doesn't erase the rest of the sample.
   for (const n of [1, 5, 20]) {
     const targets = panes.slice(0, n).map((p) => p.pane_id);
     if (targets.length < n) break;
     const t0 = performance.now();
-    for (const id of targets)
-      await client.request("pane.copy_motion", {
-        pane_id: id,
-        cursor: { row: 0, col: 0 },
-        motion: "line_end",
-      });
-    console.log(`sequential copy_motion x${n}: ${(performance.now() - t0).toFixed(1)} ms total`);
+    let ok = 0;
+    for (const id of targets) {
+      try {
+        await client.request("pane.copy_motion", {
+          pane_id: id,
+          cursor: { row: 0, col: 0 },
+          motion: "line_end",
+        });
+        ok++;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        failures.push({ step: `sequential copy_motion x${n} (pane ${id})`, error: message });
+      }
+    }
+    console.log(
+      `sequential copy_motion x${n}: ${(performance.now() - t0).toFixed(1)} ms total (${ok}/${targets.length} ok)`,
+    );
   }
 
   const two = await twoRequestsOnOneConnection(path);
   console.log("responses to two pipelined requests (expect 1):", two.length);
 
+  const keysAccepted: string[] = [];
+  const keysRejected: string[] = [];
+  let scratchTabId: string | null = null;
+  let scratchPaneId: string | undefined;
+  let scratchClosed = false;
   if (process.env.HERDR_SPIKE_KEYS === "1") {
-    const accepted: string[] = [];
-    const rejected: string[] = [];
-    for (const name of Object.keys(NAMED_KEYS) as NamedKey[]) {
-      const candidate = HERDR_KEYS[name] ?? name.replace(/^ctrl-/, "ctrl+").replace(/-/g, "");
+    await step("key probe (own scratch tab)", async () => {
+      const workspaceId =
+        (snapshot?.snapshot.focused_workspace_id as string | null | undefined) ??
+        (snapshot?.snapshot.workspaces as { workspace_id: string }[] | undefined)?.[0]
+          ?.workspace_id;
+      if (!workspaceId) throw new Error("no workspace available to create a scratch tab in");
+      const created = await client.request<TabCreatedResult>("tab.create", {
+        workspace_id: workspaceId,
+        focus: false,
+      });
+      scratchTabId = created.tab?.tab_id ?? null;
+      scratchPaneId = created.root_pane?.pane_id;
+      console.log("key probe scratch tab created:", {
+        tab_id: scratchTabId,
+        pane_id: scratchPaneId,
+      });
+      if (!scratchPaneId) throw new Error("tab.create returned no root_pane.pane_id");
       try {
-        await client.request("pane.send_keys", { pane_id: paneId, keys: [candidate] });
-        accepted.push(`${name} -> ${candidate}`);
-      } catch (err) {
-        rejected.push(`${name} -> ${candidate}: ${err instanceof Error ? err.message : err}`);
+        for (const name of Object.keys(NAMED_KEYS) as NamedKey[]) {
+          const candidate = HERDR_KEYS[name] ?? name.replace(/^ctrl-/, "ctrl+").replace(/-/g, "");
+          try {
+            await client.request("pane.send_keys", { pane_id: scratchPaneId, keys: [candidate] });
+            keysAccepted.push(`${name} -> ${candidate}`);
+          } catch (err) {
+            keysRejected.push(
+              `${name} -> ${candidate}: ${err instanceof Error ? err.message : err}`,
+            );
+          }
+        }
+      } finally {
+        if (scratchTabId) {
+          try {
+            await client.request("tab.close", { tab_id: scratchTabId });
+            scratchClosed = true;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            failures.push({ step: "key probe: tab.close", error: message });
+            console.error("!! failed to close key-probe scratch tab", scratchTabId, message);
+          }
+        }
       }
-    }
-    console.log(`keys accepted:\n  ${accepted.join("\n  ")}`);
-    console.log(`keys rejected:\n  ${rejected.join("\n  ")}`);
+    });
+    console.log(`keys accepted:\n  ${keysAccepted.join("\n  ")}`);
+    console.log(`keys rejected:\n  ${keysRejected.join("\n  ")}`);
+    console.log("key-probe scratch tab closed:", scratchClosed);
   }
 
   console.log("subscribing for 30 s — go make an agent ask you something…");
   let events = 0;
-  const stream = await client.subscribe(
-    [
-      { type: "pane.created" },
-      { type: "pane.closed" },
-      { type: "pane.updated" },
-      { type: "pane.focused" },
-      { type: "pane.moved" },
-      { type: "layout.updated" },
-      ...panes.flatMap((p) => [
-        { type: "pane.agent_status_changed", pane_id: p.pane_id },
-        { type: "pane.scroll_changed", pane_id: p.pane_id },
-      ]),
-    ],
-    {
-      onEvent: (e) => {
-        events++;
-        console.log("EVENT", e.event, JSON.stringify(e.data).slice(0, 200));
-        if (e.event.includes("agent_status_changed"))
-          save("herdr-agent-status-event.json", { event: e.event, data: e.data });
+  let agentStatusSample: { event: string; data: Record<string, unknown>; atMs: number } | null =
+    null;
+  let scrollChangedSample: Record<string, unknown> | null = null;
+  let layoutUpdatedSample: Record<string, unknown> | null = null;
+  const subscribeStartedAt = performance.now();
+  const stream = await step("events.subscribe (30s window)", () =>
+    client.subscribe(
+      [
+        { type: "pane.created" },
+        { type: "pane.closed" },
+        { type: "pane.updated" },
+        { type: "pane.focused" },
+        { type: "pane.moved" },
+        { type: "layout.updated" },
+        ...panes.flatMap((p) => [
+          { type: "pane.agent_status_changed", pane_id: p.pane_id },
+          { type: "pane.scroll_changed", pane_id: p.pane_id },
+        ]),
+      ],
+      {
+        onEvent: (e) => {
+          events++;
+          const atMs = performance.now() - subscribeStartedAt;
+          console.log(
+            "EVENT",
+            e.event,
+            `(+${atMs.toFixed(0)}ms)`,
+            JSON.stringify(e.data).slice(0, 200),
+          );
+          if (e.event.includes("agent_status_changed")) {
+            agentStatusSample = { event: e.event, data: e.data, atMs };
+            save("herdr-agent-status-event.json", { event: e.event, data: e.data });
+          }
+          if (!scrollChangedSample && e.event.includes("scroll_changed"))
+            scrollChangedSample = e.data;
+          if (!layoutUpdatedSample && e.event.includes("layout")) layoutUpdatedSample = e.data;
+        },
+        onEnd: (reason) => console.log("stream ended:", reason),
       },
-      onEnd: (reason) => console.log("stream ended:", reason),
-    },
+    ),
   );
-  await new Promise((r) => setTimeout(r, 30_000));
-  stream.close();
-  console.log(`captured ${events} events`);
+  if (stream) {
+    await new Promise((r) => setTimeout(r, 30_000));
+    stream.close();
+    console.log(`captured ${events} events`);
+  } else {
+    console.log("event subscription failed; skipping the 30 s capture window (see failures[])");
+  }
+
+  // ---- Consolidated summary: paste-ready for docs/spike-herdr.md ----
+  const lines: string[] = [];
+  lines.push("");
+  lines.push("========== SPIKE SUMMARY (paste into docs/spike-herdr.md) ==========");
+  lines.push(
+    `Q1 socket path: ${path} (exists=${socketExists}); HERDR_SESSION=${process.env.HERDR_SESSION ?? "(unset)"}; -client.sock sibling exists=${existsSync(clientSockSibling)}`,
+  );
+  lines.push(
+    `Q2 ping: version=${pong?.version ?? "(no successful ping)"} protocol=${pong?.protocol ?? "?"} capabilities=${JSON.stringify(pong?.capabilities ?? null)} semverGate=${versionGate}`,
+  );
+  lines.push(`Q3 responses to two pipelined requests on one connection (expect 1): ${two.length}`);
+  lines.push(
+    `Q4 latencies: see "ping:"/"session.snapshot:"/"pane.read visible ansi:"/"pane.read recent ansi 200:"/"pane.copy_motion:" p50/max lines above, plus the sequential copy_motion x1/x5/x20 totals above.`,
+  );
+  lines.push(
+    `Q5 pane.read visible ansi: CSI finals seen=[${csiFinals.join(" ")}] (expect only "m"); rows returned=${visibleRows ?? "(not captured)"}; padded-vs-trimmed and 256-colour/truecolor/CJK encoding require eyeballing the saved fixture (herdr-pane-read-visible.json).`,
+  );
+  lines.push(`Q6 every pane carries terminal_id: ${allHaveTerminalId}`);
+  lines.push(
+    `Q7 layout.updated: sample data=${JSON.stringify(layoutUpdatedSample)}; rect field names (from snapshot)=${firstLayout ? Object.keys(((firstLayout as LayoutRow).panes?.[0] as { rect?: object } | undefined)?.rect ?? {}) : "(no layouts)"}; compare against \`stty size\` manually to confirm units and whether dragging a divider fired it.`,
+  );
+  lines.push(
+    `Q8 pane.scroll_changed: sample data=${JSON.stringify(scrollChangedSample)}; pane.get fallback scroll (see console "pane.get scroll" line above) confirms whether the fallback path is still needed.`,
+  );
+  lines.push(
+    `Q9 content_revision across ${copyMotionRevisions.length} sequential copy_motion calls on one pane: ${JSON.stringify(copyMotionRevisions)} -> ${new Set(copyMotionRevisions).size > 1 ? "advanced" : "held constant"}${copyMotionRevisions.some((v) => v % 2 === 1) ? ", odd values observed" : ""}. Focus/idle behaviour requires manually repeating with the pane unfocused/idle.`,
+  );
+  lines.push(
+    `Q10 agent state event: ${agentStatusSample ? `event="${(agentStatusSample as { event: string }).event}" data=${JSON.stringify((agentStatusSample as { data: Record<string, unknown> }).data)} arrived +${(agentStatusSample as { atMs: number }).atMs.toFixed(0)}ms into the subscription window` : "no pane.agent_status_changed event observed this run — re-run and make an agent block/unblock during the 30s window"}. Working->blocked and blocked->idle latency needs the human's own action timestamp compared to this line.`,
+  );
+  lines.push(
+    `Q11 keys (HERDR_SPIKE_KEYS=1 only): ${process.env.HERDR_SPIKE_KEYS === "1" ? `accepted=[${keysAccepted.join(", ")}] rejected=[${keysRejected.join(", ")}]` : "not run this pass (set HERDR_SPIKE_KEYS=1)"}`,
+  );
+  lines.push(
+    "Q12 restart: not exercised by this script — human-run only (stop the herdr server with a subscription open and observe the socket file and connection EOF, per Step 3 item 12).",
+  );
+  lines.push(
+    "Q13 sanitization: sanitize() replaced $HOME, the OS username, and the machine hostname (full and short form) with placeholders in every fixture written below; review each fixture for terminal content, repo names and any other stray identifiers before committing.",
+  );
+  lines.push(
+    `Fixtures written (${writtenFixtures.length}): ${writtenFixtures.join(", ") || "(none)"}`,
+  );
+  lines.push(`Failures (${failures.length}): ${JSON.stringify(failures, null, 2)}`);
+  lines.push("========== END SPIKE SUMMARY ==========");
+  console.log(lines.join("\n"));
 }
 
 main().then(
