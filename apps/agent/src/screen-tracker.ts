@@ -1,11 +1,13 @@
 import {
+  type Cursor,
   encodeCbor,
   type InnerMessage,
+  type InnerMessageOf,
   type Line,
   lineKey,
   stripStyles,
 } from "@shellbell/protocol";
-import type { Screen, TerminalBackend } from "./backends/types.js";
+import { type Screen, SessionGone, type TerminalBackend } from "./backends/types.js";
 import type { Logger } from "./log.js";
 
 export interface ScreenTrackerOptions {
@@ -16,6 +18,8 @@ export interface ScreenTrackerOptions {
   maxFramesPerSecond?: number;
   maxEncodedBytes?: number;
   now?: () => number;
+  /** Called when `getScreen` reports the session is truly gone (Task 10 wires this to `sessions`). */
+  onSessionGone?: (sessionId: string) => void;
 }
 
 interface SessionState {
@@ -25,14 +29,20 @@ interface SessionState {
   lastKeys: string[];
   lastCols: number;
   lastRows: number;
+  lastCursor: Cursor | null;
   lastBackendScrollback: number | null;
   reported: number;
   gen: number;
+  /** Round-robin start offset for fair tie-breaking under a scarce frame budget. */
+  rrOffset: number;
+  /** Set once we've logged that even a stripped snapshot exceeds `maxEncodedBytes`. */
+  oversizeWarned: boolean;
 }
 
 interface Budget {
-  windowStart: number;
-  count: number;
+  /** Tokens available right now; refilled continuously, capped at `maxFramesPerSecond`. */
+  tokens: number;
+  last: number;
 }
 
 const SNAPSHOT_RATIO = 0.6;
@@ -45,10 +55,12 @@ export class ScreenTracker {
   private readonly sessions = new Map<string, SessionState>();
   private readonly viewerSession = new Map<string, string>();
   /** ONE bucket for every sink call: they all share the agent's single relay socket. */
-  private budget: Budget = { windowStart: 0, count: 0 };
+  private readonly budget: Budget;
   private unsubscribe: (() => void) | null = null;
   private timer: NodeJS.Timeout | null = null;
   private intervalMs: number;
+  /** Guards against a `getScreen` in flight at `stop()` time still reaching the sink. */
+  private stopped = true;
   private readonly now: () => number;
   private readonly log: Logger;
 
@@ -56,10 +68,12 @@ export class ScreenTracker {
     this.intervalMs = Math.max(125, opts.intervalMs ?? 125);
     this.now = opts.now ?? (() => Date.now());
     this.log = opts.log.child({ unit: "tracker" });
+    this.budget = { tokens: 0, last: this.now() };
   }
 
   start(): void {
     if (this.timer) return;
+    this.stopped = false;
     // The tracker subscribes to the backend itself: `screen-changed` is the only event that means
     // "there is new output", and `session-removed` is the only one that invalidates our state.
     this.unsubscribe ??= this.opts.backend.on((e) => {
@@ -70,6 +84,7 @@ export class ScreenTracker {
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.unsubscribe?.();
@@ -136,9 +151,12 @@ export class ScreenTracker {
         lastKeys: [],
         lastCols: 0,
         lastRows: 0,
+        lastCursor: null,
         lastBackendScrollback: null,
         reported: 0,
         gen: 0,
+        rrOffset: 0,
+        oversizeWarned: false,
       };
       this.sessions.set(sessionId, s);
     }
@@ -147,18 +165,29 @@ export class ScreenTracker {
 
   private async tick(): Promise<void> {
     for (const [sessionId, s] of this.sessions) {
+      if (this.stopped) return;
       if (!s.dirty || s.inflight || s.viewers.size === 0) continue;
       s.inflight = true;
       s.dirty = false;
       try {
         const screen = await this.opts.backend.getScreen(sessionId);
+        // A `stop()` may have landed while `getScreen` was in flight: never reach the sink after it.
+        if (this.stopped) continue;
         this.processScreen(sessionId, s, screen);
       } catch (err) {
-        this.log.warn("getScreen failed; dropping session", {
-          session: sessionId.slice(0, 12),
-          err: String(err),
-        });
-        this.sessionRemoved(sessionId);
+        if (err instanceof SessionGone) {
+          this.log.warn("getScreen: session gone; dropping", { session: sessionId.slice(0, 12) });
+          this.opts.onSessionGone?.(sessionId);
+          this.sessionRemoved(sessionId);
+        } else {
+          // Transient error (RPC timeout, etc.): keep viewers, resync everyone next tick.
+          this.log.warn("getScreen failed; will retry", {
+            session: sessionId.slice(0, 12),
+            err: err instanceof Error ? err.name : String(err),
+          });
+          for (const v of s.viewers.values()) v.forceSnapshot = true;
+          s.dirty = true;
+        }
       } finally {
         s.inflight = false;
       }
@@ -210,15 +239,25 @@ export class ScreenTracker {
       if (changed.length > SNAPSHOT_RATIO * rows) forceSnapshotAll = true;
     }
 
-    s.gen += 1;
+    const cursorChanged =
+      !s.lastCursor || s.lastCursor.x !== screen.cursor.x || s.lastCursor.y !== screen.cursor.y;
+    // Nothing to say this tick: don't advance `gen` or wake an already-current viewer.
+    const noOp = !forceSnapshotAll && delta === 0 && changed.length === 0 && !cursorChanged;
+
+    if (!noOp) s.gen += 1;
     s.lastKeys = keys;
     s.lastCols = screen.cols;
     s.lastRows = screen.rows;
+    s.lastCursor = screen.cursor;
 
     const base = { sessionId, cursor: screen.cursor, scrollbackTotal: s.reported, gen: s.gen };
-    /** `degrade` is forced for a starved viewer; otherwise it is decided by the 256 KB cap. */
-    const snapshot = (degrade: boolean): InnerMessage => {
-      const full: InnerMessage = {
+    const maxBytes = this.opts.maxEncodedBytes ?? 262_144;
+    // Encoded once per tick (not once per viewer): every lagging/new viewer this tick shares it.
+    let fullMsg: InnerMessageOf<"screen.snapshot"> | undefined;
+    let fullBytes: number | undefined;
+    let degradedMsg: InnerMessageOf<"screen.snapshot"> | undefined;
+    const getFull = (): InnerMessageOf<"screen.snapshot"> => {
+      fullMsg ??= {
         type: "screen.snapshot",
         ...base,
         cols: screen.cols,
@@ -226,14 +265,49 @@ export class ScreenTracker {
         lines: screen.lines,
         reset: reset || undefined,
       };
-      if (degrade || encodeCbor(full).byteLength > (this.opts.maxEncodedBytes ?? 262_144)) {
-        return { ...full, lines: screen.lines.map(stripStyles), degraded: true };
+      return fullMsg;
+    };
+    const getDegraded = (): InnerMessageOf<"screen.snapshot"> => {
+      if (!degradedMsg) {
+        degradedMsg = { ...getFull(), lines: screen.lines.map(stripStyles), degraded: true };
+        // stripStyles is the only fallback we have; if it's still too big, send it anyway but say so.
+        if (!s.oversizeWarned) {
+          const bytes = encodeCbor(degradedMsg).byteLength;
+          if (bytes > maxBytes) {
+            this.log.warn("screen.snapshot exceeds maxEncodedBytes even after stripStyles", {
+              session: sessionId.slice(0, 12),
+              bytes,
+              maxEncodedBytes: maxBytes,
+            });
+            s.oversizeWarned = true;
+          }
+        }
       }
-      return full;
+      return degradedMsg;
+    };
+    /** `starved` forces the degraded path; otherwise size against the 256 KB (default) cap decides. */
+    const snapshotFor = (starved: boolean): InnerMessage => {
+      if (starved) return getDegraded();
+      fullBytes ??= encodeCbor(getFull()).byteLength;
+      return fullBytes > maxBytes ? getDegraded() : getFull();
     };
     const diff: InnerMessage = { type: "screen.diff", ...base, scroll: delta, changed };
 
-    for (const [conn, v] of s.viewers) {
+    // Fair service order under a scarce budget: most-coalesced viewer first; ties broken by
+    // rotating the start offset each tick, so no viewer is stuck permanently at the back.
+    const entries = [...s.viewers.entries()];
+    const n = entries.length;
+    const offset = s.rrOffset % n;
+    const rotated = entries.slice(offset).concat(entries.slice(0, offset));
+    const ordered = rotated
+      .map((entry, idx) => ({ entry, idx }))
+      .sort((a, b) => b.entry[1].skipped - a.entry[1].skipped || a.idx - b.idx)
+      .map((x) => x.entry);
+    s.rrOffset = (s.rrOffset + 1) % n;
+
+    for (const [conn, v] of ordered) {
+      const stale = v.lastSentGen !== s.gen;
+      if (!stale && !v.forceSnapshot) continue; // already has this exact generation; nothing to do
       if (!this.spend()) {
         // Global budget exhausted this tick: coalesce. `lastSentGen` stays stale, so this viewer
         // is served a snapshot on the next tick it wins the budget.
@@ -243,7 +317,7 @@ export class ScreenTracker {
       const starved = v.skipped >= COALESCE_DEGRADE_TICKS;
       const upToDate =
         v.lastSentGen === s.gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
-      this.opts.sink(conn, upToDate ? diff : snapshot(starved));
+      this.opts.sink(conn, upToDate ? diff : snapshotFor(starved));
       v.lastSentGen = s.gen;
       v.forceSnapshot = false;
       v.skipped = 0;
@@ -251,18 +325,17 @@ export class ScreenTracker {
   }
 
   /**
-   * One token bucket across every viewer of every session: all frames leave through the agent's
-   * single relay socket, which the relay caps at 60 msg/s per connection (close 4429).
+   * One continuously-refilling token bucket across every viewer of every session: all frames
+   * leave through the agent's single relay socket, which the relay caps at 60 msg/s (close 4429).
    */
   private spend(): boolean {
     const max = this.opts.maxFramesPerSecond ?? 40;
     const now = this.now();
-    if (now - this.budget.windowStart >= 1000) {
-      this.budget = { windowStart: now, count: 1 };
-      return true;
-    }
-    if (this.budget.count >= max) return false;
-    this.budget.count += 1;
+    const elapsed = Math.max(0, now - this.budget.last);
+    this.budget.tokens = Math.min(max, this.budget.tokens + (elapsed * max) / 1000);
+    this.budget.last = now;
+    if (this.budget.tokens < 1) return false;
+    this.budget.tokens -= 1;
     return true;
   }
 }

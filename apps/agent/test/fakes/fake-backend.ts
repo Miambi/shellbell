@@ -8,6 +8,7 @@ import type {
 import {
   type BackendEvent,
   type Screen,
+  SessionGone,
   type TerminalBackend,
   Unsupported,
 } from "../../src/backends/types.js";
@@ -38,8 +39,11 @@ export class FakeBackend implements TerminalBackend {
    */
   tmuxWindowIds?: () => Set<string>;
   tmuxWindowIdOf?: (nativeId: string) => string | undefined;
+  /** Set to make `getScreen` await it before resolving; used to test races against `stop()`. */
+  getScreenGate: Promise<void> | null = null;
   private sessions = new Map<string, S>();
   private handlers = new Set<(e: BackendEvent) => void>();
+  private pendingErrors = new Map<string, Error>();
 
   /** Pass "tmux" to stand in for the tmux backend in registry tests. */
   constructor(readonly name: BackendName = "iterm2") {}
@@ -82,6 +86,10 @@ export class FakeBackend implements TerminalBackend {
   emit(e: BackendEvent): void {
     for (const h of this.handlers) h(e);
   }
+  /** The next `getScreen(id)` call throws `err` once, instead of returning a screen. */
+  throwOnNextGetScreen(id: string, err: Error): void {
+    this.pendingErrors.set(id, err);
+  }
   async connect(): Promise<void> {}
   async close(): Promise<void> {}
   async listSessions(): Promise<SessionInfo[]> {
@@ -102,8 +110,14 @@ export class FakeBackend implements TerminalBackend {
   }
   async getScreen(id: string): Promise<Screen> {
     this.getScreenCalls++;
+    if (this.getScreenGate) await this.getScreenGate;
+    const pending = this.pendingErrors.get(id);
+    if (pending) {
+      this.pendingErrors.delete(id);
+      throw pending;
+    }
     const s = this.sessions.get(id);
-    if (!s) throw new Error(`session gone: ${id}`);
+    if (!s) throw new SessionGone(id);
     return {
       cols: s.cols,
       rows: s.rows,

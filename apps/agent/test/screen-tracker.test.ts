@@ -1,6 +1,7 @@
-import type { InnerMessage } from "@shellbell/protocol";
+import { applyDiff, applySnapshot, type InnerMessage, type ScreenState } from "@shellbell/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createLogger } from "../src/log.js";
+import { SessionGone } from "../src/backends/types.js";
+import { createLogger, type Logger } from "../src/log.js";
 import { ScreenTracker } from "../src/screen-tracker.js";
 import { FakeBackend } from "./fakes/fake-backend.js";
 
@@ -166,42 +167,246 @@ describe("ScreenTracker", () => {
     expect(sent.length).toBeLessThanOrEqual(40); // 70 attempts, 40 tokens
   });
 
-  it("sends a degraded, style-stripped snapshot to a viewer coalesced 3+ consecutive ticks", async () => {
-    // maxFramesPerSecond 1 means exactly one frame per 1 s window; "hog" is first in the viewer map
-    // and takes it every time, so "starved" accumulates coalesced ticks.
+  it("suppresses no-op ticks: unchanged content wakes no already-current viewer", async () => {
+    tracker.setViewed("p1", "S");
+    await flush();
+    const before = sent.length;
+    tracker.markDirty("S"); // dirty, but the backend's content is unchanged
+    await flush();
+    expect(sent.length).toBe(before);
+  });
+
+  it("resize forces a fresh snapshot even mid-session", async () => {
+    tracker.setViewed("p1", "S");
+    await flush();
+    backend.appendLine("S", "d");
+    tracker.markDirty("S");
+    await flush(); // p1 now has a diff behind it (gen 2)
+    backend.addSession("S", { cols: 30, rows: 3, lines: ["x", "y", "z"], scrollbackTotal: 11 });
+    tracker.markDirty("S");
+    await flush();
+    expect(sent.at(-1)?.msg.type).toBe("screen.snapshot");
+  });
+
+  it("setIntervalMs re-arms the timer at the new interval", async () => {
+    tracker.setViewed("p1", "S");
+    await flush();
+    tracker.setIntervalMs(500);
+    backend.appendLine("S", "d");
+    tracker.markDirty("S");
+    await vi.advanceTimersByTimeAsync(200); // < 500 ms since the re-arm: no tick yet
+    expect(sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(310); // 510 ms total: past the new interval
+    expect(sent).toHaveLength(2);
+  });
+
+  it("stop() prevents a getScreen already in flight from reaching the sink", async () => {
+    let release: () => void = () => {};
+    backend.getScreenGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    tracker.setViewed("p1", "S");
+    await vi.advanceTimersByTimeAsync(130); // tick fires; getScreen is now awaiting the gate
+    expect(backend.getScreenCalls).toBeGreaterThan(0);
+    tracker.stop();
+    release();
+    await vi.advanceTimersByTimeAsync(0); // let the in-flight getScreen settle
+    expect(sent).toHaveLength(0);
+  });
+
+  describe("getScreen error handling (spec §8.6)", () => {
+    it("SessionGone drops session state and viewers, and calls onSessionGone", async () => {
+      const onSessionGone = vi.fn();
+      tracker.stop();
+      sent = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => sent.push({ conn, msg }),
+        log,
+        onSessionGone,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("p1", "S");
+      await flush();
+      backend.throwOnNextGetScreen("S", new SessionGone("S"));
+      backend.appendLine("S", "d");
+      tracker.markDirty("S");
+      await flush();
+      expect(onSessionGone).toHaveBeenCalledWith("S");
+      expect(tracker.viewedBy("S")).toEqual([]);
+    });
+
+    it("a transient error keeps viewers and resyncs them on the next successful tick", async () => {
+      tracker.setViewed("p1", "S");
+      await flush(); // initial snapshot
+      backend.throwOnNextGetScreen("S", new Error("rpc timeout"));
+      backend.appendLine("S", "d");
+      tracker.markDirty("S");
+      await flush(); // this tick's getScreen throws; the viewer must not be dropped
+      expect(tracker.viewedBy("S")).toEqual(["p1"]);
+      expect(sent).toHaveLength(1); // nothing sent for the failed tick
+      await flush(); // retried automatically: `dirty` was re-armed after the failure
+      expect(sent).toHaveLength(2);
+      expect(sent[1]?.msg.type).toBe("screen.snapshot"); // forceSnapshot was set after the error
+    });
+  });
+
+  describe("fairness under a scarce global budget", () => {
+    it("10 viewers, continuous output for 3s: every viewer is served, total capped at 40/s", async () => {
+      const conns = Array.from({ length: 10 }, (_, i) => `v${i}`);
+      for (const c of conns) tracker.setViewed(c, "S");
+      const ticksPerSecond = 1000 / 125; // default intervalMs
+      const seconds = 3;
+      for (let t = 0; t < ticksPerSecond * seconds; t++) {
+        backend.appendLine("S", `l${t}`);
+        tracker.markDirty("S");
+        await vi.advanceTimersByTimeAsync(125);
+      }
+      expect(sent.length).toBeLessThanOrEqual(40 * seconds);
+      for (const c of conns) {
+        const count = sent.filter((s) => s.conn === c).length;
+        expect(count).toBeGreaterThanOrEqual(2);
+      }
+    });
+
+    it("a viewer coalesced 3+ consecutive ticks is served a degraded catch-up snapshot, fairly", async () => {
+      // 4 viewers, 1 token/tick: a fair round-robin serves exactly one viewer per pass, in order,
+      // so whichever viewer is served last has been coalesced 3+ times when its turn finally comes.
+      tracker.stop();
+      sent = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => sent.push({ conn, msg }),
+        log,
+        maxFramesPerSecond: 1,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      const conns = ["v0", "v1", "v2", "v3"];
+      for (const c of conns) tracker.setViewed(c, "S");
+      const pass = async () => {
+        backend.appendLine("S", "out");
+        tracker.markDirty("S");
+        await vi.advanceTimersByTimeAsync(1100); // > 1 bucket window: at most one fresh token
+      };
+      // Drive passes until every viewer has been served once (bounded so a fairness regression
+      // that starves someone fails loudly instead of hanging).
+      const seen = new Set<string>();
+      for (let i = 0; i < 10 && seen.size < conns.length; i++) {
+        await pass();
+        for (const { conn } of sent) seen.add(conn);
+      }
+      // No viewer starves: exactly one token is minted per successful tick, so once every viewer
+      // has appeared, each has appeared exactly once — no repeats, no omissions.
+      expect(seen).toEqual(new Set(conns));
+      expect(sent).toHaveLength(conns.length);
+      const last = sent.at(-1);
+      expect(conns).toContain(last?.conn);
+      const frame = last?.msg;
+      if (frame?.type !== "screen.snapshot")
+        throw new Error(`expected snapshot, got ${frame?.type}`);
+      expect(frame.degraded).toBe(true); // the last one in was necessarily coalesced 3+ times
+      for (const line of frame.lines) {
+        expect(line.r.length).toBeLessThanOrEqual(1);
+        expect(line.r[0]?.fg).toBeUndefined();
+      }
+    });
+  });
+
+  it("still oversize after stripStyles: sends the degraded frame anyway, warns once per session", async () => {
     tracker.stop();
     sent = [];
+    const warn = vi.fn();
+    const tinyLog: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn,
+      error: () => {},
+      child: () => tinyLog,
+    };
     tracker = new ScreenTracker({
       backend,
       sink: (conn, msg) => sent.push({ conn, msg }),
-      log,
-      maxFramesPerSecond: 1,
+      log: tinyLog,
+      maxEncodedBytes: 10,
       now: () => Date.now(),
     });
     tracker.start();
-    tracker.setViewed("hog", "S");
-    tracker.setViewed("starved", "S");
-    // Each pass advances past the 1 s bucket window, so exactly one token is issued per pass.
-    const pass = async () => {
-      backend.appendLine("S", "out");
-      tracker.markDirty("S");
-      await vi.advanceTimersByTimeAsync(1100);
-    };
-    await pass();
-    await pass();
-    await pass();
-    expect(sent.every((x) => x.conn === "hog")).toBe(true); // starved got nothing: 3 coalesced ticks
-    tracker.dropViewer("hog");
-    await pass(); // now "starved" wins the token
-    const starved = sent.filter((x) => x.conn === "starved");
-    expect(starved).toHaveLength(1);
-    const frame = starved[0]?.msg;
+    tracker.setViewed("p1", "S");
+    await flush();
+    expect(sent).toHaveLength(1);
+    const frame = sent[0]?.msg;
     if (frame?.type !== "screen.snapshot") throw new Error(`expected snapshot, got ${frame?.type}`);
     expect(frame.degraded).toBe(true);
-    // stripStyles collapses every row to at most one unstyled run
-    for (const line of frame.lines) {
-      expect(line.r.length).toBeLessThanOrEqual(1);
-      expect(line.r[0]?.fg).toBeUndefined();
-    }
+    for (const line of frame.lines) expect(line.r.length).toBeLessThanOrEqual(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    backend.appendLine("S", "d");
+    tracker.markDirty("S");
+    await flush();
+    expect(warn).toHaveBeenCalledTimes(1); // logged once per session, not every tick
+  });
+
+  describe("round-trips through the shipped screen applier", () => {
+    const replay = (state: ScreenState | undefined, msg: InnerMessage): ScreenState => {
+      if (msg.type === "screen.snapshot") return applySnapshot(state, msg);
+      if (msg.type !== "screen.diff") throw new Error(`unexpected message type ${msg.type}`);
+      if (!state) throw new Error("diff received before any snapshot");
+      const { state: next, gap } = applyDiff(state, msg);
+      expect(gap).toBe(false);
+      return next;
+    };
+
+    it("(a) append: a viewer's diff reconstructs the backend's screen", async () => {
+      tracker.setViewed("p1", "S");
+      await flush();
+      let state = replay(undefined, sent[0]?.msg as InnerMessage);
+      backend.appendLine("S", "d");
+      tracker.markDirty("S");
+      await flush();
+      state = replay(state, sent[1]?.msg as InnerMessage);
+      const screen = await backend.getScreen("S");
+      expect(state.lines).toEqual(screen.lines);
+    });
+
+    it("(b) saturated scroll-by-overlap reconstructs the backend's screen", async () => {
+      backend.saturated = true;
+      backend.capabilities = { ...backend.capabilities, absoluteLines: false };
+      tracker.setViewed("p1", "S");
+      await flush();
+      let state = replay(undefined, sent[0]?.msg as InnerMessage);
+      backend.appendLine("S", "d");
+      tracker.markDirty("S");
+      await flush();
+      state = replay(state, sent[1]?.msg as InnerMessage);
+      const screen = await backend.getScreen("S");
+      expect(state.lines).toEqual(screen.lines);
+    });
+
+    it("(c) clear: the reset snapshot reconstructs the backend's screen", async () => {
+      tracker.setViewed("p1", "S");
+      await flush();
+      let state = replay(undefined, sent[0]?.msg as InnerMessage);
+      backend.clear("S");
+      tracker.markDirty("S");
+      await flush();
+      state = replay(state, sent[1]?.msg as InnerMessage);
+      const screen = await backend.getScreen("S");
+      expect(state.lines).toEqual(screen.lines);
+    });
+
+    it("(d) a lagging viewer's catch-up snapshot reconstructs the backend's screen", async () => {
+      tracker.setViewed("p1", "S");
+      await flush();
+      backend.appendLine("S", "d");
+      tracker.markDirty("S");
+      await flush();
+      tracker.setViewed("p2", "S"); // joins lagging: gets a full catch-up snapshot
+      await flush();
+      const p2msgs = sent.filter((s) => s.conn === "p2");
+      const state = replay(undefined, p2msgs[0]?.msg as InnerMessage);
+      const screen = await backend.getScreen("S");
+      expect(state.lines).toEqual(screen.lines);
+    });
   });
 });
