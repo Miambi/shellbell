@@ -4,7 +4,7 @@ import { EventKindSchema } from "./ctrl.js";
 import { Bytes } from "./envelope.js";
 import { NamedKeySchema } from "./keys.js";
 
-export const BackendNameSchema = z.enum(["iterm2", "tmux"]);
+export const BackendNameSchema = z.enum(["iterm2", "tmux", "herdr"]);
 export type BackendName = z.infer<typeof BackendNameSchema>;
 
 const byte = z.number().int().min(0).max(255);
@@ -49,7 +49,9 @@ export const SessionInfoSchema = z.object({
   tabIndex: z.number().int(),
   paneIndex: z.number().int(),
   isFocusedOnMac: z.boolean(),
-  state: z.enum(["unknown", "editing", "running", "finished"]),
+  // spec 8.13: `blocked` is Herdr's "an agent is waiting for a human" state. It is a first-class
+  // session state, not a flavour of `running`: the app renders it differently and it rings.
+  state: z.enum(["unknown", "editing", "running", "finished", "blocked"]),
 });
 export type SessionInfo = z.infer<typeof SessionInfoSchema>;
 

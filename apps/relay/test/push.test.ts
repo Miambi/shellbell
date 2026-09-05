@@ -60,6 +60,8 @@ describe("push text", () => {
     expect(formatDuration(3_780_000)).toBe("1h 03m");
     expect(pushBody("prompt", 0, 43_000)).toBe("A command finished — exit 0 after 43s");
     expect(pushBody("idle")).toBe("A session went quiet — waiting for you?");
+    expect(pushBody("blocked")).toBe("An agent is waiting for you");
+    expect(pushBody("exit")).toBe("A session needs attention");
   });
 });
 
@@ -161,5 +163,22 @@ describe("notify → push", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(calls()).toBe(20);
     agent.ws.close();
+  });
+
+  it("pushes the blocked body for a blocked notify", async () => {
+    const { sent } = installFetchStub();
+    // `pairedWithToken()` leaves the phone connected with NO lease, and the DO only treats a phone
+    // as attentive while `leaseUntil > now` -- so this really is pushed.
+    const { mac, agent, p } = await pairedWithToken();
+    agent.sendCtrl(mac.fp, { type: "notify", sessionId: "herdr:term_a", kind: "blocked" });
+    await settle();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      body: "An agent is waiting for you",
+      data: { sessionId: "herdr:term_a", kind: "blocked" },
+    });
+    // Close both sockets, exactly like every sibling test in this file.
+    agent.ws.close();
+    p.ws.close();
   });
 });

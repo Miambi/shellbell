@@ -39,6 +39,10 @@ export function pushBody(
     }
     case "idle":
       return "A session went quiet — waiting for you?";
+    case "blocked":
+      // spec 8.13/11.3: deliberately generic — the relay never learns which agent, which
+      // session title, or what it is asking.
+      return "An agent is waiting for you";
     default:
       return "A session needs attention";
   }

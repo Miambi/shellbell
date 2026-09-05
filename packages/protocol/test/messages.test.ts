@@ -54,6 +54,7 @@ describe("ctrl messages", () => {
       { type: "push-token", token: "ExponentPushToken[x]", platform: "ios", enabled: true },
       { type: "lease", ttlMs: 60000 },
       { type: "notify", sessionId: "iterm2:1", kind: "prompt", exitCode: 0, durationMs: 12000 },
+      { type: "notify", sessionId: "herdr:term_a", kind: "blocked" },
       { type: "phone-connected", phoneFp: FP, connId: "abc", name: "iPhone" },
       { type: "phone-disconnected", phoneFp: FP, connId: "abc" },
       { type: "error", code: "x", message: "y" },
@@ -140,6 +141,27 @@ describe("inner messages", () => {
       },
       { type: "history", sessionId: "iterm2:x", before: 10, lines: [line], oldestAvailable: 0 },
       { type: "event", sessionId: "iterm2:x", kind: "idle", durationMs: 5000, at: 1 },
+      { type: "event", sessionId: "herdr:term_a", kind: "blocked", at: 1 },
+      {
+        type: "sessions",
+        list: [
+          {
+            id: "herdr:term_a",
+            backend: "herdr",
+            title: "Claude Code",
+            cols: 80,
+            rows: 24,
+            windowId: "herdr:w1",
+            windowNumber: 1,
+            tabId: "herdr:w1:t1",
+            tabIndex: 0,
+            paneIndex: 0,
+            isFocusedOnMac: false,
+            state: "blocked",
+          },
+        ],
+      },
+      { type: "session.create", reqId: "r10", in: { kind: "tab", backend: "herdr" } },
       { type: "ack", reqId: "r1", ok: true, sessionId: "iterm2:y" },
       { type: "subscribe", sessionId: "iterm2:x" },
       { type: "subscribe", sessionId: null },
@@ -174,5 +196,8 @@ describe("inner messages", () => {
     expect(() => parseInner({ type: "event", sessionId: "x", kind: "bell", at: 1 })).toThrow(
       /malformed/,
     );
+    expect(() =>
+      parseInner({ type: "session.create", reqId: "r", in: { kind: "tab", backend: "kitty" } }),
+    ).toThrow(/malformed/);
   });
 });

@@ -5,7 +5,7 @@ import { Bytes, E2EBodySchema, FpSchema } from "./envelope.js";
 export const MAX_PAIRINGS = 10;
 
 export const RoleSchema = z.enum(["agent", "phone", "pairing"]);
-export const EventKindSchema = z.enum(["prompt", "idle", "exit"]);
+export const EventKindSchema = z.enum(["prompt", "idle", "exit", "blocked"]);
 export const AuthFailReasonSchema = z.enum([
   "bad-sig",
   "not-paired",
@@ -80,7 +80,7 @@ export const CtrlMessageSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("notify"),
     sessionId: z.string().min(1).max(128),
-    kind: z.enum(["prompt", "idle"]),
+    kind: z.enum(["prompt", "idle", "blocked"]),
     exitCode: z.number().int().optional(),
     durationMs: z.number().int().nonnegative().optional(),
   }),
