@@ -38,6 +38,7 @@ const cases: [string, string, Line][] = [
   ["control chars stripped", "a\x07b\x08c", { r: [{ t: "abc" }] }],
   ["tab expands to next multiple of 8", "ab\tc", { r: [{ t: "ab      c" }] }],
   ["tab at column 8", "12345678\tx", { r: [{ t: "12345678        x" }] }],
+  ["tab after wide char", "漢\tx", { r: [{ t: "漢      x", n: 9 }] }],
   ["trailing spaces trimmed", "hi   ", { r: [{ t: "hi" }] }],
   ["trailing spaces with bg kept", `hi${E}41m   `, { r: [{ t: "hi" }, { t: "   ", bg: 1 }] }],
   ["malformed csi emitted literally", "a\x1b[12", { r: [{ t: "a\x1b[12" }] }],

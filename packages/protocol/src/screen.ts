@@ -101,13 +101,32 @@ export function mergeRuns(runs: Run[]): Run[] {
   return out;
 }
 
-/** Drop trailing runs that are only spaces and carry no background color. */
+/** Drop trailing runs that are only spaces and carry no background color. Trim trailing spaces from the final run if it has no background color, adjusting n arithmetically. */
 export function trimTrailing(runs: Run[]): Run[] {
   const out = runs.slice();
   while (out.length > 0) {
     const last = out[out.length - 1] as Run;
     if (last.bg === undefined && /^ *$/.test(last.t)) out.pop();
     else break;
+  }
+  // Trim trailing spaces from the last run if it has no background color
+  if (out.length > 0) {
+    const last = out[out.length - 1] as Run;
+    if (last.bg === undefined) {
+      const trimmed = last.t.replace(/\s+$/, "");
+      if (trimmed === "") {
+        out.pop();
+      } else if (trimmed !== last.t) {
+        // Copy the run to avoid mutating caller's object
+        const copy: Run = { ...last };
+        const removed = last.t.length - trimmed.length;
+        const cells = (last.n ?? codePoints(last.t)) - removed;
+        copy.t = trimmed;
+        if (cells !== codePoints(trimmed)) copy.n = cells;
+        else delete copy.n;
+        out[out.length - 1] = copy;
+      }
+    }
   }
   return out;
 }

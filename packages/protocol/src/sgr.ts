@@ -35,7 +35,8 @@ function toRun(text: string, st: Style): Run {
   const cells = stringCells(text);
   const cp = codePoints(text);
   if (cells !== cp) {
-    // Only set n if the difference is not entirely due to actual control characters (not combining marks)
+    // Only the literal ESC from malformed-CSI fallback can reach here as a control char.
+    // Count it separately from combining marks to avoid spurious n when emitting malformed CSI.
     let controlCharCount = 0;
     for (const ch of text) {
       const code = ch.charCodeAt(0);
@@ -185,23 +186,9 @@ export function parseSgrLine(text: string): Line {
       continue;
     }
     buf += ch;
-    if (code < 0xd800 || code > 0xdbff) col += 1;
+    if (code < 0xd800 || code > 0xdbff) col += cellWidth(code);
     i++;
   }
   flush();
-  const lines = trimTrailing(mergeRuns(runs));
-  // Trim trailing spaces from the last run if it has no background color
-  if (lines.length > 0) {
-    const last = lines[lines.length - 1]!;
-    if (last.bg === undefined) {
-      const trimmed = last.t.replace(/\s+$/, "");
-      if (trimmed === "") {
-        lines.pop();
-      } else if (trimmed !== last.t) {
-        last.t = trimmed;
-        delete last.n;
-      }
-    }
-  }
-  return { r: lines };
+  return { r: trimTrailing(mergeRuns(runs)) };
 }

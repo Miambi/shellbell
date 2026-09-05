@@ -50,6 +50,11 @@ describe("runs", () => {
     ]);
     expect(trimTrailing([{ t: "  " }])).toEqual([]);
   });
+  it("trims trailing spaces from the last run if no bg, adjusting n arithmetically", () => {
+    expect(trimTrailing([{ t: "hi   " }])).toEqual([{ t: "hi" }]);
+    expect(trimTrailing([{ t: "漢字  ", n: 6 }])).toEqual([{ t: "漢字", n: 4 }]);
+    expect(trimTrailing([{ t: "hi   ", bg: 1 }])).toEqual([{ t: "hi   ", bg: 1 }]);
+  });
   it("counts code points and strips styles", () => {
     expect(codePoints("a🚀b")).toBe(3);
     expect(
