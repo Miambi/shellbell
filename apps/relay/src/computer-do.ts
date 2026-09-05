@@ -50,6 +50,7 @@ const UNAUTH_TIMEOUT_MS = 10_000;
 const PAIRING_TIMEOUT_MS = 90_000;
 const WINDOW_MAX_ADMITTED = 5;
 const GC_AFTER_MS = 90 * 24 * 3600 * 1000;
+const ORPHAN_GC_MS = 60_000;
 const RING_LIMIT_MS = 60_000;
 const RING_ROWS_CAP = 200;
 const PUSH_PER_HOUR = 20;
@@ -207,6 +208,10 @@ export class ComputerDO extends DurableObject<Env> {
       await this.ctx.storage.deleteAll();
       return;
     }
+    if (!computer && this.ctx.getWebSockets().length === 0) {
+      await this.ctx.storage.deleteAll();
+      return;
+    }
     await this.scheduleAlarm();
   }
 
@@ -229,6 +234,9 @@ export class ComputerDO extends DurableObject<Env> {
       .toArray()[0];
     if (computer && !this.agentSocket()) {
       earliest = Math.min(earliest, computer.last_seen + GC_AFTER_MS);
+    }
+    if (!computer) {
+      earliest = Math.min(earliest, now + ORPHAN_GC_MS);
     }
     if (earliest === Number.POSITIVE_INFINITY) return;
     await this.ctx.storage.setAlarm(Math.max(now + 1000, earliest));
@@ -271,7 +279,10 @@ export class ComputerDO extends DurableObject<Env> {
     const v = verifyAuthMessage(msg, att.connId, fromBase64Url(att.nonce));
     if (v !== "ok") return fail(v);
     const now = Date.now();
-    const minFrameMs = Number(this.env.MIN_FRAME_MS ?? "125") || 125;
+    const parsedMinFrameMs = Number(this.env.MIN_FRAME_MS);
+    const minFrameMs = Number.isNaN(parsedMinFrameMs)
+      ? 125
+      : Math.min(2000, Math.max(50, Math.round(parsedMinFrameMs)));
 
     if (msg.role === "agent") {
       if (msg.fp !== this.fp) return fail("fp-mismatch");
