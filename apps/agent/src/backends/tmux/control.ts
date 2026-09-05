@@ -44,10 +44,15 @@ interface Pending {
   verb: string;
 }
 
+interface Block {
+  lines: string[];
+  num: string;
+}
+
 export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; exit: [] }> {
   private child: ChildProcess | null = null;
   private queue: Pending[] = [];
-  private current: { lines: string[] } | null = null;
+  private current: Block | null = null;
   private currentPending: Pending | null = null;
   private started = false;
   private readyTimer: NodeJS.Timeout | null = null;
@@ -89,7 +94,7 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
     };
     rl.on("line", (line) => {
       if (line.startsWith("%begin")) {
-        this.current = { lines: [] };
+        this.current = { lines: [], num: line.split(" ")[1] ?? "" };
         this.currentPending = this.started ? (this.queue.shift() ?? null) : null;
         return;
       }
@@ -98,6 +103,13 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
         const pending = this.currentPending;
         this.current = null;
         this.currentPending = null;
+        // spec 8.10: %begin/%end/%error share one sequence number per reply block. A mismatch
+        // means the stream desynced (e.g. a dropped or reordered line) -- worth a warn, but the
+        // FIFO queue is still the best correlation we have, so the pending command still resolves.
+        const endNum = line.split(" ")[1] ?? "";
+        if (block && block.num !== endNum) {
+          this.log.warn("tmux %begin/%end number mismatch", { begin: block.num, end: endNum });
+        }
         if (!this.started) {
           this.started = true;
           settleReady();

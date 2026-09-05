@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { TmuxControl, tmuxQuote, unescapeOctal, verbOf } from "../src/backends/tmux/control.js";
-import { createLogger } from "../src/log.js";
+import { createLogger, type Logger } from "../src/log.js";
 
 /** Lets the PassThrough streams below deliver their queued `data`/`line` events. */
 const flush = () => new Promise((r) => setImmediate(r));
@@ -75,6 +75,31 @@ describe("TmuxControl", () => {
     await expect(p2).rejects.toThrow(/tmux error/);
     expect(outputs).toEqual(["%3"]);
     expect(layouts).toBe(1);
+    c.stop();
+  });
+
+  it("warns on a %begin/%end number mismatch but still resolves the pending command by FIFO", async () => {
+    const { spawnImpl, stdout } = fakeSpawn();
+    const warns: [string, Record<string, unknown> | undefined][] = [];
+    const fakeLog: Logger = {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (m, f) => warns.push([m, f]),
+      error: () => undefined,
+      child: () => fakeLog,
+    };
+    const c = new TmuxControl({ sessionId: "$0", log: fakeLog, spawnImpl });
+    const started = c.start();
+    stdout.write("%begin 1 0 0\n%end 1 0 0\n");
+    await started;
+
+    const p = c.command("list-panes -a");
+    await flush();
+    // The reply's %end carries a different sequence number than its %begin -- a desync, not a
+    // dropped reply -- so the command still resolves via the FIFO queue, but a warn is logged.
+    stdout.write("%begin 2 1 0\n%3\tmain\n%end 3 1 0\n");
+    expect(await p).toEqual(["%3\tmain"]);
+    expect(warns).toEqual([["tmux %begin/%end number mismatch", { begin: "2", end: "3" }]]);
     c.stop();
   });
 
