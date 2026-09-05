@@ -1197,8 +1197,9 @@ and compare `content_revision`; on change emit `screen-changed`. Non-viewed pane
 `{ kind: "agent-state", sessionId, state: "working"|"blocked"|"idle"|"done"|"unknown", agent }`.
 `EventEngine` maps it: `blocked` → ring `kind:"blocked"` immediately (once per transition, 60 s limit);
 `working → idle|done` after ≥ `notifyMinCommandMs` of `working` → ring `kind:"prompt"` with `durationMs`
-and no `exitCode`; `unknown` → nothing. `SessionInfo.state` shows `running` for `working`, `prompt` for
-`idle|done`, and a new `blocked`. Protocol changes: `EventKindSchema` += `"blocked"`; `notify.kind`
+and no `exitCode`; `unknown` → nothing. `SessionInfo.state` shows `running` for `working`, `finished` for
+`idle|done` (the `command-end` precedent), and a new `blocked`. A pane that is already `blocked`
+when first seen (agent start, Herdr reconnect) does not ring — adoption is not a transition. Protocol changes: `EventKindSchema` += `"blocked"`; `notify.kind`
 += `"blocked"` with push body **"An agent is waiting for you"** (11.3); `SessionInfo.state` += `"blocked"`.
 Herdr has no prompt/command lifecycle for plain shells, so `capabilities.prompts` is `false` and idle
 heuristics (8.8) apply to shells as with tmux. Caveat: `pane.focus` marks a `done` agent as seen
@@ -1211,7 +1212,7 @@ through `pane.send_text` as raw bytes (`bytesForKey`). Never log the text; log l
 
 **Create / focus.** `session.create` with `where.kind = "tab"` → `tab.create {workspace_id, focus:false}`
 (workspace of the reference pane, else the focused one); `where.kind = "split"` → `pane.split
-{target_pane_id, direction: "right"|"down"}`; `left/up` are `unsupported`. `focus` → `pane.focus`.
+{target_pane_id, direction: "right"|"down"}`; `left/up` are `unsupported`; Shellbell `vertical` → Herdr `right`, `horizontal` → `down`. `focus` → `pane.focus`.
 Capabilities: `{ subscribe: true, prompts: false, createSession: true, focus: true, history: true,
 absoluteLines: true → false }`.
 
