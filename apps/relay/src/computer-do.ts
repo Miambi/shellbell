@@ -205,19 +205,25 @@ export class ComputerDO extends DurableObject<Env> {
       .toArray()[0];
     if (computer && now - computer.last_seen > GC_AFTER_MS && !this.agentSocket()) {
       for (const ws of this.ctx.getWebSockets()) ws.close(4004, "computer expired");
-      await this.ctx.storage.deleteAll();
+      await this.wipeStorage();
       return;
     }
     if (!computer && this.ctx.getWebSockets().length === 0) {
-      await this.ctx.storage.deleteAll();
+      await this.wipeStorage();
       return;
     }
     await this.scheduleAlarm();
   }
 
+  /** Drop everything, then recreate the empty schema so a still-warm instance keeps working. */
+  private async wipeStorage(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    this.ctx.storage.sql.exec(SCHEMA_SQL);
+  }
+
   /**
-   * Earliest of: unauth/pairing socket deadlines, window expiry, GC deadline.
-   * Always at most 5 s out when something is pending.
+   * Earliest of: unauth/pairing socket deadlines, window expiry, orphan/GC deadline.
+   * Fires at that deadline (never sooner than 1 s from now); no polling clamp.
    */
   private async scheduleAlarm(): Promise<void> {
     const now = Date.now();
