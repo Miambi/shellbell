@@ -72,6 +72,10 @@ export interface StartHerdrOptions {
   retryMs?: number;
   /** Called once, with the pane count, when the backend connects — for the CLI's start banner. */
   onConnected?: (sessions: number) => void;
+  /** Called once, after the very first connect attempt fails, so the CLI's `detecting…` banner
+   * line resolves instead of hanging forever when Herdr just isn't running. The retry loop keeps
+   * going regardless — this fires exactly once, not on every failed retry. */
+  onUnavailable?: () => void;
   backendOptions?: Omit<Partial<HerdrBackendOptions>, "client" | "log">;
 }
 
@@ -91,6 +95,10 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
   let timer: NodeJS.Timeout | null = null;
   let stopped = false;
   let announced = false;
+  /** Fires `onUnavailable` at most once, after the FIRST failed attempt -- retries keep going
+   * silently after that, so the CLI's banner line resolves without being repainted on every
+   * 10 s retry. */
+  let announcedUnavailable = false;
 
   opts.registry.add(backend);
 
@@ -111,6 +119,10 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
       log.debug("herdr not available", {
         error: err instanceof Error ? err.message : String(err),
       });
+      if (opts.onUnavailable && !announcedUnavailable && err instanceof BackendUnavailable) {
+        announcedUnavailable = true;
+        opts.onUnavailable();
+      }
       schedule();
       return;
     }
@@ -131,6 +143,9 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
       if (timer) clearTimeout(timer);
       timer = null;
       void backend.close();
+      // A long-lived host must not keep a dead member registered forever: unregistering also
+      // drops it from `registry.capabilities`'s all-member AND, not just from `connected()`.
+      opts.registry.remove("herdr");
     },
   };
 }

@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { promisify } from "node:util";
 import { relayWsUrl } from "@shellbell/protocol";
 import WebSocket from "ws";
-import { checkHerdr } from "./backends/herdr/start.js";
+import { checkHerdr, type HerdrCheck } from "./backends/herdr/start.js";
 import type { ITerm2AuthError } from "./backends/iterm2/auth.js";
 import { requestCookieAndKey } from "./backends/iterm2/auth.js";
 import { DEFAULT_SOCKET } from "./backends/iterm2/client.js";
@@ -34,7 +34,24 @@ export function plistNodeOk(plistText: string, execPath: string): boolean {
   return path !== undefined && existsSync(path);
 }
 
-export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
+export interface RunDoctorDeps {
+  /** Test seam (Minor, Task 6 review): defaults to a real `checkHerdr()` call against whatever
+   * socket the environment resolves. Inject a thunk bound to a fake/test socket -- e.g.
+   * `() => checkHerdr({ socketPath: fakeHerdr.path })` -- so `doctor.test.ts` can drive the herdr
+   * line through its real outcomes (absent/old/present) without ever touching a real Herdr. */
+  checkHerdr?: () => Promise<HerdrCheck>;
+  /** Test seam: the real implementation runs AppleScript against iTerm2 and, on a machine where
+   * iTerm2 is actually running, can pop a real consent dialog -- never call it from a test. */
+  requestCookieAndKey?: (appName: string) => Promise<{ cookie: string; key: string }>;
+}
+
+export async function runDoctor(
+  p: Paths,
+  cfg: AgentConfig,
+  deps: RunDoctorDeps = {},
+): Promise<Check[]> {
+  const checkHerdrImpl = deps.checkHerdr ?? (() => checkHerdr());
+  const requestCookieAndKeyImpl = deps.requestCookieAndKey ?? requestCookieAndKey;
   const out: Check[] = [];
   out.push({
     name: "identity",
@@ -49,7 +66,7 @@ export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
     fix: "iTerm2 → Settings → General → Magic → Enable Python API",
   });
   try {
-    await requestCookieAndKey("Shellbell");
+    await requestCookieAndKeyImpl("Shellbell");
     out.push({ name: "iTerm2 cookie", ok: true, detail: "granted" });
   } catch (err) {
     const e = err as ITerm2AuthError;
@@ -82,7 +99,7 @@ export async function runDoctor(p: Paths, cfg: AgentConfig): Promise<Check[]> {
   }
   // spec 8.13 (ruling 14): herdr is optional — absent is a PASS, only a broken/old running herdr
   // fails. `checkHerdr` already returns this module's `Check` shape.
-  out.push(await checkHerdr());
+  out.push(await checkHerdrImpl());
   const url = relayWsUrl(cfg.relayUrl, "a".repeat(26));
   const reachable = await new Promise<boolean>((resolve) => {
     const ws = new WebSocket(url, { handshakeTimeout: 5000 });

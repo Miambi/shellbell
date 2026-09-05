@@ -136,4 +136,16 @@ describe("BackendRegistry", () => {
     expect(reg.connected().map((b) => b.name)).toEqual(["iterm2"]);
     expect(reg.capabilitiesOf("herdr:term_a")).toBe(herdr.capabilities);
   });
+
+  it("connected() is ordered by BACKEND_ORDER, not by registration order (Minor, Task 6 review)", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    // Mirrors production: `startHerdrBackend` registers synchronously at startup, while iTerm2
+    // only joins the registry after its own `await connect()` resolves (cli.ts) -- so herdr is
+    // very often the FIRST member added, and `connected()` must not just echo that back.
+    const herdr = new FakeBackend("herdr");
+    const iterm = new FakeBackend();
+    reg.add(herdr);
+    reg.add(iterm);
+    expect(reg.connected().map((b) => b.name)).toEqual(["iterm2", "herdr"]);
+  });
 });

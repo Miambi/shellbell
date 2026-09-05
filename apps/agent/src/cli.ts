@@ -299,6 +299,9 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     registry,
     log,
     onConnected: (n) => print(`  herdr      connected · ${n} pane${n === 1 ? "" : "s"}`),
+    // Resolves the `detecting…` banner line below when Herdr just isn't running -- the (silent)
+    // 10 s retry loop keeps going regardless, so a later `onConnected` still fires normally.
+    onUnavailable: () => print("  herdr      not running (optional)"),
   });
   // Minor: without this, the retry timer above outlives `stop()`/`shutdown()` -- harmless for the
   // CLI (every shutdown path calls `process.exit`) but it means `buildAgent` can't be reused in a

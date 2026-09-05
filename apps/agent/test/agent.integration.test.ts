@@ -30,6 +30,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Agent } from "../src/agent.js";
+import { startHerdrBackend } from "../src/backends/herdr/start.js";
 import { BackendRegistry } from "../src/backends/registry.js";
 import * as configModule from "../src/config.js";
 import { loadConfig, loadPairings, type Paths, paths } from "../src/config.js";
@@ -38,6 +39,7 @@ import type { Logger } from "../src/log.js";
 import { createLogger } from "../src/log.js";
 import { RelayClient } from "../src/relay-client.js";
 import { FakeBackend } from "./fakes/fake-backend.js";
+import { FakeHerdr } from "./fakes/fake-herdr.js";
 import { FakePhone } from "./fakes/fake-phone.js";
 import { FakeRelay } from "./fakes/fake-relay.js";
 import { waitFor } from "./fakes/wait.js";
@@ -722,4 +724,89 @@ describe("Agent end to end (fake relay, fake backend)", () => {
     expect(spy).not.toHaveBeenCalled();
     ph.ws.close();
   });
+
+  it(
+    "spec 8.12 (ruling 3): a handshaken phone gets a fresh hello when herdr connects or " +
+      "disconnects -- even with zero panes -- and no hello when nothing changed",
+    async () => {
+      const p4 = paths(mkdtempSync(join(tmpdir(), "sb-agent-herdr-hello-")));
+      const { identity: id4, fp: fp4 } = loadOrCreateIdentity(p4);
+      const relay4 = new FakeRelay(fp4);
+      await relay4.start();
+      const registry4 = new BackendRegistry(log);
+      registry4.add(new FakeBackend());
+      const config4 = { ...loadConfig(p4), computerName: "MBP4" };
+      const agent4 = new Agent({
+        paths: p4,
+        config: config4,
+        identity: id4,
+        fp: fp4,
+        registry: registry4,
+        log,
+        confirm: async () => true,
+        appVersion: "0.0.1-test",
+        relayUrlOverride: relay4.url,
+      });
+      agent4.start();
+      // Not started yet -- just reserves a socket path, so herdr is initially "not there".
+      const herdrServer = new FakeHerdr();
+      let handle: { stop(): void } | null = null;
+      try {
+        await waitFor(() => agent4.relayOnline);
+        const ph = await pairAndConnect({ agent: agent4, relay: relay4, computerFp: fp4 });
+        const hellos = () => ph.inner.filter((m) => m.type === "hello");
+        expect(hellos()).toHaveLength(1);
+        expect(hellos()[0]).toMatchObject({ backends: [{ name: "iterm2" }] });
+
+        // Registered before herdr is reachable (ruling 11): connecting fails and retries.
+        handle = startHerdrBackend({
+          registry: registry4,
+          log,
+          socketPath: herdrServer.path,
+          retryMs: 20,
+          backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 20 },
+        });
+        // Give the retry loop a few rounds to prove absence alone sends no hello.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(hellos()).toHaveLength(1);
+
+        // Herdr appears -- with a ZERO-pane snapshot, so the only signal is HerdrBackend's own
+        // `layout-changed` on connect, not a `session-added`/`session-removed` side effect.
+        herdrServer.reply("session.snapshot", () => ({
+          type: "session_snapshot",
+          snapshot: {
+            version: "0.8.2",
+            protocol: 22,
+            workspaces: [],
+            tabs: [],
+            panes: [],
+            layouts: [],
+            agents: [],
+          },
+        }));
+        await herdrServer.start();
+        await waitFor(() => hellos().length === 2, 3000);
+        expect(hellos().at(-1)).toMatchObject({
+          backends: [{ name: "iterm2" }, { name: "herdr" }],
+        });
+
+        // Quiet again: no further hello while nothing changes.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(hellos()).toHaveLength(2);
+
+        // Herdr's socket dies -- again zero panes, so only `layout-changed` on disconnect explains
+        // the phone finding out.
+        await herdrServer.stop();
+        await waitFor(() => hellos().length === 3, 3000);
+        expect(hellos().at(-1)).toMatchObject({ backends: [{ name: "iterm2" }] });
+
+        ph.ws.close();
+      } finally {
+        handle?.stop();
+        await herdrServer.stop().catch(() => {});
+        agent4.stop();
+        await relay4.stop();
+      }
+    },
+  );
 });

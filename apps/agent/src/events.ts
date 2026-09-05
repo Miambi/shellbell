@@ -177,10 +177,13 @@ export class EventEngine extends EventEmitter<{ event: [InnerMessageOf<"event">]
   tick(): void {
     const now = this.now();
     for (const [id, x] of this.s) {
-      // Ruling R44: a session whose agent state is known is fully covered by `agent-state` rings
-      // (working/blocked/idle/done) -- the screen-quiet heuristic below is for plain shells only,
-      // and running it too would risk a second, redundant ring for the same agent pane.
-      if (x.agentState !== null) continue;
+      // Ruling R44: a session with a KNOWN (non-"unknown") agent state is fully covered by
+      // `agent-state` rings (working/blocked/idle/done) -- the screen-quiet heuristic below is for
+      // plain shells only, and running it too would risk a second, redundant ring for the same
+      // agent pane. A herdr pane that has no agent at all reports "unknown" (never null once seen)
+      // and must still get the idle heuristic -- it is exactly a plain shell as far as spec §8.13
+      // is concerned.
+      if (x.agentState !== null && x.agentState !== "unknown") continue;
       if (x.activeSince === null) continue;
       if (now - x.lastChangeAt < this.opts.idleQuietMs) continue;
       if (x.lastChangeAt - x.activeSince < this.opts.idleMinActiveMs) {

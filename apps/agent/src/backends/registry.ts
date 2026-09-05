@@ -76,11 +76,19 @@ export class BackendRegistry implements TerminalBackend {
    * spec 8.12/8.13: only the backends that can actually serve a phone right now. A member whose
    * transport is down (`connected === false`) stays registered -- it reconnects itself and its
    * sessions must keep routing -- but it is not advertised in `hello.backends`.
+   *
+   * Ordered by `BACKEND_ORDER`, not insertion order: `startHerdrBackend` registers synchronously
+   * while iTerm2 only joins after its own `await connect()` (`cli.ts`), so insertion order alone
+   * would make `hello.backends` read `[herdr, iterm2]` in production -- not spec-ordered, and not
+   * deterministic across runs.
    */
   connected(): { name: BackendName; capabilities: Capabilities }[] {
-    return [...this.members.values()]
-      .filter((b) => b.isConnected !== false)
-      .map((b) => ({ name: b.name, capabilities: b.capabilities }));
+    const out: { name: BackendName; capabilities: Capabilities }[] = [];
+    for (const name of BACKEND_ORDER) {
+      const b = this.members.get(name);
+      if (b && b.isConnected !== false) out.push({ name: b.name, capabilities: b.capabilities });
+    }
+    return out;
   }
 
   nameOf(id: string): BackendName | null {
@@ -115,18 +123,21 @@ export class BackendRegistry implements TerminalBackend {
     // spec 8.12/15: one backend's failure must never affect the others -- settle each member's
     // `listSessions()` independently, log the failure, and return whatever the survivors have.
     const lists = await Promise.all(
-      BACKEND_ORDER.map((name) => this.safeListSessions(this.members.get(name), name)),
+      BACKEND_ORDER.map(
+        (name): Promise<[BackendName, SessionInfo[]]> =>
+          this.safeListSessions(this.members.get(name), name).then((sessions) => [name, sessions]),
+      ),
     );
     const out: SessionInfo[] = [];
-    BACKEND_ORDER.forEach((name, i) => {
-      for (const s of lists[i] as SessionInfo[]) {
+    for (const [name, sessions] of lists) {
+      for (const s of sessions) {
         if (name === "tmux") {
           const w = this.members.get("tmux")?.tmuxWindowIdOf?.(s.id);
           if (w && hidden.has(w)) continue;
         }
         out.push(withPrefix(name, s));
       }
-    });
+    }
     return out;
   }
 

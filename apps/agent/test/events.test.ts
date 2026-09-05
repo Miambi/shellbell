@@ -194,6 +194,23 @@ describe("EventEngine", () => {
     expect(events).toEqual([]);
     expect(rings).toEqual([]);
   });
+
+  it("ruling R44: an 'unknown' agent state (a herdr shell with no agent) still rings idle", () => {
+    const { e, events, rings, advance } = engine();
+    // Herdr reports "unknown" for every pane that has no agent attached -- that is not a "known"
+    // agent state for R44's purposes, so the plain screen-quiet heuristic must still apply to it.
+    e.onBackendEvent({ type: "agent-state", sessionId: "H", state: "unknown", at: 0 });
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(1000);
+    e.onBackendEvent({ type: "screen-changed", sessionId: "H" });
+    advance(3000);
+    expect(events).toEqual([]);
+    advance(1500);
+    expect(events).toEqual(["idle:H::2000"]);
+    expect(rings).toEqual(["idle:H"]);
+  });
 });
 
 describe("Notifier", () => {

@@ -94,4 +94,65 @@ describe("startHerdrBackend", () => {
     await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
     expect(registry.connected().find((b) => b.name === "herdr")?.capabilities.prompts).toBe(false);
   });
+
+  it("stop() unregisters the backend, not just closes it (Minor, Task 6 review)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-start-"));
+    const socketPath = join(dir, "herdr.sock");
+    const registry = new BackendRegistry(log);
+    handle = startHerdrBackend({
+      registry,
+      log,
+      socketPath,
+      retryMs: 20,
+      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+    });
+    server = new FakeHerdr(socketPath);
+    server.reply("session.snapshot", emptySnapshot);
+    await server.start();
+    await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
+    expect(registry.capabilitiesOf("herdr:x")).not.toBeNull();
+
+    handle.stop();
+    handle = null;
+    // A long-lived host must not keep a dead member registered forever. `nameOf` is a pure prefix
+    // parse against the protocol schema and stays "herdr" regardless of registration (by design --
+    // it is what lets `setWatched`/`splitId` route to a name the schema knows about even before a
+    // backend for it exists); `capabilitiesOf` is the member-registration-sensitive lookup and must
+    // go back to null once `stop()` has actually unregistered the member.
+    expect(registry.capabilitiesOf("herdr:x")).toBeNull();
+    expect(registry.connected()).toEqual([]);
+  });
+
+  it("calls onUnavailable exactly once on the first failed attempt, then onConnected once it appears (Minor, Task 6 review: CLI banner resolution)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-start-"));
+    const socketPath = join(dir, "herdr.sock");
+    const registry = new BackendRegistry(log);
+    let unavailableCalls = 0;
+    let connectedPanes: number | null = null;
+    handle = startHerdrBackend({
+      registry,
+      log,
+      socketPath,
+      retryMs: 20,
+      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+      onUnavailable: () => {
+        unavailableCalls += 1;
+      },
+      onConnected: (n) => {
+        connectedPanes = n;
+      },
+    });
+    // A few retry rounds while herdr is absent: onUnavailable must fire exactly once, not once
+    // per retry, so the CLI's banner line is painted once rather than repeated forever.
+    await new Promise((r) => setTimeout(r, 80));
+    expect(unavailableCalls).toBe(1);
+    expect(connectedPanes).toBeNull();
+
+    server = new FakeHerdr(socketPath);
+    server.reply("session.snapshot", emptySnapshot);
+    await server.start();
+    await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
+    expect(connectedPanes).toBe(0);
+    expect(unavailableCalls).toBe(1); // still exactly once -- success does not retroactively fire it
+  });
 });
