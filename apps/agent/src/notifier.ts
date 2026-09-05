@@ -37,7 +37,7 @@ export class Notifier {
     this.last.delete(sessionId);
   }
 
-  /** Test-only: number of sessions currently tracked for rate-limiting. */
+  /** @internal test-only: number of sessions currently tracked for rate-limiting. */
   get size(): number {
     return this.last.size;
   }
