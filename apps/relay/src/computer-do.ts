@@ -556,12 +556,16 @@ export class ComputerDO extends DurableObject<Env> {
       });
     }
     if (messages.length === 0) return;
-    const { deadTokens } = await sendExpoPush(messages, this.env.EXPO_ACCESS_TOKEN);
-    for (const token of deadTokens) {
-      this.ctx.storage.sql.exec(
-        "UPDATE pairings SET push_token = NULL, push_platform = NULL WHERE push_token = ?",
-        token,
-      );
+    try {
+      const { deadTokens } = await sendExpoPush(messages, this.env.EXPO_ACCESS_TOKEN);
+      for (const token of deadTokens) {
+        this.ctx.storage.sql.exec(
+          "UPDATE pairings SET push_token = NULL, push_platform = NULL WHERE push_token = ?",
+          token,
+        );
+      }
+    } catch (err) {
+      console.warn("expo push failed", err instanceof Error ? err.name : "unknown");
     }
   }
 

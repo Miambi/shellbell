@@ -149,4 +149,17 @@ describe("notify → push", () => {
     expect(calls()).toBe(1);
     agent.ws.close();
   });
+
+  it("caps pushes at 20 per phone per rolling hour", async () => {
+    const { calls } = installFetchStub();
+    const { mac, agent, p } = await pairedWithToken();
+    p.ws.close();
+    await agent.nextCtrl();
+    for (let i = 0; i <= 20; i++) {
+      agent.sendCtrl(mac.fp, { type: "notify", sessionId: `s${i}`, kind: "idle" });
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(calls()).toBe(20);
+    agent.ws.close();
+  });
 });

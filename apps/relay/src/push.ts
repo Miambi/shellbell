@@ -71,7 +71,7 @@ export async function sendExpoPush(
       const to = messages[i]?.to;
       if (to) deadTokens.push(to);
     } else if (ticket.status === "error") {
-      console.warn("expo push ticket error", ticket.details?.error ?? ticket.message ?? "unknown");
+      console.warn("expo push ticket error", ticket.details?.error ?? "unknown");
     }
   });
   return { deadTokens };
