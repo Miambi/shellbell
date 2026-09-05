@@ -8,3 +8,4 @@ export * from "./inner.js";
 export * from "./keys.js";
 export * from "./qr.js";
 export * from "./screen.js";
+export * from "./width.js";
