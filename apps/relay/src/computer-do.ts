@@ -511,8 +511,82 @@ export class ComputerDO extends DurableObject<Env> {
     for (const s of this.phoneSockets(phoneFp)) s.close(4004, "unpaired");
   }
 
-  private async onNotify(_msg: CtrlMessageOf<"notify">): Promise<void> {
-    // Task 6
+  private async onNotify(msg: CtrlMessageOf<"notify">): Promise<void> {
+    const now = Date.now();
+    const last = this.ctx.storage.sql
+      .exec<{ last_ring_at: number }>(
+        "SELECT last_ring_at FROM ring_limits WHERE session_id = ?",
+        msg.sessionId,
+      )
+      .toArray()[0];
+    if (last && now - last.last_ring_at < RING_LIMIT_MS) return;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO ring_limits (session_id, last_ring_at) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET last_ring_at = excluded.last_ring_at",
+      msg.sessionId,
+      now,
+    );
+    this.ctx.storage.sql.exec(
+      `DELETE FROM ring_limits WHERE session_id NOT IN (SELECT session_id FROM ring_limits ORDER BY last_ring_at DESC LIMIT ${RING_ROWS_CAP})`,
+    );
+
+    const attentive = new Set<string>();
+    for (const s of this.socketsByState("phone")) {
+      const a = s.deserializeAttachment() as Attachment;
+      if (a.fp && a.leaseUntil > now) attentive.add(a.fp);
+    }
+    const rows = this.ctx.storage.sql
+      .exec<{ phone_fp: string; push_token: string }>(
+        "SELECT phone_fp, push_token FROM pairings WHERE push_token IS NOT NULL AND push_enabled = 1",
+      )
+      .toArray();
+    const title = this.computerName() ?? "Shellbell";
+    const messages: ExpoMessage[] = [];
+    for (const row of rows) {
+      if (attentive.has(row.phone_fp)) continue;
+      if (!this.takePushBudget(row.phone_fp, now)) continue;
+      messages.push({
+        to: row.push_token,
+        title,
+        body: pushBody(msg.kind, msg.exitCode, msg.durationMs),
+        data: { computerFp: this.fp, sessionId: msg.sessionId, kind: msg.kind },
+        sound: "default",
+        priority: "high",
+        channelId: "rings",
+        categoryId: "ring",
+      });
+    }
+    if (messages.length === 0) return;
+    const { deadTokens } = await sendExpoPush(messages, this.env.EXPO_ACCESS_TOKEN);
+    for (const token of deadTokens) {
+      this.ctx.storage.sql.exec(
+        "UPDATE pairings SET push_token = NULL, push_platform = NULL WHERE push_token = ?",
+        token,
+      );
+    }
+  }
+
+  /** 20 pushes per rolling hour per phone. Returns false when exhausted. */
+  private takePushBudget(phoneFp: string, now: number): boolean {
+    const row = this.ctx.storage.sql
+      .exec<{ window_start: number; count: number }>(
+        "SELECT window_start, count FROM push_limits WHERE phone_fp = ?",
+        phoneFp,
+      )
+      .toArray()[0];
+    if (!row || now - row.window_start > 3_600_000) {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO push_limits (phone_fp, window_start, count) VALUES (?, ?, 1) ON CONFLICT(phone_fp) DO UPDATE SET window_start = excluded.window_start, count = 1",
+        phoneFp,
+        now,
+      );
+      return true;
+    }
+    if (row.count >= PUSH_PER_HOUR) return false;
+    this.ctx.storage.sql.exec(
+      "UPDATE push_limits SET count = count + 1 WHERE phone_fp = ?",
+      phoneFp,
+    );
+    return true;
   }
 
   private onE2E(ws: WebSocket, att: Attachment, env: Envelope, raw: ArrayBuffer): void {
