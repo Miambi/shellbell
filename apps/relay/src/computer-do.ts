@@ -139,32 +139,44 @@ export class ComputerDO extends DurableObject<Env> {
     const att = ws.deserializeAttachment() as Attachment | null;
     if (!att) return;
     this.buckets.delete(att.connId);
-    if (att.state === "agent") {
-      const otherAgent = this.socketsByState("agent").some(
-        (s) => (s.deserializeAttachment() as Attachment).connId !== att.connId,
-      );
-      if (otherAgent) return;
-      this.ctx.storage.sql.exec(
-        "UPDATE computer SET last_seen = ? WHERE fp = ?",
-        Date.now(),
-        this.fp,
-      );
-      this.closeWindow();
-      for (const p of this.socketsByState("phone")) {
-        this.sendCtrl(p, {
-          type: "presence",
-          agentOnline: false,
-          computerName: this.computerName(),
-        });
+    try {
+      if (att.state === "agent") {
+        const otherAgent = this.socketsByState("agent").some(
+          (s) => (s.deserializeAttachment() as Attachment).connId !== att.connId,
+        );
+        if (otherAgent) return;
+        this.ctx.storage.sql.exec(
+          "UPDATE computer SET last_seen = ? WHERE fp = ?",
+          Date.now(),
+          this.fp,
+        );
+        this.closeWindow();
+        for (const p of this.socketsByState("phone")) {
+          this.sendCtrl(p, {
+            type: "presence",
+            agentOnline: false,
+            computerName: this.computerName(),
+          });
+        }
+        await this.scheduleAlarm();
+      } else if (att.state === "phone" && att.fp) {
+        const agent = this.agentSocket();
+        if (agent) {
+          this.sendCtrl(agent, {
+            type: "phone-disconnected",
+            phoneFp: att.fp,
+            connId: att.connId,
+          });
+        }
       }
-    } else if (att.state === "phone" && att.fp) {
-      const agent = this.agentSocket();
-      if (agent) {
-        this.sendCtrl(agent, {
-          type: "phone-disconnected",
-          phoneFp: att.fp,
-          connId: att.connId,
-        });
+    } finally {
+      // Client-initiated closes need the server side to close too, or the
+      // closing handshake never completes and the client's own close event
+      // never fires (observed on the pinned workerd runtime).
+      try {
+        ws.close();
+      } catch {
+        // already closed
       }
     }
   }
@@ -353,16 +365,154 @@ export class ComputerDO extends DurableObject<Env> {
     });
   }
 
-  private async onAgentCtrl(_ws: WebSocket, _msg: CtrlMessage): Promise<void> {
-    // Task 4 (pairing window, sync, unpair) and Task 6 (notify)
+  private async onAgentCtrl(ws: WebSocket, msg: CtrlMessage): Promise<void> {
+    const now = Date.now();
+    switch (msg.type) {
+      case "pairing-open":
+        this.ctx.storage.sql.exec(
+          `INSERT INTO pairing_window (id, gate_hash, expires_at, admitted) VALUES (1, ?, ?, 0)
+           ON CONFLICT(id) DO UPDATE SET gate_hash = excluded.gate_hash,
+             expires_at = excluded.expires_at, admitted = 0`,
+          blob(msg.gateHash),
+          Math.min(msg.expiresAt, now + 10 * 60_000),
+        );
+        await this.scheduleAlarm();
+        return;
+      case "pairing-close":
+        this.closeWindow();
+        return;
+      case "pairing-add": {
+        const count =
+          this.ctx.storage.sql
+            .exec<{ n: number }>(
+              "SELECT COUNT(*) AS n FROM pairings WHERE phone_fp != ?",
+              msg.phoneFp,
+            )
+            .toArray()[0]?.n ?? 0;
+        if (count >= MAX_PAIRINGS) {
+          this.sendCtrl(ws, {
+            type: "error",
+            code: "too-many-pairings",
+            message: `max ${MAX_PAIRINGS} phones`,
+          });
+          return;
+        }
+        this.upsertPairing(msg.phoneFp, msg.ed25519Pub, msg.name, now);
+        return;
+      }
+      case "pairing-response": {
+        const target = this.pairingSocket(msg.phoneFp);
+        if (target) this.sendCtrl(target, msg);
+        return;
+      }
+      case "pairing-reject": {
+        const target = this.pairingSocket(msg.phoneFp);
+        if (target) {
+          this.sendCtrl(target, msg);
+          target.close(4003, msg.reason);
+        }
+        return;
+      }
+      case "pairings-sync": {
+        const keep = new Set(msg.phones.map((p) => p.phoneFp));
+        const existing = this.ctx.storage.sql
+          .exec<{ phone_fp: string }>("SELECT phone_fp FROM pairings")
+          .toArray();
+        for (const row of existing)
+          if (!keep.has(row.phone_fp)) this.removePairing(row.phone_fp, false);
+        for (const p of msg.phones) this.upsertPairing(p.phoneFp, p.ed25519Pub, p.name, now);
+        this.ctx.storage.sql.exec("DELETE FROM pending_unpairs");
+        return;
+      }
+      case "unpair":
+        this.removePairing(msg.phoneFp, false);
+        return;
+      case "notify":
+        await this.onNotify(msg);
+        return;
+      default:
+        ws.close(4403, `agent may not send ${msg.type}`);
+    }
   }
 
-  private async onPhoneCtrl(_ws: WebSocket, _att: Attachment, _msg: CtrlMessage): Promise<void> {
-    // Task 4 (unpair), Task 6 (push-token, lease)
+  private async onPhoneCtrl(ws: WebSocket, att: Attachment, msg: CtrlMessage): Promise<void> {
+    switch (msg.type) {
+      case "unpair": {
+        if (msg.phoneFp !== att.fp) {
+          ws.close(4403, "may only unpair self");
+          return;
+        }
+        const agent = this.agentSocket();
+        if (agent) this.sendCtrl(agent, msg);
+        this.removePairing(msg.phoneFp, agent === null);
+        return;
+      }
+      case "push-token":
+        this.ctx.storage.sql.exec(
+          "UPDATE pairings SET push_token = ?, push_platform = ?, push_enabled = ? WHERE phone_fp = ?",
+          msg.token,
+          msg.platform,
+          msg.enabled ? 1 : 0,
+          att.fp,
+        );
+        return;
+      case "lease":
+        this.setState(ws, { ...att, leaseUntil: Date.now() + msg.ttlMs });
+        return;
+      default:
+        ws.close(4403, `phone may not send ${msg.type}`);
+    }
   }
 
-  private async onPairingCtrl(_ws: WebSocket, _att: Attachment, _msg: CtrlMessage): Promise<void> {
-    // Task 4
+  private async onPairingCtrl(ws: WebSocket, att: Attachment, msg: CtrlMessage): Promise<void> {
+    if (msg.type !== "pairing-request" || msg.phoneFp !== att.fp || att.used) {
+      ws.close(4403, "one pairing-request only");
+      return;
+    }
+    const agent = this.agentSocket();
+    if (!agent) {
+      this.sendCtrl(ws, { type: "pairing-reject", phoneFp: msg.phoneFp, reason: "no-agent" });
+      ws.close(4003, "no-agent");
+      return;
+    }
+    this.setState(ws, { ...att, used: true });
+    this.sendCtrl(agent, msg);
+  }
+
+  private upsertPairing(phoneFp: string, pub: Uint8Array, name: string, now: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO pairings (phone_fp, ed25519_pub, name, paired_at, last_seen)
+       VALUES (?, ?, ?, ?, NULL)
+       ON CONFLICT(phone_fp) DO UPDATE SET ed25519_pub = excluded.ed25519_pub, name = excluded.name`,
+      phoneFp,
+      blob(pub),
+      name,
+      now,
+    );
+  }
+
+  /** Delete the row, close the phone's sockets; optionally leave a tombstone for the agent. */
+  private removePairing(phoneFp: string, tombstone: boolean): void {
+    this.ctx.storage.sql.exec("DELETE FROM pairings WHERE phone_fp = ?", phoneFp);
+    this.ctx.storage.sql.exec("DELETE FROM push_limits WHERE phone_fp = ?", phoneFp);
+    if (tombstone) {
+      const n =
+        this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM pending_unpairs")
+          .toArray()[0]?.n ?? 0;
+      if (n < MAX_PAIRINGS) {
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO pending_unpairs (phone_fp, at) VALUES (?, ?)",
+          phoneFp,
+          Date.now(),
+        );
+      }
+    }
+    for (const s of this.phoneSockets(phoneFp)) s.close(4004, "unpaired");
+  }
+
+  private async onNotify(_msg: CtrlMessageOf<"notify">): Promise<void> {
+    // Task 6
   }
 
   private onE2E(ws: WebSocket, att: Attachment, _env: Envelope, _raw: ArrayBuffer): void {
