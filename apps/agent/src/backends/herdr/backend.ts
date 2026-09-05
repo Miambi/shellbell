@@ -152,6 +152,12 @@ interface Pane {
   /** Set when a `pane.scroll_changed` event carried no usable numbers. */
   scrollStale: boolean;
   scrollFetchedAt: number;
+  /**
+   * `eventSeq` value stamped when a live `pane_agent_status_changed` last updated `agentStatus`.
+   * Guards against an in-flight `session.snapshot` reverting a status a fresher event already
+   * applied while the RPC was outstanding (spec 8.13 race, review fix 4).
+   */
+  statusSeq: number;
 }
 
 interface ProbeState {
@@ -202,6 +208,12 @@ export class HerdrBackend implements TerminalBackend {
   private focusedWorkspace: string | null = null;
   /** Bumped on every snapshot apply; an in-flight probe from an older generation is discarded. */
   private paneGen = 0;
+  /**
+   * Bumped every time a live `pane_agent_status_changed` event applies to a pane; captured just
+   * before each `session.snapshot` request so the (later) response can tell whether a per-pane
+   * status it is about to apply has since gone stale (review fix 4).
+   */
+  private eventSeq = 0;
 
   private readonly handlers = new Set<(e: BackendEvent) => void>();
   private readonly log: Logger;
@@ -291,6 +303,14 @@ export class HerdrBackend implements TerminalBackend {
     this.watched.clear();
     this.probes.clear();
     this.paneGen++;
+    // Review fix 5: leaving any of these set would surface as one spurious sync/rebuild on a
+    // future `connect()` of the SAME instance, and a handler left registered after `close()`
+    // would keep firing for an owner that thinks it long since unsubscribed.
+    this.wantSnapshot = false;
+    this.wantResubscribe = false;
+    this.syncBusy = false;
+    this.subscribedPaneIds.clear();
+    this.handlers.clear();
   }
 
   on(handler: (e: BackendEvent) => void): () => void {
@@ -462,7 +482,10 @@ export class HerdrBackend implements TerminalBackend {
     if (!this.pollTimer) {
       const tick = this.opts.revisionPollMs ?? POLL_FAST_MS;
       this.pollTimer = setInterval(() => {
-        if (!this.polling) void this.runProbes();
+        if (!this.polling)
+          void this.runProbes().catch((err) => {
+            this.log.warn("herdr revision poll crashed", { error: errName(err) });
+          });
       }, tick);
       // Never hold the process open for a poller.
       this.pollTimer.unref?.();
@@ -593,8 +616,12 @@ export class HerdrBackend implements TerminalBackend {
   }
 
   private async refreshSnapshot(): Promise<void> {
+    // Captured BEFORE the round-trip: any `pane_agent_status_changed` event that bumps a pane's
+    // `statusSeq` past this value while the request is outstanding is fresher than the response
+    // about to arrive (review fix 4).
+    const requestSeq = this.eventSeq;
     const res = await this.client.request<SessionSnapshotResult>("session.snapshot", {});
-    this.applySnapshot(assertSnapshot(res?.snapshot));
+    this.applySnapshot(assertSnapshot(res?.snapshot), requestSeq);
   }
 
   /**
@@ -609,7 +636,9 @@ export class HerdrBackend implements TerminalBackend {
     if (this.syncTimer) return;
     this.syncTimer = setTimeout(() => {
       this.syncTimer = null;
-      void this.runSync();
+      void this.runSync().catch((err) => {
+        this.log.warn("herdr sync crashed", { error: errName(err) });
+      });
     }, this.opts.syncDebounceMs ?? 250);
     this.syncTimer.unref?.();
   }
@@ -674,7 +703,7 @@ export class HerdrBackend implements TerminalBackend {
 
   // ---- snapshot ----
 
-  private applySnapshot(snap: SessionSnapshot): void {
+  private applySnapshot(snap: SessionSnapshot, requestSeq = 0): void {
     const workspaceNumbers = new Map<string, number>();
     const workspaces = new Set<string>();
     for (const w of snap.workspaces ?? []) {
@@ -693,7 +722,13 @@ export class HerdrBackend implements TerminalBackend {
       const id = info.terminal_id ?? info.pane_id;
       const was = prev.get(id);
       const rect = rects.get(info.pane_id);
-      const state = agentStateOf(info.agent_status);
+      const snapshotState = agentStateOf(info.agent_status);
+      // Review fix 4: a `pane_agent_status_changed` event applied to this pane AFTER the
+      // `session.snapshot` request was issued is fresher than the value this response carries —
+      // keep it rather than reverting (and never emit a stale `agent-state` for the revert).
+      const statusSeq = was?.statusSeq ?? 0;
+      const staleStatus = statusSeq > requestSeq;
+      const state = staleStatus ? (was?.agentStatus ?? snapshotState) : snapshotState;
       const viewportRows = info.scroll?.viewport_rows;
       next.set(id, {
         terminalId: id,
@@ -713,10 +748,11 @@ export class HerdrBackend implements TerminalBackend {
         scrollMax: info.scroll?.max_offset_from_bottom ?? was?.scrollMax ?? 0,
         scrollStale: was?.scrollStale ?? false,
         scrollFetchedAt: was?.scrollFetchedAt ?? 0,
+        statusSeq,
       });
       byPaneId.set(info.pane_id, id);
       workspaces.add(info.workspace_id);
-      if (was?.agentStatus !== state)
+      if (!staleStatus && was?.agentStatus !== state)
         changed.push({ id, state, agent: info.display_agent ?? info.agent });
     }
     const removed = [...prev.keys()].filter((id) => !next.has(id));
@@ -732,6 +768,26 @@ export class HerdrBackend implements TerminalBackend {
     for (const id of removed) {
       this.probes.delete(id);
       this.watched.delete(id);
+    }
+
+    // Review fix 1: a pane the phone is still watching may have lost its `ProbeState` --
+    // `onStreamEnd` clears `probes` on every disconnect but deliberately leaves `watched` alone
+    // (the terminal_id is stable across a pane_id renumbering), so without this a watched pane
+    // that survives a reconnect would poll nothing forever (the interval keeps ticking but
+    // `runProbes` bails on `!probe`). Re-seed with a baseline that can never equal a real
+    // revision (`NaN`, which is `!==` every number including itself) so this pane's FIRST
+    // post-reconnect probe reads as a change and emits `screen-changed` immediately -- unlike a
+    // brand-new `setWatched` probe's silent baseline -- because the phone's on-screen content may
+    // already be stale after the gap and the tracker needs to re-snapshot it.
+    const seedAt = Date.now();
+    for (const id of this.watched) {
+      if (this.panes.has(id) && !this.probes.has(id))
+        this.probes.set(id, {
+          revision: Number.NaN,
+          intervalMs: POLL_FAST_MS,
+          lastChangeAt: seedAt,
+          nextAt: seedAt,
+        });
     }
 
     // Order matters: the agent must learn a session exists before it hears about its state, and
@@ -796,6 +852,10 @@ export class HerdrBackend implements TerminalBackend {
       case "pane_agent_status_changed": {
         const pane = this.paneByPaneId(str(data.pane_id));
         if (!pane) return;
+        // Review fix 4: stamp freshness unconditionally (even a repeat status still proves this
+        // pane's data is at least this recent), so an in-flight `session.snapshot` requested
+        // before this event cannot revert it once the response finally arrives.
+        pane.statusSeq = ++this.eventSeq;
         const state = agentStateOf(data.agent_status);
         const agent = str(data.display_agent) ?? str(data.agent);
         const title = str(data.title);

@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HerdrBackend } from "../src/backends/herdr/backend.js";
 import { HerdrClient } from "../src/backends/herdr/client.js";
@@ -516,6 +516,34 @@ describe("HerdrBackend event handling", () => {
     });
   });
 
+  it("keeps a fresher event-applied agent status over a snapshot requested before it (fix 4)", async () => {
+    const b = await connect({ syncDebounceMs: 20 });
+    events.length = 0;
+    const release = herdr.gate("session.snapshot");
+    // A lifecycle hint schedules a snapshot refresh; its RPC is now gated (in flight, unanswered).
+    herdr.pushEvent("pane_updated", { pane: { pane_id: "w1:p1" } });
+    await waitFor(() => herdr.called("session.snapshot").length === 3);
+
+    // While that snapshot is still pending, a FRESHER status event lands for the same pane.
+    herdr.pushEvent("pane.agent_status_changed", {
+      pane_id: "w1:p1",
+      workspace_id: "w1",
+      agent_status: "idle",
+    });
+    await waitFor(() => types().includes("agent-state"));
+    expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([["term_a", "idle"]]);
+    events.length = 0;
+
+    // The snapshot's answer (still "blocked" -- it reflects the world as of BEFORE the event)
+    // must not revert the pane's status, and must not re-emit a stale `agent-state` for it.
+    release();
+    await new Promise((r) => setTimeout(r, 60));
+    expect((await b.listSessions()).find((s) => s.id === "term_a")).toMatchObject({
+      state: "finished", // idle -> finished, not "blocked"
+    });
+    expect(types()).not.toContain("agent-state");
+  });
+
   it("updates both axes on layout.updated and ignores unknown events", async () => {
     const b = await connect({ syncDebounceMs: 5000 });
     events.length = 0;
@@ -673,7 +701,13 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
   it("removes every session on disconnect and re-adds them when herdr comes back", async () => {
     const b = await connect();
     const path = herdr.path;
+    const dir = dirname(path);
     events.length = 0;
+    // Fix 3 regression guard: a restart must not leak the temp dir the original FakeHerdr's
+    // socket lives in. Checking this ONE known directory (rather than counting `sb-herdr-*`
+    // globally) keeps the assertion immune to `herdr-client.test.ts`'s own FakeHerdr instances
+    // running concurrently in another file under vitest's default file parallelism.
+    expect(existsSync(dir)).toBe(true);
 
     // A real restart: the server exits, the socket file goes away, every connection EOFs.
     await herdr.stop();
@@ -681,6 +715,8 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     expect(idsOf("session-removed").sort()).toEqual(["term_a", "term_b", "term_c"]);
     expect(b.isConnected).toBe(false);
     expect(await b.listSessions()).toEqual([]);
+    // The original's directory is gone with it (stop() already ran its cleanup).
+    expect(existsSync(dir)).toBe(false);
 
     // It comes back with renumbered pane ids, stable terminal ids, and one pane gone.
     herdr = new FakeHerdr(path);
@@ -709,5 +745,53 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     expect(herdr.called("pane.focus").at(-1)?.params).toEqual({ pane_id: "w1:q1" });
     // A still-blocked agent is announced as an initial state again (the engine sees prev === null).
     expect(agentStateEvents().map((e) => e.sessionId)).toEqual(expect.arrayContaining(["term_a"]));
+
+    // Fix 3: the restarted FakeHerdr reused the ORIGINAL directory (recreated by `start()`), not
+    // a fresh throwaway one it would then abandon -- so cleaning it up now removes THAT directory
+    // (not a second, leaked one sitting on top of it).
+    expect(herdr.dir).toBe(dir);
+    await herdr.stop();
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("re-seeds the revision poller for a watched pane across a restart", async () => {
+    // Fix 1: `onStreamEnd` clears `probes` on every disconnect but leaves `watched` alone (the
+    // terminal_id survives a pane_id renumbering), so a pane the phone is still watching must
+    // resume polling under its NEW pane id once the reconnect snapshot lands, without the phone
+    // ever calling `setWatched` again.
+    const b = await connect();
+    const path = herdr.path;
+    b.setWatched(["term_a"]);
+    await waitFor(() => herdr.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:p1"));
+    events.length = 0;
+
+    await herdr.stop();
+    await waitFor(() => idsOf("session-removed").length === 3, 3000);
+
+    herdr = new FakeHerdr(path);
+    installDefaults(herdr, () => {
+      const snap = snapshotResult() as {
+        snapshot: {
+          panes: { pane_id: string }[];
+          layouts: { panes: { pane_id: string }[] }[];
+        };
+      };
+      for (const p of snap.snapshot.panes) p.pane_id = p.pane_id.replace(":p", ":q");
+      for (const l of snap.snapshot.layouts)
+        for (const p of l.panes) p.pane_id = p.pane_id.replace(":p", ":q");
+      return snap;
+    });
+    events.length = 0;
+    await herdr.start();
+
+    await waitFor(() => idsOf("session-added").includes("term_a"), 5000);
+    // The poller resumes against the NEW pane id...
+    await waitFor(
+      () => herdr.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:q1"),
+      3000,
+    );
+    // ...and its first post-reconnect probe is treated as a change (an unknown baseline, not a
+    // silent one), so a viewer whose screen went stale while the socket was down gets refreshed.
+    await waitFor(() => idsOf("screen-changed").includes("term_a"), 3000);
   });
 });

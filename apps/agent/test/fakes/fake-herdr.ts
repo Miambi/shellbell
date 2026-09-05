@@ -24,7 +24,7 @@ interface Stream {
  * surface in tests instead of being papered over.
  */
 export class FakeHerdr {
-  readonly dir = mkdtempSync(join(tmpdir(), "sb-herdr-"));
+  readonly dir: string;
   readonly path: string;
   readonly requests: FakeHerdrRequest[] = [];
   /** Lines written on a connection after its first one: the real server never reads them. */
@@ -42,6 +42,8 @@ export class FakeHerdr {
   private readonly failures = new Map<string, { code: string; message: string }>();
   private readonly silenced = new Set<string>();
   private readonly streams = new Set<Stream>();
+  /** Per-method reply gates: `dispatch` awaits one, if set, before answering that method. */
+  private readonly gates = new Map<string, Promise<void>>();
   /**
    * EVERY accepted connection, not just the event streams. `stop()` must destroy all of them:
    * `server.close()` only stops accepting and its callback fires when the last connection ends,
@@ -50,9 +52,33 @@ export class FakeHerdr {
   private readonly sockets = new Set<Socket>();
   private server: Server | null = null;
 
-  /** `path` lets a test bind a chosen socket file (one that does not exist yet, or a restart). */
+  /**
+   * `path` lets a test bind a chosen socket file (one that does not exist yet, or a restart). When
+   * given, `dir` is attributed to that path's OWN directory rather than a freshly minted one: a
+   * restart reuses the previous server's `dir` (recreated by `start()`, see below), and `stop()`'s
+   * `rmSync(this.dir, ...)` must clean up that directory, not an unrelated, unused temp dir that
+   * would otherwise leak on every restart test.
+   */
   constructor(path?: string) {
+    this.dir = path ? dirname(path) : mkdtempSync(join(tmpdir(), "sb-herdr-"));
     this.path = path ?? join(this.dir, "herdr.sock");
+  }
+
+  /**
+   * Delays the fake's reply to `method` until the test calls the returned release function.
+   * Lets a test create a race between an in-flight RPC and events arriving before it resolves
+   * (e.g. `session.snapshot` vs. a `pane_agent_status_changed` event landing while it is pending).
+   */
+  gate(method: string): () => void {
+    let release = () => {};
+    const gated = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.gates.set(method, gated);
+    return () => {
+      this.gates.delete(method);
+      release();
+    };
   }
 
   reply(method: string, fn: (params: Record<string, unknown>) => unknown): void {
@@ -174,7 +200,7 @@ export class FakeHerdr {
     );
   }
 
-  private dispatch(socket: Socket, line: string): void {
+  private async dispatch(socket: Socket, line: string): Promise<void> {
     let msg: { id?: string; method?: string; params?: Record<string, unknown> };
     try {
       msg = JSON.parse(line);
@@ -185,6 +211,10 @@ export class FakeHerdr {
     const method = msg.method ?? "";
     const params = msg.params ?? {};
     this.requests.push({ method, params });
+    // `called(method)` already reflects this request; `gate()` only delays the ANSWER, so a test
+    // can wait for the request to have arrived before racing something else against its reply.
+    const gated = this.gates.get(method);
+    if (gated) await gated;
     if (this.silenced.has(method)) return;
     const failure = this.failures.get(method);
     if (failure) {
