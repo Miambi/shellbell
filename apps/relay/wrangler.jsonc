@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shellbell-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "durable_objects": {
+    "bindings": [{ "name": "COMPUTER", "class_name": "ComputerDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ComputerDO"] }],
+  "observability": { "enabled": true },
+  "vars": { "MIN_FRAME_MS": "125" }
+  // Hosted deployment adds:  "routes": [{ "pattern": "relay.shellbell.app", "custom_domain": true }]
+  // Self-hosters keep the *.workers.dev URL and run `shellbell config set relay wss://...`.
+}
