@@ -166,7 +166,8 @@ export class PairingManager {
     try {
       const ok = await this.confirmWithTimeout(msg.phoneFp, body.name);
       if (!ok) return reject("declined");
-      if (!this.isOpen) return reject("window-closed");
+      // The window may have been closed and re-opened while the human was deciding.
+      if (!this.isOpen || this.window !== win) return reject("window-closed");
 
       let kPair: Uint8Array;
       try {
