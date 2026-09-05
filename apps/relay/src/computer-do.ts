@@ -515,12 +515,32 @@ export class ComputerDO extends DurableObject<Env> {
     // Task 6
   }
 
-  private onE2E(ws: WebSocket, att: Attachment, _env: Envelope, _raw: ArrayBuffer): void {
-    if (att.state === "unauth") {
-      ws.close(4403, "auth first");
+  private onE2E(ws: WebSocket, att: Attachment, env: Envelope, raw: ArrayBuffer): void {
+    if (att.state !== "agent" && att.state !== "phone") {
+      ws.close(4403, "e2e requires auth");
       return;
     }
-    // Task 5
+    if (env.from !== att.fp) {
+      ws.close(4403, "from mismatch");
+      return;
+    }
+    if (!env.to) {
+      ws.close(4400, "e2e needs to");
+      return;
+    }
+    const targets =
+      att.state === "agent"
+        ? this.phoneSockets(env.to)
+        : env.to === this.fp
+          ? [this.agentSocket()].filter((s): s is WebSocket => s !== null)
+          : [];
+    for (const t of targets) {
+      try {
+        t.send(raw);
+      } catch {
+        // closed between lookup and send
+      }
+    }
   }
 
   // ---------------------------------------------------------------- helpers
