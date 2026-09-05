@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 22, TypeScript 5.9, `@shellbell/protocol` (`parseSgrLine`, `stringCells`, `emptyLine`), vitest 5, `node:net` (no new runtime dependency). Herdr ≥ 0.7.2 on the user's machine — never installed by this plan.
 
-**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — **§8.13** (authority for this plan; revised 2026-09-05 after external review), plus §8.4 (`TerminalBackend`, `AgentState`, `setWatched?`, `connected?`), §8.6 (tracker), §8.8 (events and ringing), §8.12 (registry, `hello` on backend-set change, per-session capabilities), §7.3/§7.4 (wire protocol), §7.5 (named keys), §9.2/§11.3 (push bodies), §10.5 (badges, unknown enums are opaque), §15 (testing). Plan 03 is complete and shipped **through commit `5601537`** (Task 11 landed at `6bb2a53`, followed by six fix/hardening commits: `9efd19a`, `d349b99`, `5e22a2c`, `0e11af5`, `b8b8b70`, `9ba0fc1`, `55c53bd`, `5601537`); Plan 04 (tmux) is **not** required. The verified Herdr research report is `.superpowers/research/herdr-socket-api.md` — every JSON shape in this plan comes from it.
+**Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — **§8.13** (authority for this plan; revised 2026-09-05 after external review), plus §8.4 (`TerminalBackend`, `AgentState`, `setWatched?`, `isConnected?`), §8.6 (tracker), §8.8 (events and ringing), §8.12 (registry, `hello` on backend-set change, per-session capabilities), §7.3/§7.4 (wire protocol), §7.5 (named keys), §9.2/§11.3 (push bodies), §10.5 (badges, unknown enums are opaque), §15 (testing). Plan 03 is complete and shipped **through commit `5601537`** (Task 11 landed at `6bb2a53`, followed by six fix/hardening commits: `9efd19a`, `d349b99`, `5e22a2c`, `0e11af5`, `b8b8b70`, `9ba0fc1`, `55c53bd`, `5601537`); Plan 04 (tmux) is **not** required. The verified Herdr research report is `.superpowers/research/herdr-socket-api.md` — every JSON shape in this plan comes from it.
 
 > **⚠ Read these shipped files before editing them** (they changed *after* this plan was first drafted, and the tasks below are written against `5601537`, not against the older snapshot):
 > - `apps/agent/src/cli.ts` — `buildAgent` now returns `releaseOutput` **and** `stopFirstConnect`; `start` destructures both; the SIGINT/SIGTERM handler carries a `shuttingDown` double-Ctrl-C guard and calls `shutdown(agent, control, process.exit, stopFirstConnect).catch(…)`; `onSuperseded` calls `shutdown(…, stopFirstConnect)`; every backend startup line goes through the buffered `print()` closure and is flushed by `releaseOutput()` so it cannot interleave with spec 8.1's exact-text header block. **Task 6 only inserts into this code; it never replaces it.**
@@ -57,7 +57,7 @@ apps/agent/
 │   ├── screen-tracker.ts   (modified) push the viewed set via setWatched
 │   │                       (per-session absoluteLines ALREADY SHIPPED — do not re-add)
 │   └── backends/
-│       ├── types.ts        (modified) AgentState, agent-state event, setWatched?, connected?
+│       ├── types.ts        (modified) AgentState, agent-state event, setWatched?, isConnected?
 │       ├── registry.ts     (modified) herdr routing; connected() filter; setWatched fan-out
 │       └── herdr/
 │           ├── types.ts    hand-written Herdr wire shapes
@@ -254,7 +254,7 @@ git commit -m "feat(protocol): add the herdr backend name and the blocked event 
 **Files:**
 - Create: `apps/agent/src/backends/herdr/types.ts`, `apps/agent/src/backends/herdr/client.ts`
 - **Modify: `apps/agent/src/backends/types.ts`** — this task adds `AgentState`, the `agent-state`
-  `BackendEvent` variant, `TerminalBackend.setWatched?` and `TerminalBackend.connected?`. Do it in
+  `BackendEvent` variant, `TerminalBackend.setWatched?` and `TerminalBackend.isConnected?`. Do it in
   Step 3, **before** writing `herdr/types.ts`, which imports `AgentState` from it.
 - Create: `apps/agent/test/fakes/fake-herdr.ts`, `apps/agent/test/herdr-client.test.ts`
 
@@ -828,7 +828,7 @@ export interface TerminalBackend {
    * member registered (it reconnects itself) but leaves it out of `hello.backends`. A backend
    * that omits this property is always considered connected.
    */
-  readonly connected?: boolean;
+  readonly isConnected?: boolean;
 }
 ```
 
@@ -1957,7 +1957,7 @@ describe("HerdrBackend.connect", () => {
       history: true,
       absoluteLines: false,
     });
-    expect(b.connected).toBe(true);
+    expect(b.isConnected).toBe(true);
   });
 
   it("announces every pane it discovered, with its initial agent state", async () => {
@@ -1980,7 +1980,7 @@ describe("HerdrBackend.connect", () => {
       name: "BackendUnavailable",
       hint: expect.stringContaining("herdr.dev/install.sh"),
     });
-    expect(b.connected).toBe(false);
+    expect(b.isConnected).toBe(false);
     await b.close();
   });
 
@@ -2474,7 +2474,7 @@ describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
     await new Promise((r) => setTimeout(r, 300)); // > one poll interval: a failing probe DID run
     expect(herdr.called("pane.copy_motion").length).toBeGreaterThan(beforeFailures);
     expect(idsOf("screen-changed")).toEqual([]);
-    expect(b.connected).toBe(true);
+    expect(b.isConnected).toBe(true);
   });
 });
 
@@ -2488,7 +2488,7 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     await herdr.stop();
     await waitFor(() => idsOf("session-removed").length === 3, 3000);
     expect(idsOf("session-removed").sort()).toEqual(["term_a", "term_b", "term_c"]);
-    expect(b.connected).toBe(false);
+    expect(b.isConnected).toBe(false);
     expect(await b.listSessions()).toEqual([]);
 
     // It comes back with renumbered pane ids, stable terminal ids, and one pane gone.
@@ -2512,7 +2512,7 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     await waitFor(() => idsOf("session-added").length === 2, 5000);
     expect(idsOf("session-added").sort()).toEqual(["term_a", "term_c"]);
     expect((await b.listSessions()).map((s) => s.id)).toEqual(["term_a", "term_c"]);
-    expect(b.connected).toBe(true);
+    expect(b.isConnected).toBe(true);
     // The pane that vanished during downtime never comes back, and ids route to the NEW pane ids.
     await b.focus("term_a");
     expect(herdr.called("pane.focus").at(-1)?.params).toEqual({ pane_id: "w1:q1" });
@@ -3947,7 +3947,7 @@ Add to `apps/agent/test/fakes/fake-backend.ts` — two fields next to `sentText`
   /** Every `setWatched` call the tracker or registry made, in order (spec 8.13). */
   watched: string[][] = [];
   /** Spec 8.12: `false` hides this backend from `hello.backends` without unregistering it. */
-  connected = true;
+  isConnected = true;
 ```
 
 and a method next to `focus`:
@@ -3996,7 +3996,7 @@ Add to `apps/agent/test/registry.test.ts`:
     expect(reg.connected().map((b) => b.name)).toEqual(["iterm2", "herdr"]);
     // spec 8.12/8.13: its socket died; it stays registered (it reconnects itself) but the phones
     // must not be told it is available.
-    herdr.connected = false;
+    herdr.isConnected = false;
     expect(reg.connected().map((b) => b.name)).toEqual(["iterm2"]);
     expect(reg.capabilitiesOf("herdr:term_a")).toBe(herdr.capabilities);
   });
@@ -4299,7 +4299,7 @@ Replace `connected()` and `listSessions`:
    */
   connected(): { name: BackendName; capabilities: Capabilities }[] {
     return [...this.members.values()]
-      .filter((b) => b.connected !== false)
+      .filter((b) => b.isConnected !== false)
       .map((b) => ({ name: b.name, capabilities: b.capabilities }));
   }
 
@@ -4556,7 +4556,7 @@ export interface StartHerdrOptions {
  * The backend is registered with the registry **before** `connect()` (ruling 11): `connect()` emits
  * `session-added` and the initial `agent-state` for every pane it discovers, and those must reach
  * the `EventEngine`, which only subscribes through the registry. A registered-but-disconnected
- * member reports `connected: false`, so it is not advertised in `hello.backends` until it is real.
+ * member reports `isConnected: false`, so it is not advertised in `hello.backends` until it is real.
  * Herdr not being installed is a perfectly normal state, so failures log at debug, never as errors.
  */
 export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
@@ -4579,7 +4579,7 @@ export function startHerdrBackend(opts: StartHerdrOptions): { stop(): void } {
   };
 
   const attempt = async (): Promise<void> => {
-    if (stopped || backend.connected) return;
+    if (stopped || backend.isConnected) return;
     try {
       await backend.connect();
     } catch (err) {
@@ -5258,7 +5258,7 @@ describe.skipIf(!live)("live herdr", () => {
     const b = new HerdrBackend({ client, log });
     backend = b;
     await b.connect();
-    expect(b.connected).toBe(true);
+    expect(b.isConnected).toBe(true);
 
     const sessions = await b.listSessions();
     const scratch = sessions.find((s) => s.id === scratchTerminalId);
@@ -5328,7 +5328,7 @@ git commit -m "test(agent): env-gated live herdr integration"
 | Bootstrap: subscribe → snapshot → apply → replay buffer | Task 4 (`openStream`) |
 | Lifecycle events are hints → one debounced single-flight snapshot; agent status/scroll applied directly | Task 4 (`handleEvent`, `scheduleSync`, `runSync`) + two tests |
 | Two-phase resubscribe, snapshot-failure cleanup | Task 4 (`openStream` + "re-subscribes exactly once") |
-| Disconnect → `session-removed` for every pane, `connected: false`, reconnect re-adds | Task 4 (`onStreamEnd` + the restart test), Task 6 (registry filter, `hello`), Task 5 (no adoption ring) |
+| Disconnect → `session-removed` for every pane, `isConnected: false`, reconnect re-adds | Task 4 (`onStreamEnd` + the restart test), Task 6 (registry filter, `hello`), Task 5 (no adoption ring) |
 | Native id = `terminal_id`; `terminal_id ↔ pane_id` map; title rule | Task 4 (`applySnapshot`, `titleOf`, `pane_moved` test) |
 | rows/cols from the layout rect, refreshed on `layout.updated` (both axes) | Task 4 (`rectIndex`, `layout_updated` test) |
 | `getScreen` = visible ANSI read → `parseSgrLine`; pad/truncate bottom-anchored; faked cursor clamped | Task 3 |
@@ -5492,13 +5492,13 @@ why. Where a review's suggestion conflicted with a ruling, the ruling won (noted
   buffering before it replaces the old one; a snapshot failure closes it and hands over to the
   reconnect poll. *(C3.3; ruling 10)*
 - **Disconnect is now loud** — losing the socket emits `session-removed` for every Herdr pane, clears
-  the maps, and reports `connected: false`; reconnect re-adds them with `session-added` plus an
+  the maps, and reports `isConnected: false`; reconnect re-adds them with `session-added` plus an
   initial `agent-state`. This fixes three findings at once: the tracker no longer keeps viewers for
   panes that vanished during downtime, a pane deleted while Herdr was down cannot linger, and the
   `EventEngine` forgets the session so a still-blocked agent is a **first sighting** (no adoption
   ring) instead of a `working → blocked` transition that rang the phone. *(G1.2, G3.6, C3.2, C3.7;
   ruling 3)*
-- **A disconnected backend is no longer advertised** — `TerminalBackend.connected?` was added,
+- **A disconnected backend is no longer advertised** — `TerminalBackend.isConnected?` was added,
   `BackendRegistry.connected()` filters on it, and the `Agent` re-sends `hello` whenever the
   connected set changes (spec 8.12 required this and nothing implemented it). *(G1.3, C3.8; ruling 3)*
 - **Cursor `x` is clamped to `cols - 1`** — a full-width row put the cursor outside the grid.
@@ -5542,7 +5542,7 @@ why. Where a review's suggestion conflicted with a ruling, the ruling won (noted
   `focused`, `agent_status`, `revision`; snapshot arrays; `AgentInfo`/`agents`; layout `rect`;
   `pane_read` ids; `copy_motion.cursor`), and `AgentInfo` exists. *(G2.1, C2.3; ruling 16)*
 - **Task 2's Files list now includes the `backends/types.ts` edit** (`AgentState`, the `agent-state`
-  event, `setWatched?`, `connected?`) — it was a late note that a weaker model could skip, leaving
+  event, `setWatched?`, `isConnected?`) — it was a late note that a weaker model could skip, leaving
   `AgentState` undefined. *(G4.2, C4.2; ruling 16)*
 - **Client framing** — the 1 MiB cap is counted in **bytes** and only against an *incomplete* line
   (a chunk holding many valid lines is no longer rejected); a post-ack oversized line ends the
@@ -5585,7 +5585,7 @@ why. Where a review's suggestion conflicted with a ruling, the ruling won (noted
   fallback tests real. *(C5, G5)*
 - **Spec propagation (minimal, per ruling 21)** — §1.1 "three backends"; §4.1 the agent runs Herdr
   too; §7.3 `notify.kind`; §7.4 `SessionInfo.backend`/`state` and `event.kind`; §8.4 `AgentState`,
-  `CreateWhere.backend`, the `agent-state` event, `setWatched?`/`connected?`; §8.12 `connected`
+  `CreateWhere.backend`, the `agent-state` event, `setWatched?`/`isConnected?`; §8.12 `connected`
   filtering and per-session capabilities; §9.2 and §11.3 the `blocked` push body; §10.5 the Herdr
   badge, the dimmed cursor, and **one new rule: the app treats an unrecognised `backend`/`state`/
   `event.kind` as opaque** so an older app never rejects a newer agent. Task 1 records that shipping

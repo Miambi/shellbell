@@ -813,7 +813,7 @@ export interface TerminalBackend {
   focus(sessionId: string): Promise<void>;      // may throw Unsupported
   on(handler: (e: BackendEvent) => void): () => void;
   setWatched?(nativeIds: string[]): void;   // 8.13: which sessions a phone is viewing
-  readonly connected?: boolean;             // 8.13: false while the backend's transport is down
+  readonly isConnected?: boolean;             // 8.13: false while the backend's transport is down
 }
 ```
 
