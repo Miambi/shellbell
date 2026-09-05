@@ -100,7 +100,9 @@ export interface TerminalBackend {
   /**
    * Spec 8.12/8.13: `false` while the backend's transport is down. The registry keeps such a
    * member registered (it reconnects itself) but leaves it out of `hello.backends`. A backend
-   * that omits this property is always considered connected.
+   * that omits this property is always considered connected. Named `isConnected` (not
+   * `connected`) because `BackendRegistry.connected()` is a pre-existing, unrelated aggregate
+   * method (returns the list of connected member backends) and the two must not collide.
    */
-  readonly connected?: boolean;
+  readonly isConnected?: boolean;
 }
