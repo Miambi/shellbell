@@ -1,0 +1,12 @@
+{
+  "event": "pane.agent_status_changed",
+  "data": {
+    "pane_id": "w1:p1",
+    "workspace_id": "w1",
+    "agent_status": "idle",
+    "agent": "claude-code",
+    "display_agent": "Claude Code",
+    "title": "claude · done",
+    "state_labels": {}
+  }
+}

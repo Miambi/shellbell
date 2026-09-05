@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export interface FakeHerdrRequest {
@@ -110,6 +110,11 @@ export class FakeHerdr {
   }
 
   start(): Promise<void> {
+    // A restart test rebinds `this.path` after the ORIGINAL FakeHerdr's own temp dir has been
+    // `rmSync`ed in `stop()`. On macOS, `net.Server.listen()` on a unix socket whose parent
+    // directory does not exist fails with EACCES (not ENOENT), so the directory must be recreated
+    // here rather than assumed to exist.
+    mkdirSync(dirname(this.path), { recursive: true });
     const server = createServer((socket) => {
       this.connections++;
       this.sockets.add(socket);

@@ -1,0 +1,9 @@
+{
+  "id": "sb9",
+  "result": {
+    "type": "pane_copy_motion",
+    "pane_id": "w1:p1",
+    "cursor": { "row": 0, "col": 0 },
+    "content_revision": 4242
+  }
+}
