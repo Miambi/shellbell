@@ -247,6 +247,23 @@ export class BackendRegistry implements TerminalBackend {
       }
     }
   }
+  /**
+   * Spec 8.11: route the tracker's monotonic `scrollbackTotal` to the owning member, stripping the
+   * `"<name>:"` prefix on the way -- the same contract as `setWatched` above, but per-session
+   * rather than fanned out. An unknown prefix, or a member that does not implement it, is a no-op.
+   */
+  setReported(id: string, reported: number): void {
+    const p = splitId(id);
+    if (!p) return;
+    try {
+      this.members.get(p.name)?.setReported?.(p.native, reported);
+    } catch (err) {
+      this.log.warn("setReported failed for backend", {
+        backend: p.name,
+        err: err instanceof Error ? err.name : String(err),
+      });
+    }
+  }
   on(handler: (e: BackendEvent) => void): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);

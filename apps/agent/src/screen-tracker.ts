@@ -288,6 +288,10 @@ export class ScreenTracker {
       }
     }
     s.lastBackendScrollback = screen.scrollbackTotal;
+    // Spec 8.11: tmux's `history_size` saturates, so its `getHistory` cannot derive absolute line
+    // numbers on its own -- hand it the monotonic value we just computed. Optional on the
+    // interface; iTerm2 (absoluteLines: true) does not implement it.
+    this.opts.backend.setReported?.(sessionId, s.reported);
 
     const changed: { i: number; line: Line }[] = [];
     if (!forceSnapshotAll) {

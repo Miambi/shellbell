@@ -508,4 +508,32 @@ describe("per-backend absoluteLines via BackendRegistry.capabilitiesOf (minor: w
       t.stop();
     }
   });
+
+  it("pushes the monotonic reported value down to the backend each frame (spec 8.11)", async () => {
+    // Uses whatever FakeBackend/tracker harness this file already builds; the assertion is that
+    // the tracker's own `reported` (not the backend's raw scrollbackTotal) is what arrives.
+    const tmuxBackend = new FakeBackend("tmux");
+    tmuxBackend.addSession("%1", { rows: 3, lines: ["a", "b", "c"], scrollbackTotal: 0 });
+    const t = new ScreenTracker({
+      backend: tmuxBackend,
+      sink: () => {},
+      log,
+      now: () => Date.now(),
+    });
+    t.start();
+    try {
+      t.setViewed("p1", "%1");
+      await flush();
+      tmuxBackend.appendLine("%1", "d");
+      t.markDirty("%1");
+      await flush();
+      expect(tmuxBackend.reported.at(-1)?.[0]).toBe("%1");
+      expect(tmuxBackend.reported.at(-1)?.[1]).toBeGreaterThan(0);
+      // Monotonic: never decreases across frames, even when the backend's own counter does.
+      const values = tmuxBackend.reported.map(([, v]) => v);
+      expect(values).toEqual([...values].sort((a, b) => a - b));
+    } finally {
+      t.stop();
+    }
+  });
 });

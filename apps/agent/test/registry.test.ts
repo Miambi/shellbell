@@ -170,4 +170,18 @@ describe("BackendRegistry", () => {
     reg.add(iterm);
     expect(reg.connected().map((b) => b.name)).toEqual(["iterm2", "herdr"]);
   });
+
+  it("routes setReported to the owning member with the prefix stripped (spec 8.11)", () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    const tmux = new FakeBackend("tmux");
+    reg.add(iterm);
+    reg.add(tmux);
+    reg.setReported("tmux:%2", 7);
+    expect(tmux.reported).toEqual([["%2", 7]]);
+    expect(iterm.reported).toEqual([]);
+    // Unknown prefix and unknown backend are no-ops, never throws.
+    expect(() => reg.setReported("kitty:1", 3)).not.toThrow();
+    expect(() => reg.setReported("nocolon", 3)).not.toThrow();
+  });
 });

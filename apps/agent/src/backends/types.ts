@@ -98,6 +98,14 @@ export interface TerminalBackend {
    */
   setWatched?(nativeIds: string[]): void;
   /**
+   * Spec 8.11 (tmux history): the tracker's monotonic `scrollbackTotal` for one session. A backend
+   * whose native scrollback counter is NOT monotonic (tmux's `history_size` saturates at
+   * `history-limit` and can shrink) needs this value to turn the phone's absolute `before` into a
+   * `capture-pane -S/-E` range. `ScreenTracker.processScreen` pushes it once per processed frame,
+   * through the registry, which strips the id prefix. Backends with absolute line numbers ignore it.
+   */
+  setReported?(nativeId: string, reported: number): void;
+  /**
    * Spec 8.12/8.13: `false` while the backend's transport is down. The registry keeps such a
    * member registered (it reconnects itself) but leaves it out of `hello.backends`. A backend
    * that omits this property is always considered connected. Named `isConnected` (not

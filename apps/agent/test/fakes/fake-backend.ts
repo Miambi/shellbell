@@ -35,6 +35,8 @@ export class FakeBackend implements TerminalBackend {
   getScreenCalls = 0;
   /** Every `setWatched` call the tracker or registry made, in order (spec 8.13). */
   watched: string[][] = [];
+  /** Every `setReported` call routed to this backend, in order (spec 8.11). */
+  reported: [string, number][] = [];
   /** Spec 8.12: `false` hides this backend from `hello.backends` without unregistering it. */
   isConnected = true;
   /**
@@ -156,6 +158,9 @@ export class FakeBackend implements TerminalBackend {
   }
   setWatched(ids: string[]): void {
     this.watched.push([...ids]);
+  }
+  setReported(id: string, value: number): void {
+    this.reported.push([id, value]);
   }
   on(handler: (e: BackendEvent) => void): () => void {
     this.handlers.add(handler);
