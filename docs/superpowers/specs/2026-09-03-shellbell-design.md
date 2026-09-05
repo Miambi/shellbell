@@ -50,9 +50,11 @@ them and must be regenerated from them if they ever disagree.
 - **See** every terminal session on a paired Mac from an iOS or Android phone, with the
   styles the terminal rendered (bold, colors, italics), including TUI programs such as
   Claude Code, `vim`, `htop`.
-- **Two backends in v1**: **iTerm2** (native API) and **tmux** (control mode). tmux is
-  how Shellbell reaches users of Ghostty, Warp, Terminal.app, Alacritty, Kitty, WezTerm —
-  none of which the competitor supports — and remote Linux machines over SSH.
+- **Three backends in v1**: **iTerm2** (native API), **tmux** (control mode) and
+  **Herdr** (local socket API, 8.13). tmux is how Shellbell reaches users of Ghostty,
+  Warp, Terminal.app, Alacritty, Kitty, WezTerm — none of which the competitor supports —
+  and remote Linux machines over SSH; Herdr is how it reaches the panes coding agents run
+  in, with a semantic `blocked` state no other backend can offer.
 - **Respond**: send a line, send raw keystrokes, send named keys (Ctrl‑C, Esc, arrows…),
   paste; one-tap replies for the "agent is asking y/n" case.
 - **Get rung**: a push notification when a long command finishes (with exit code) or a
@@ -155,7 +157,7 @@ These were decided in conversation and are not open.
 
 - **Agent** (`apps/agent`): the only component that talks to terminals. Runs every
   backend that is available on the Mac (iTerm2 if its API socket exists, tmux if a tmux
-  server is running) and presents their sessions as one list. Holds one outbound WebSocket
+  server is running, Herdr if its socket exists) and presents their sessions as one list. Holds one outbound WebSocket
   to the relay. Encrypts each inner message for a specific phone connection with that
   connection's `K_conn`. Decides when to ring. Owns pairing and is the **authority** on
   which phones are paired.
@@ -603,7 +605,7 @@ Normative schema: `packages/protocol/src/ctrl.ts`. All strings are bounded there
 | `unpair` | agent → relay, or phone → relay | `phoneFp` | Agent may unpair any; a phone only itself. DO deletes the row and closes that phone's socket (`4004`). From a phone: forwarded to the agent if online, else recorded in `pending_unpairs` for the next `unpaired` |
 | `push-token` | phone → relay | `token`, `platform: "ios"\|"android"`, `enabled: boolean` | Stored on the pairing row; `enabled:false` = never push this phone for this computer |
 | `lease` | phone → relay | `ttlMs: 0..120000` | Foreground lease (11.3). Sent after `auth-ok`, every 30 s (ttl 60 000), and with `0` when backgrounding |
-| `notify` | agent → relay | `sessionId`, `kind: "prompt"\|"idle"`, `exitCode?`, `durationMs?` | Triggers push per 11.3. **No title, no content.** |
+| `notify` | agent → relay | `sessionId`, `kind: "prompt"\|"idle"\|"blocked"`, `exitCode?`, `durationMs?` | Triggers push per 11.3. **No title, no content.** |
 | `phone-connected` | relay → agent | `phoneFp`, `connId`, `name` | When a paired phone authenticates |
 | `phone-disconnected` | relay → agent | `phoneFp`, `connId` | When its socket closes; the agent ignores unknown `connId`s |
 | `error` | relay → device | `code`, `message` | Informational |
@@ -622,10 +624,10 @@ Run     = { t: string, fg?: Color, bg?: Color, b?, i?, u?, s?, f?: boolean, n?: 
           // from the number of code points in t (wide CJK/emoji, combining marks)
 Line    = { r: Run[], w?: boolean }                 // w = soft-wrapped into the next row
 Cursor  = { x: number, y: number }                  // y = row on screen, 0-based; -1 if hidden
-SessionInfo = { id, backend: "iterm2"|"tmux", title, cwd?, cols, rows,
-                windowId, windowNumber, tabId, tabIndex, paneIndex,
-                isFocusedOnMac: boolean, state: "unknown"|"editing"|"running"|"finished" }
-          // id is "<backend>:<native id>", e.g. "iterm2:5A7B…" or "tmux:%3"
+SessionInfo = { id, backend: "iterm2"|"tmux"|"herdr", title, cwd?, cols, rows,
+                windowId, windowNumber, tabId, tabIndex, paneIndex, isFocusedOnMac: boolean,
+                state: "unknown"|"editing"|"running"|"finished"|"blocked" }
+          // id is "<backend>:<native id>", e.g. "iterm2:5A7B…", "tmux:%3" or "herdr:term_abc"
 ```
 
 **Both directions**
@@ -643,7 +645,7 @@ SessionInfo = { id, backend: "iterm2"|"tmux", title, cwd?, cols, rows,
 | `screen.snapshot` | `sessionId`, `cols`, `rows`, `cursor`, `lines: Line[]` (length = rows), `scrollbackTotal`, `gen`, `reset?: boolean`, `degraded?: boolean` | On subscribe, on resize, when a viewer missed a frame, when a diff would exceed 60 % of rows. `reset` = the buffer was cleared (phone drops history). `degraded` = styles stripped to fit 256 KB |
 | `screen.diff` | `sessionId`, `scroll` (≥ 0), `changed: { i, line }[]`, `cursor`, `scrollbackTotal`, `gen` | Otherwise. `scroll` = rows that left the top of the screen since the last frame. Apply order: shift, then `changed`. `gen` increments per frame per session |
 | `history` | `sessionId`, `before`, `lines: Line[]`, `oldestAvailable` | Response to `history.get`; `lines[k]` is absolute line `before - lines.length + k`; the app stops asking when `historyFrom <= oldestAvailable` |
-| `event` | `sessionId`, `kind: "prompt"\|"idle"\|"exit"`, `exitCode?`, `durationMs?`, `command?`, `at` | Sent to **every** connected phone, regardless of subscription (8.8) |
+| `event` | `sessionId`, `kind: "prompt"\|"idle"\|"exit"\|"blocked"`, `exitCode?`, `durationMs?`, `command?`, `at` | Sent to **every** connected phone, regardless of subscription (8.8) |
 | `ack` | `reqId`, `ok`, `error?`, `sessionId?` | Response to every phone message that carries `reqId` |
 
 **Phone → agent**
@@ -782,8 +784,9 @@ export type Capabilities = {
   absoluteLines: boolean;  // scrollbackTotal from the backend is a stable absolute line number
 };
 export type Screen = { cols: number; rows: number; cursor: Cursor; lines: Line[]; scrollbackTotal: number };
+export type AgentState = "working" | "blocked" | "idle" | "done" | "unknown";  // 8.13
 export type CreateWhere =
-  | { kind: "tab"; backend: "iterm2" | "tmux"; windowId?: string }
+  | { kind: "tab"; backend: "iterm2" | "tmux" | "herdr"; windowId?: string }
   | { kind: "split"; sessionId: string; direction: "vertical" | "horizontal" };
 export type BackendEvent =
   | { type: "screen-changed"; sessionId: string }
@@ -794,10 +797,11 @@ export type BackendEvent =
   | { type: "title-changed"; sessionId: string }
   | { type: "command-start"; sessionId: string; command: string; at: number }
   | { type: "command-end"; sessionId: string; exitCode: number; at: number }
-  | { type: "prompt"; sessionId: string; at: number };
+  | { type: "prompt"; sessionId: string; at: number }
+  | { type: "agent-state"; sessionId: string; state: AgentState; agent?: string; at: number };  // 8.13
 
 export interface TerminalBackend {
-  readonly name: "iterm2" | "tmux";
+  readonly name: "iterm2" | "tmux" | "herdr";
   readonly capabilities: Capabilities;
   connect(): Promise<void>;                     // throws BackendUnavailable with a user-facing hint
   close(): Promise<void>;
@@ -808,6 +812,8 @@ export interface TerminalBackend {
   createSession(where: CreateWhere): Promise<string>;
   focus(sessionId: string): Promise<void>;      // may throw Unsupported
   on(handler: (e: BackendEvent) => void): () => void;
+  setWatched?(nativeIds: string[]): void;   // 8.13: which sessions a phone is viewing
+  readonly connected?: boolean;             // 8.13: false while the backend's transport is down
 }
 ```
 
@@ -976,8 +982,11 @@ State per session `S`:
      `lastSentGen = gen`. Encoded size > 256 KB → re-encode with styles stripped and
      `degraded: true`.
   6. `lastKeys = keys; lastBackendScrollback = screen.scrollbackTotal; inflight = false`.
-- **Per-phone cap**: at most **40 frames/s per connection**; a viewer that would exceed
-  it is skipped this tick (and therefore gets a snapshot next tick via the rule above).
+- **Global frame cap** (superseded the per-phone cap on 2026-09-05, ruling R10): at most
+  **40 frames/s across all viewers** — one refill token bucket on the agent's single relay socket,
+  which the relay charges at 60 msg/s. When tokens are scarce, viewers are served by "ticks skipped"
+  descending with a rotating tie-break so nobody starves; a skipped viewer gets a catch-up snapshot
+  next time (marked `degraded` + `stripStyles` after 3 consecutive skips).
 - Errors from `getScreen` (session gone) → remove the session and emit `sessions`.
 
 Tailing a log costs one new line per frame. Alternate-screen programs (`vim`, `htop`)
@@ -1141,7 +1150,12 @@ ranges and emoji presentation ranges; 1 otherwise. The exact range table is in P
   `~/Library/Application Support/iTerm2/private/socket` exists (or TCP 1912 answers);
   tmux if `tmux -V` succeeds with version ≥ 3.2 and `tmux list-sessions` exits 0.
 - Each detected backend is `connect()`ed independently; a failure in one never affects
-  the other. `hello.backends` lists the connected ones; changes trigger a new `hello`.
+  the others. `hello.backends` lists the connected ones — a member that reports
+  `connected: false` (its transport is down, 8.13) is excluded even though it is still
+  registered; any change to that set triggers a new `hello`.
+- `capabilities` are **per session** where it matters: the tracker asks the registry for
+  the owning backend's capabilities (`capabilitiesOf(id)`) rather than an all-backends
+  AND, so one backend without `absoluteLines` cannot degrade another's diffing.
 - **Ids:** the registry exposes a `TerminalBackend`-shaped facade to the agent core. It
   prefixes every native id with `"<name>:"` on the way out and strips it on the way in,
   and routes calls to the owning backend. Unknown prefix → `SessionGone`.
@@ -1153,72 +1167,139 @@ ranges and emoji presentation ranges; 1 otherwise. The exact range table is in P
   such tabs. Rule: hide any tmux-backend session whose tmux `window_id` (`@N`) equals a
   `tmux_window_id` reported by iTerm2. iTerm2 wins (native styles, prompt events).
 - **Ordering in `sessions`:** iTerm2 sessions first (window number, tab index, pane
-  index), then tmux (session index, window index, pane index).
+  index), then tmux (session index, window index, pane index), then herdr (workspace
+  number, tab number, pane rect order). Herdr needs no de-duplication rule: its panes are
+  never also iTerm2 or tmux sessions.
 
 ---
 
-### 8.13 Herdr backend (`src/backends/herdr/`) — added 2026-09-05
+### 8.13 Herdr backend (`src/backends/herdr/`) — added 2026-09-05, revised 2026-09-05 after external review
 
 [Herdr](https://herdr.dev) is an Apache-2.0 Rust runtime that owns the PTYs coding agents run in
 (Claude Code, Codex, Cursor, OpenCode, …), with a local socket API and a semantic
 `working | blocked | idle | done` state per pane. It is the third `TerminalBackend`
 (`BackendName` gains `"herdr"`), prioritised because it reaches the coding-agent audience and
-because `blocked` is exactly Shellbell's "needs you" signal. Facts below were verified against
-herdr v0.8.2 source and docs (research report kept out of the repo; key facts restated here).
+because `blocked` is exactly Shellbell's "needs you" signal. Facts below were verified against the
+herdr repository at `master` **after** the v0.8.2 release (research report kept out of the repo; key
+facts restated here). Herdr's JSON API is pre-1.0 and additive by habit, not by contract.
 
-**Discovery and transport.** Socket at `$HERDR_SOCKET_PATH`, else `$XDG_CONFIG_HOME/herdr/herdr.sock`,
-else `~/.config/herdr/herdr.sock` (mode 0600, no auth). Newline-delimited JSON, **one request per
-connection**: open, write one line `{"id","method","params"}`, read one response line, close. Long-lived
-methods (`events.subscribe`, `events.wait`, `agent.wait`) keep their connection open and push bare
-`{"event","data"}` lines after a `subscription_started` ack (server polls state every 100 ms; no replay).
-`ping` returns `{version, protocol, capabilities}`; we require `protocol >= 22` (herdr ≥ 0.7.2) and refuse
-older with `BackendUnavailable` (hint: upgrade). Server restart = EOF on every connection and the socket
-file disappears: the backend polls for the socket every 2 s, then re-subscribes and re-snapshots.
+**Discovery and transport.** Socket at `$HERDR_SOCKET_PATH`, else — when `$HERDR_SESSION=<name>` is
+set — `<config>/herdr/sessions/<name>/herdr.sock`, else `<config>/herdr/herdr.sock`, where
+`<config>` is `$XDG_CONFIG_HOME` or `~/.config` (mode 0600, no auth; same layout on macOS and
+Linux). Newline-delimited JSON, **one request per connection**: open, write one line
+`{"id","method","params"}`, read one response line, close. Long-lived methods (`events.subscribe`,
+`events.wait`, `agent.wait`) keep their connection open and push bare `{"event","data"}` lines after
+a `subscription_started` ack (server polls state every 100 ms; **no replay**, and events carry no
+revision or sequence number of any kind). `ping` returns `{version, protocol, capabilities}`.
+**Version gate:** parse `version` as semver and require **≥ 0.7.2**, then feature-probe
+`session.snapshot` (it landed in 0.7.2); `protocol` is Herdr's *binary* client/server generation and
+must never be used as the JSON floor. Anything older, or a snapshot that answers
+`unsupported`/`invalid_request`, → `BackendUnavailable` with an upgrade hint. Server restart = EOF on
+every connection and the socket file disappears: the backend polls for the socket every 2 s, then
+re-subscribes and re-snapshots.
 
 **Sessions.** One Herdr *pane* is one Shellbell session. Native id = the pane's stable `terminal_id`
-(pane ids `w1:p1` are reassigned across restarts); the backend keeps a `terminal_id → pane_id` map
-refreshed from `session.snapshot` and from `pane.created/closed/exited/moved/focused/updated` and
-`layout.updated` events. Title = agent name when an agent is attached, else pane title, else `cwd`
-basename, else `"Pane"`; `cwd` from pane info; `tmuxWindowId` never set. Bootstrap = subscribe → buffer
-events → `session.snapshot` → replay buffered events with `revision` ≥ snapshot's.
+(pane ids `w1:p1` are reassigned across restarts and by `pane.move`); the backend keeps a
+`terminal_id → pane_id` map rebuilt from `session.snapshot`. Title = agent name when an agent is
+attached, else pane title, else `cwd` basename, else `"Pane"`; `cwd` from pane info; `tmuxWindowId`
+never set. `cols`/`rows` come from the pane's layout rect (`layouts[].panes[].rect.{width,height}`,
+cells) and are refreshed on `layout.updated`; if a rect is missing, `rows` falls back to
+`scroll.viewport_rows` and `cols` to 80.
+
+**Bootstrap and event handling.** Open `events.subscribe` and wait for its ack, buffering everything
+that arrives; then `session.snapshot`; then apply the snapshot; then process the buffered events.
+Because no event carries a revision, ordering against the snapshot is impossible, so the events are
+split by kind:
+
+- **Lifecycle events are hints, never mutations.** `pane.created/closed/exited/moved/updated`,
+  `tab.*` and `workspace.*` schedule **one debounced (250 ms), single-flight `session.snapshot`
+  refresh**; the snapshot is the only writer of the pane map. The refresh reconciles: panes that
+  disappeared emit `session-removed`, new panes emit `session-added`, and the round ends with
+  `layout-changed`. This is also why the subscription set never has to be rebuilt for a new pane
+  (see below), so there is no self-triggering resubscribe loop.
+- **`pane.agent_status_changed` is applied directly, latest-wins** — it is the one event whose whole
+  payload is the new value, and it is the one that must not wait 250 ms.
+- `pane.focused`/`tab.focused`/`workspace.focused` → `focus-changed`; `pane.scroll_changed` updates
+  the cached scroll metrics; `layout.updated` updates rects (both axes) and emits `layout-changed`.
+
+Per-pane subscriptions (`pane.agent_status_changed`, `pane.scroll_changed`) are opened for the panes
+known at subscribe time. When the pane set changes, the stream is rebuilt **two-phase**: open and
+**ack** the new subscription connection first, then swap it in and close the old one, so no event
+window is lost; if the following snapshot fails, the new stream is closed and the reconnect path
+takes over.
+
+**Disconnect.** When the stream ends or the socket goes away the backend emits `session-removed` for
+every Herdr pane, clears its maps, and reports `connected: false`; the registry excludes a
+disconnected member from `hello.backends` and the agent sends a fresh `hello` (8.12). On reconnect
+the panes come back as `session-added` with their initial state, which the event engine treats as a
+first sighting — so an already-blocked agent does not ring for history.
 
 **Screen.** `getScreen` = `pane.read {pane_id, source:"visible", format:"ansi"}` → one string per line
-→ `parseSgrLine` (7.x / Plan 01 `sgr.ts`) → `Line`; rows = `scroll.viewport_rows` from the snapshot,
-cols = the pane's layout rect width; pad/truncate to `rows`. Herdr exposes **no cursor**: cursor is
-placed at the end of the last non-blank visible line (`x` = its cell width, `y` = its row) and the
-mobile app dims a cursor for `herdr` sessions (10.x). `scrollbackTotal` = `scroll.max_offset_from_bottom
-+ viewport_rows`; `absoluteLines: false`, so the tracker uses `lineKey` overlap only. `history` =
-`pane.read {source:"recent", lines ≤ 1000, format:"ansi"}`, styled, best-effort (TUI apps have no real
-scrollback). **Change detection:** Herdr has no screen-change push, so a *revision poller* runs only
-for panes that at least one phone is viewing: every 200 ms call `pane.copy_motion` (side-effect free)
-and compare `content_revision`; on change emit `screen-changed`. Non-viewed panes are never polled.
+→ `parseSgrLine` (7.x / Plan 01 `sgr.ts`) → `Line`; rows/cols from the cached rect; pad with empty
+lines and, when more rows come back than fit, keep the **bottom** `rows` (a terminal viewport is
+bottom-anchored). Herdr exposes **no cursor**: it is placed at the end of the last non-blank visible
+line (`y` = its row, `x` = its cell width **clamped to `cols - 1`**) and the mobile app dims the
+cursor for `herdr` sessions (10.x). `scrollbackTotal` = **`scroll.max_offset_from_bottom`** — the
+number of rows above the viewport, which is exactly the phone's `historyFrom` origin (7.4: `history`
+lines are `before - lines.length + k`); it is kept fresh by subscribing to `pane.scroll_changed`.
+`absoluteLines: false`, so the tracker uses `lineKey` overlap and the registry consults **each
+session's own backend** for that capability rather than an all-backends AND. `history` =
+`pane.read {source:"recent", lines ≤ 1000, format:"ansi"}`, styled, best-effort: for a full-screen
+TUI agent an ANSI read never scrolls the app, and a deep read of a busy agent answers
+`agent_not_idle` — in both cases fall back to the visible read and report `oldestAvailable` so the
+phone stops paging.
+
+**Change detection.** Herdr has no screen-change push (`pane.output_changed` is not a subscription
+and `events.wait` rejects it), so a *revision poller* runs **only for panes at least one phone is
+viewing** (`TerminalBackend.setWatched(nativeIds)`, driven by the screen tracker): call
+`pane.copy_motion` (side-effect free, needs no focus) and compare `content_revision`; on change emit
+`screen-changed`. The interval is **adaptive** — 200 ms while the pane keeps changing, 500 ms after
+5 s unchanged, 1000 ms cap — because every probe is a fresh connection and Herdr spawns a thread per
+connection. An **odd** `content_revision` means a write is in flight: skip it without emitting.
+Non-viewed panes are never polled, which means the 8.8 idle heuristic only runs for Herdr shells
+**while a phone is viewing them**; agent panes are covered by agent state instead, which needs no
+polling.
 
 **Agent state → rings.** Subscribe to `pane.agent_status_changed`; emit a new backend event
-`{ kind: "agent-state", sessionId, state: "working"|"blocked"|"idle"|"done"|"unknown", agent }`.
-`EventEngine` maps it: `blocked` → ring `kind:"blocked"` immediately (once per transition, 60 s limit);
-`working → idle|done` after ≥ `notifyMinCommandMs` of `working` → ring `kind:"prompt"` with `durationMs`
-and no `exitCode`; `unknown` → nothing. `SessionInfo.state` shows `running` for `working`, `finished` for
-`idle|done` (the `command-end` precedent), and a new `blocked`. A pane that is already `blocked`
-when first seen (agent start, Herdr reconnect) does not ring — adoption is not a transition. Protocol changes: `EventKindSchema` += `"blocked"`; `notify.kind`
-+= `"blocked"` with push body **"An agent is waiting for you"** (11.3); `SessionInfo.state` += `"blocked"`.
-Herdr has no prompt/command lifecycle for plain shells, so `capabilities.prompts` is `false` and idle
-heuristics (8.8) apply to shells as with tmux. Caveat: `pane.focus` marks a `done` agent as seen
-(Herdr flips it to `idle`); we accept that.
+`{ type: "agent-state", sessionId, state: "working"|"blocked"|"idle"|"done"|"unknown", agent?, at }`
+(`BackendEvent` discriminates on `type`, 8.4). `EventEngine` maps it: `blocked` → ring
+`kind:"blocked"` immediately (once per transition, 60 s limit); `working → idle|done` after
+≥ `notifyMinCommandMs` of `working` → ring `kind:"prompt"` with `durationMs` and no `exitCode`;
+`unknown` → nothing. A pane that is already blocked when first seen (agent start, Herdr reconnect)
+does not ring — adoption is not a transition. `SessionInfo.state` shows `running` for `working`,
+`finished` for `idle` **and** `done` (Herdr's seen/unseen distinction is deliberately dropped: it
+depends on Herdr UI focus, which the phone cannot observe), and a new `blocked`. Protocol changes:
+`EventKindSchema` += `"blocked"`; `notify.kind` += `"blocked"` with push body **"An agent is waiting
+for you"** (11.3); `SessionInfo.state` += `"blocked"`. Herdr has no prompt/command lifecycle and no
+exit codes, so `capabilities.prompts` is `false`.
 
-**Input.** `sendText` → `pane.send_text {pane_id, text}`; named keys → `pane.send_keys {pane_id,
-keys:[…]}` with a fixed `NamedKey → herdr key` table (`enter`, `tab`, `esc`, `up/down/left/right`,
-`ctrl+c`, `ctrl+d`, `ctrl+z`, `ctrl+l`, `shift+tab`, `f1…f12`, `minus`); keys without a Herdr name go
-through `pane.send_text` as raw bytes (`bytesForKey`). Never log the text; log lengths.
+**Input.** `sendText` → `pane.send_text {pane_id, text}`, except that a payload which is exactly one
+named key's bytes goes through `pane.send_keys {pane_id, keys:[…]}` with a fixed table (`enter` for
+`\r` **and** `\n`, `tab` for `\t`, `esc`, `backspace`, `up/down/left/right`, `ctrl+a…ctrl+z`,
+`shift+tab`, `f1…f12`). `pane.send_text` writes literal bytes and does **not** submit, so
+`input.line` is `pane.send_text` of the text without its trailing newline followed by
+`pane.send_keys ["enter"]`. Keys with no Herdr name (`delete`, `home`, `end`, `page-up`,
+`page-down`, `ctrl-space`) go through `pane.send_text` as raw bytes (`bytesForKey`) — Herdr
+validates every key name before writing anything, so one unknown name would fail the whole call.
+Never log the text; log lengths.
 
-**Create / focus.** `session.create` with `where.kind = "tab"` → `tab.create {workspace_id, focus:false}`
-(workspace of the reference pane, else the focused one); `where.kind = "split"` → `pane.split
-{target_pane_id, direction: "right"|"down"}`; `left/up` are `unsupported`; Shellbell `vertical` → Herdr `right`, `horizontal` → `down`. `focus` → `pane.focus`.
-Capabilities: `{ subscribe: true, prompts: false, createSession: true, focus: true, history: true,
-absoluteLines: true → false }`.
+**Create / focus.** `session.create` with `where.kind = "tab"` → `tab.create {workspace_id,
+focus:false}` (workspace of the reference pane, else the focused one; creating a tab must not steal
+the Mac's focus). `where.kind = "split"` → `pane.split {target_pane_id, direction}` with Shellbell
+`"vertical"` → Herdr `"right"` and `"horizontal"` → `"down"`: Shellbell's axis names the *divider*,
+matching iTerm2's `SplitPane.VERTICAL` (side-by-side panes), and Herdr's `down` is a horizontal
+divider. Herdr has no left/up split. `focus` → `pane.focus`; only ever from an explicit user action,
+because focusing a `done` agent marks it seen and flips it to `idle`. Capabilities:
+`{ subscribe: true, prompts: false, createSession: true, focus: true, history: true,
+absoluteLines: false }`.
 
 **Not running / not installed.** No socket → `BackendUnavailable` with hint
-`Install: curl -fsSL https://herdr.dev/install.sh | sh, then start herdr`. `doctor` reports version and
-protocol. Herdr and iTerm2 can run together; no de-dup rule is needed (Herdr panes are not iTerm2 sessions).
+`Install: curl -fsSL https://herdr.dev/install.sh | sh, then start herdr`. Herdr is **optional**, so
+`doctor` reports an absent Herdr as a **passing** check ("not installed (optional)") and only fails
+when a Herdr that *is* running is too old or unreachable; when present it prints the version and
+protocol. A pane target that answers `not_found`/`pane_not_found`/`stale_pane_target` triggers the
+snapshot refresh (which emits `session-removed`) rather than a silent drop. Herdr and iTerm2 can run
+together; no de-dup rule is needed (Herdr panes are not iTerm2 sessions).
 
 **Deferred (Plan 06+).** True cursor and TUI-exact fidelity via `herdr terminal session observe`
 (base64 `terminal.frame` bytes into a headless VT emulator). Not needed for v1.
@@ -1306,7 +1387,8 @@ Row caps: `pairings` ≤ 10 (`pairing-add` beyond that is ignored with an `error
 4. `POST https://exp.host/--/api/v2/push/send` with
    `[{ to, title: computerName, body, data: { computerFp, sessionId, kind }, sound: "default", priority: "high", channelId: "rings", categoryId: "ring" }]`.
    `body` by kind: `prompt` → `"A command finished — exit <code> after <duration>"`;
-   `idle` → `"A session went quiet — waiting for you?"`; `<duration>` as `43s` / `4m 12s`
+   `idle` → `"A session went quiet — waiting for you?"`;
+   `blocked` → `"An agent is waiting for you"`; `<duration>` as `43s` / `4m 12s`
    / `1h 03m`. The app shows the real session title once opened.
 5. A ticket with `details.error == "DeviceNotRegistered"` clears that phone's token. Push
    *receipts* (delayed failures) are **not** fetched in v1; stale tokens that fail only at
@@ -1488,11 +1570,15 @@ Bottom bar (glass on iOS where available), three rows:
    - Paste → `input.text` with clipboard content (no trailing newline).
 - Haptics: `impactAsync(Light)` on every send; `notificationAsync(Success)` on pair;
   `notificationAsync(Warning)` when an `event` arrives for the session you are viewing.
-- Header: session title, computer accent dot, backend badge (`iTerm2` / `tmux`), state
-  badge, `⋯` menu: Bring to front on Mac (iTerm2 only) · New tab · Split vertical · Split
-  horizontal. Items are hidden when the backend lacks the capability.
+- Header: session title, computer accent dot, backend badge (`iTerm2` / `tmux` / `Herdr`),
+  state badge (incl. `blocked`), `⋯` menu: Bring to front on Mac (iTerm2 and Herdr) · New
+  tab · Split vertical · Split horizontal. Items are hidden when the backend lacks the
+  capability. For `herdr` sessions the cursor is dimmed (8.13: it is inferred, not real).
+- **Unknown enum values are opaque, never fatal:** a `SessionInfo.backend`, `state` or
+  `event.kind` the app does not recognise is rendered as a generic badge with the raw
+  string and otherwise treated normally, so an older app never rejects a newer agent.
 - Sessions list groups by backend, then window/tab; "＋" offers "New iTerm2 tab" / "New
-  tmux window" according to `hello.backends`.
+  tmux window" / "New Herdr tab" according to `hello.backends`.
 - `expo-keep-awake` active while this screen is mounted.
 
 ### 10.7 Bootstrap, identity and pairing (`src/bootstrap/crypto.ts`, `src/identity/`, `app/pair.tsx`)
@@ -1589,6 +1675,10 @@ open socket with an unexpired lease. A foregrounded phone renews its lease every
 (ttl 60 s) and receives `event`s inline (for every session, not just the viewed one); a
 phone that backgrounds sends `lease 0` and closes; a phone whose JS was suspended before
 it could say so becomes push-eligible when its lease expires (≤ 60 s).
+
+Bodies are generic and fixed by kind (9.2): `prompt` → "A command finished — exit … after …",
+`idle` → "A session went quiet — waiting for you?", `blocked` → **"An agent is waiting for you"**
+(8.13). Never the session title, the agent name, or any content.
 
 ---
 
@@ -1718,7 +1808,7 @@ self-host.
   history range arithmetic; key table.
 - Registry: id prefixing/stripping; routing; `tmux_window_id` de-dup; one backend failing
   does not affect the other.
-- **Live integration** (opt-in): `SHELLBELL_ITERM_E2E=1` against real iTerm2;
+- **Live integration** (opt-in): `SHELLBELL_LIVE=1` against real iTerm2 (and, in Plan 04b, real Herdr);
   `SHELLBELL_TMUX_E2E=1` against a throwaway `tmux -L shellbell-test` server (styled
   capture, `%output` after `send-keys`, command channel replies).
 

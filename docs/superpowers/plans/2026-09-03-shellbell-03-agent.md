@@ -10,6 +10,62 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-03-shellbell-design.md` (v2) — sections 6.4 (agent side), 6.6–6.7, 7.4, 8.1–8.10, 8.12 (iTerm2-only for now), 12, 15 (agent tests), 16. Plans 01 and 02 must be complete.
 
+## Post-execution errata (2026-09-05)
+
+Executed on branch `sdd/plan-03-agent` (12 tasks, 9 fix rounds, 1 final fix wave; whole-branch review
+and all rulings R1–R37 in the SDD ledger). Where this text still differs from the shipped code, the
+code is the authority. A literal re-run must apply these:
+
+- **Package name.** The agent package is `shellbell` (bin `shellbell`), so filters are
+  `pnpm -F shellbell …`, not `@shellbell/agent`. Its `typecheck`/`test` scripts run `buf generate`
+  first so CI has the generated protobuf code.
+- **Config/identity (Task 1):** every secret/config write is temp-file + fsync + rename with mode 0600;
+  loads use `safeParse` and name the file path in errors (never contents).
+- **RelayClient (Task 2):** spec §12 close codes are acted on — `4005` stops the client and emits
+  `superseded` (the CLI prints a message and exits), `auth-fail bad-sig|fp-mismatch` stop permanently,
+  `4413/4429` reconnect without resetting backoff; handlers are scoped to the current socket;
+  `sendCtrl/sendEnvelope` return `boolean` and only send after `auth-ok`; `FakeRelay` gained
+  `autoPong`, `closeAgent`, `nextAuthFailReason`, a buffered `nextCtrlFromAgent`, and (final wave)
+  relay-like pairing-window gating.
+- **PhoneLink (Task 3):** only AEAD failures count toward the 20-failure breaker; schema-invalid but
+  authentic frames advance `seqIn`; a replayed `conn.hello` (same phone nonce) is ignored; re-handshake
+  resets `viewed`.
+- **ITerm2Client (Task 4):** `connect()` rejects on close/error mid-connect and frees failed sockets.
+- **ITerm2Backend (Task 6):** `attempt` resets only after subscriptions + `ListSessions` succeed
+  (failures → `BackendUnavailable` + hint); fire-and-forget requests carry `.catch`; `emit()` guards
+  subscribers; variable requests once per session; single-flight `applyLayout` with `try/finally`;
+  `sendText` maps only `SESSION_NOT_FOUND` to `SessionGone`; `title` fallback uses `||`.
+- **ScreenTracker (Task 7):** `maxFramesPerSecond` is one **global** refill bucket (spec §8.6's
+  "per-phone" wording is superseded — R10); viewers are served by `skipped` descending with a
+  rotating tie-break; snapshots are encoded once per session per tick; no-op ticks send nothing
+  (cursor moves still do); `onSessionGone` option; `stopped` flag; `absoluteLines` is consulted per
+  backend via the registry (final wave), not the facade AND.
+- **EventEngine (Task 8):** idle-dedupe window is `5 s + idleQuietMs` (ruling B8/R7); `Notifier.forget`
+  + 60 s pruning.
+- **PairingManager (Task 9):** 32-byte key refinement and try/catch around `derivePairKey`
+  (`bad-code`); one confirmation at a time (`too-many`); in-manager `confirmTimeoutMs = 60 s`;
+  `pairingCount` cap; QR payload validated; `closeWindow` zero-fills code/gate; post-confirm
+  window-identity check; `readvertise()` re-sends `pairing-open` after every `auth-ok` (final wave —
+  the first-run QR was otherwise sent before auth and dropped).
+- **Registry/Agent (Task 10):** links keyed by `connId`; `safe()` guards every handler incl. the 1 s
+  tick; `superseded` → `stop()` + `onSuperseded`; `listSessions` is failure-isolated per member;
+  `reqId` reserved before `sendText`; `stop()` tears down window/links/viewers; `session.focus` on an
+  unknown id acks `session-gone`; `snapshot.get` for a non-viewed session acks `"not-viewing"` (not a
+  spec-enumerated string — spec errata); `--relay` overrides both the socket and the QR URL (final
+  wave; `ws://` allowed only via the explicit flag, with a warning).
+- **Control/CLI (Task 11):** `{event:"closed"}` streamed to pair clients (registered only after
+  `openPairing()` returns); socket 0600; confirm routed to the control socket whenever a pair client
+  is connected; stale-socket fallback; single `shutdown()` (also from `onSuperseded`, second SIGINT
+  force-exits); `config set relay` validates `wss://`; `plistNodeOk` checks the path exists; live-pid
+  refusal; `controlRequest` 5 s timeout; VERSION from package.json; tsdown `fixedExtension: false`,
+  no banner; README says iTerm2 only (tmux/Herdr planned).
+- **Live test (Task 12):** gated on `SHELLBELL_LIVE` (spec §15 says `SHELLBELL_ITERM_E2E` — spec
+  errata); 60 s timeout; requires a `command-end`/`prompt` event (shell integration); never prints
+  screen content; uses a scratch tab.
+- **Spec drift to record:** §8.1 `status` prints JSON (fp/relay URL/backend lines deferred to Plan 06);
+  §8.1 `doctor` checks are a v1 subset; §8.12 "new `hello` on backend-set change" deferred to
+  Plan 04b Task 6; §8.6 per-phone cap → global; §15 env var name.
+
 ## Global Constraints
 
 - All Plan 01 constraints apply. Runtime deps of the published package: `ws`, `@bufbuild/protobuf`, `commander`, `qrcode-terminal`, `zod`. `@shellbell/protocol` **and its own deps** (`cborg`, `@noble/*`) are bundled into `dist/cli.js` by tsdown (`noExternal: [/^@shellbell\//, "cborg", /^@noble\//]`); `zod` stays external because it is a declared runtime dep.
@@ -5238,9 +5294,11 @@ errata of Plans 01 and 02. The plan text above has been corrected in place. What
   `Agent` sends `hello` once per handshake and re-broadcasts `sessions` on every layout change. Phones
   therefore learn about a backend appearing or disappearing through `sessions`, not `hello`. Revisit in
   Plan 04, when tmux makes the backend set actually dynamic.
-- The `ScreenTracker` still drops a session locally when `getScreen` throws without asking the `Agent` to
-  re-broadcast `sessions` (spec 8.6, last bullet). The next layout event corrects it.
-- The `FakeRelay` does not model gate validation, the one-`pairing-request`-per-socket rule, the
-  post-reject socket close, the 5-admission cap, or the token bucket. Those are covered by the relay's
+- ~~The `ScreenTracker` drops a session locally when `getScreen` throws without re-broadcasting
+  `sessions`.~~ Superseded during execution (ruling R26): `ScreenTracker` takes `onSessionGone`, which
+  the `Agent` wires to its `sessions` broadcast; transient `getScreen` errors keep the viewers.
+- The `FakeRelay` does not model the one-`pairing-request`-per-socket rule, the post-reject socket
+  close, the 5-admission cap, or the token bucket (it does model the pairing window + gate hash since
+  the final fix wave, R37). Those are covered by the relay's
   own tests in Plan 02; the limits are written down in Task 2's Interfaces so nobody mistakes the double
   for the real thing.
