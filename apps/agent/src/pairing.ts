@@ -55,11 +55,16 @@ const RequestBody = z.object({
   platform: z.enum(["ios", "android"]),
 });
 
+/** Relay admits at most this many pairing sockets per window (spec 6.4, `WINDOW_MAX_ADMITTED`). */
+const WINDOW_MAX_REQUESTS = 5;
+
 interface Window {
   code: Uint8Array;
   gate: Uint8Array;
   expiresAt: number;
   failures: number;
+  /** pairing-requests seen in this window; mirrors the relay's 5-admission cap (spec 6.4). */
+  requests: number;
 }
 
 export class PairingManager {
@@ -98,7 +103,7 @@ export class PairingManager {
     // whether ws:// is actually allowed for this relayUrl was already decided upstream (CLI
     // `--relay` / `config set relay --insecure`) before it ever reached this class.
     parseQr(qrText, { allowInsecure: true });
-    this.window = { code, gate, expiresAt, failures: 0 };
+    this.window = { code, gate, expiresAt, failures: 0, requests: 0 };
     // C1/I1: on first run the relay socket has not authenticated yet (this send is dropped), and
     // a mid-window reconnect drops it again -- `readvertise()` is what actually gets the window
     // to the relay in both cases. This send is still worth attempting: it is a no-op cost when it
@@ -122,6 +127,13 @@ export class PairingManager {
    */
   readvertise(): void {
     if (!this.window || this.now() >= this.window.expiresAt) return;
+    // The relay deletes its window row when our socket drops and would recreate it with a fresh
+    // admission budget; mirror the 5-admission cap here so a reconnect cannot lift it.
+    if (this.window.requests >= WINDOW_MAX_REQUESTS) {
+      this.log.info("pairing window not re-advertised: admission cap reached; closing");
+      this.closeWindow();
+      return;
+    }
     const sent = this.opts.sendCtrl({
       type: "pairing-open",
       gateHash: sha256(this.window.gate),
@@ -179,6 +191,7 @@ export class PairingManager {
       this.log.warn("pairing rejected", { reason, phone: msg.phoneFp.slice(0, 8) });
     };
     if (!this.isOpen || !this.window) return reject("window-closed");
+    this.window.requests += 1;
     if (this.opts.pairingCount() >= MAX_PAIRINGS) return reject("too-many");
     if (this.pendingFp !== null) return reject("too-many");
     const win = this.window;

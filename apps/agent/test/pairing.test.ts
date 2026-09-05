@@ -306,6 +306,17 @@ describe("PairingManager", () => {
       expect(pm.isOpen).toBe(true);
     });
 
+    it("does not re-advertise once five requests were seen in the window (admission cap)", async () => {
+      const { pm, sent } = setup(async () => false); // every request is declined
+      const { qrText } = pm.openWindow();
+      for (let i = 0; i < 5; i++) await pm.handleRequest(phoneRequest(qrText).msg);
+      expect(pm.isOpen).toBe(true);
+      pm.readvertise();
+      expect(sent.filter((m) => m.type === "pairing-open")).toHaveLength(1);
+      expect(sent.filter((m) => m.type === "pairing-close")).toHaveLength(1);
+      expect(pm.isOpen).toBe(false);
+    });
+
     it("readvertising after a reconnect still lets a phone pair (regression for I1)", async () => {
       const { pm, sent, setSendOk } = setup(async () => true);
       const { qrText } = pm.openWindow();
