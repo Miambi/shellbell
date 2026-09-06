@@ -5454,7 +5454,75 @@ replaces the guess with the measurement.
 
 ## Post-spike errata
 
-*(Task 8 appends here. Empty until the spike has run.)*
+Task 8 (revised) implemented the spike's findings. Deltas, one bullet per change:
+
+- **Assumed:** `pane.copy_motion` exists and returns a `content_revision` counter, so the backend
+  polls it per watched pane with an adaptive interval (`POLL_FAST/MEDIUM/SLOW_MS`,
+  `SETTLE_MEDIUM/SLOW_MS`). **Measured:** it does not exist in Herdr 0.8.2 — `invalid_request:
+  unknown variant` — while `pane.updated` events carry a monotonic `pane.revision` with no polling
+  needed at all (`docs/spike-herdr.md` Q9). **Changed:** the entire revision poller is deleted
+  (`runProbes`, `probes`, `pollTimer`, `polling`, `intervalFor`, the `POLL_*`/`SETTLE_*` constants,
+  `revisionPollMs`, `CopyMotionResult`, and `HerdrBackend.setWatched` — `TerminalBackend.setWatched?`
+  stays optional and unimplemented by this backend). Change detection is now purely event-driven:
+  `handleEvent`'s `pane_updated` case updates scroll/agent_status/`revision` in place for a known
+  pane and emits `screen-changed` on a numeric revision change, for every pane, watched or not.
+- **Assumed:** a `pane_updated` (`pane.updated`) event for an already-known pane is just another
+  lifecycle hint that schedules a debounced `session.snapshot`. **Measured:** its payload is a full
+  `PaneInfo` (`docs/spike-herdr.md`'s sanitized payload). **Changed:** only an *unknown* `pane_id`
+  in a `pane_updated` event still schedules a snapshot (a new pane); a known pane is updated
+  directly. `applySnapshot` also now stores each pane's `revision` and emits `screen-changed` for a
+  retained pane whose revision moved between two snapshots (Step 2) — covering events missed while
+  a debounced refresh was in flight. A pane map wiped by a real disconnect (`onStreamEnd`) still
+  treats every reappearing pane as a first sighting (silent, per spec), relying on `session-added`
+  instead — confirmed by a dedicated regression test.
+- **Assumed (plan-only synthetic fixtures):** the herdr fixtures would model several panes across
+  two windows/workspaces, mirroring the pre-spike test design. **Measured:** the human spike ran
+  against one workspace with one plain shell pane (`docs/spike-herdr.md`'s method note); the
+  captured `session.snapshot`/`pane.get`/`pane.read` fixtures reflect exactly that one pane.
+  **Changed:** the captured pane is adopted verbatim as `term_a` in `herdr-session-snapshot.json`
+  (only its `terminal_id` was renamed from the real `term_65ac0d4d5c3b51` to `term_a` for fixture
+  readability — an opaque per-run token, not a measurement); the two pre-existing SYNTHETIC sibling
+  panes `term_b` (idle zsh) and `term_c` (a blocked Claude Code agent in a second window) are kept
+  so `herdr-backend.test.ts`/`herdr-agent.test.ts` can still exercise multi-pane bookkeeping
+  (sorting, subscriptions, reconciliation, restart renumbering) that the one-pane spike never
+  touched. Every assertion about `term_a` itself (title, cwd, cols/rows, screen/history content,
+  initial state `"unknown"`) now reflects the real capture; `term_b`/`term_c` are unchanged from
+  before the spike and are unrelated to anything it measured.
+- **Assumed:** `herdr-convert.test.ts` would need only string/number tweaks against the captured
+  ANSI. **Measured:** the real `pane.read visible` text is genuine `pnpm -F shellbell spike:herdr`
+  terminal output (37 rows, CSI finals all `m` — confirmed programmatically, so `parseSgrLine`
+  remains sufficient and no fallback path is needed), not a synthetic prompt/CJK sample, and it
+  contains no wide-cell (CJK) row. **Changed:** `herdr-convert.test.ts`'s fixture-derived
+  assertions (rows, one styled run, a blank interior row, the cursor position, `herdrScreen`
+  padding to the real 187×51 rect) were rewritten against the real text; wide-cell `lineCells`/
+  `fakeCursor` coverage is kept via a small synthetic literal `Line`, independent of the fixture,
+  since the spike's one real pane never printed wide text.
+- **Confirmed, no code change needed** (recorded here per Step 6/the original Task 8 table, since
+  the spike validated rather than contradicted the design):
+  - `ping.protocol` measured 20 vs. the pre-spike synthetic fixture's 22 (Q2) — already noted in
+    `docs/spike-herdr.md`; `protocol` was already documented as Herdr's non-authoritative binary
+    generation (spec 8.13), so nothing depended on the old number.
+  - `pane.read` rows are trimmed, not padded, and `pane.get`/`session.snapshot` report the same
+    `revision` (Q5, Q9) — `fitLines`'s bottom-padding and the shared `revision` field were already
+    designed for exactly this.
+  - Every pane carries `terminal_id` (Q6) — `applySnapshot`'s `info.terminal_id ?? info.pane_id`
+    fallback remains defensive-only, unexercised by the real capture.
+  - Layout rect fields are `x, y, width, height` in cells, `187×51` for the captured full-width
+    pane (Q7) — matches `rectIndex`'s existing field reads.
+  - No `pane.scroll_changed` event fired during the 30 s capture window (a non-scrolling pane, Q8)
+    — the `⚠ UNVERIFIED PAYLOAD PATH` test in `herdr-backend.test.ts` stays marked unverified; the
+    `pane.get` fallback remains the primary, unchanged path.
+  - `HERDR_SPIKE_KEYS` was unset this run (Q11) — `HERDR_KEYS` was not probed and is unchanged.
+  - `pane.send_text` with a trailing `\n` executed the line (Q11) — confirms the existing
+    `input.line` → text-then-`enter` design; no change.
+
+**Grep note:** `grep -rn copy_motion apps/agent/src apps/agent/test apps/agent/scripts` is not
+literally empty — `herdr-pane-read-visible.json` and `herdr-pane-read-recent.json` contain the
+string inside real captured terminal scrollback (the spike's own pane, having just reported its
+`pane.copy_motion` probe failures on a prior run, echoes that text back verbatim in its next
+`pane.read`). Editing that out of a captured fixture would misrepresent what was measured, so it is
+left as-is; every hit in `.ts` source is a comment explaining the method's absence or the test that
+asserts it, matching this task's gate as run.
 
 ---
 

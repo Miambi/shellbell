@@ -12,6 +12,16 @@ const log = createLogger({ stdout: false });
 const load = (name: string) =>
   JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", name), "utf8"));
 
+/**
+ * `docs/spike-herdr.md` (Task 8 spike) captured exactly one real pane -- one workspace, one plain
+ * shell pane. `herdr-session-snapshot.json` adopts that capture verbatim as `term_a` (renamed from
+ * its real `term_65ac0d4d5c3b51` terminal_id for readability -- an opaque per-run token, not a
+ * measurement) and keeps two pre-existing SYNTHETIC sibling panes, `term_b` (idle zsh) and `term_c`
+ * (a blocked Claude Code agent in a second window), so this suite can still exercise multi-pane
+ * bookkeeping (sorting, subscriptions, reconciliation) that the one-pane spike never touched. Only
+ * `term_a`'s own fields (title, cwd, cols/rows, screen/history content, initial state "unknown")
+ * are real; `term_b`/`term_c` are unrelated to anything the spike measured.
+ */
 const SNAPSHOT = load("herdr-session-snapshot.json") as { result: unknown };
 const VISIBLE = load("herdr-pane-read-visible.json") as { result: unknown };
 const RECENT = load("herdr-pane-read-recent.json") as {
@@ -57,7 +67,6 @@ async function connect(overrides: Record<string, number> = {}): Promise<HerdrBac
     client,
     log,
     reconnectMs: 30,
-    revisionPollMs: 20,
     syncDebounceMs: 20,
     scrollRefreshMs: 0,
     ...overrides,
@@ -125,16 +134,16 @@ describe("HerdrBackend.connect", () => {
     expect(
       list.map((s) => [s.id, s.title, s.cols, s.rows, s.windowNumber, s.paneIndex, s.state]),
     ).toEqual([
-      ["term_a", "Claude Code", 80, 24, 1, 0, "blocked"],
+      ["term_a", "pnpm -F shellbell spike:herdr", 187, 51, 1, 0, "unknown"],
       ["term_b", "zsh", 79, 24, 1, 1, "unknown"],
-      ["term_c", "pnpm test", 160, 40, 2, 0, "running"],
+      ["term_c", "Claude Code", 160, 40, 2, 0, "blocked"],
     ]);
     expect(list[0]).toMatchObject({
       backend: "herdr",
       windowId: "w1",
       tabId: "w1:t1",
       tabIndex: 1,
-      cwd: "/Users/dev/code/shellbell",
+      cwd: "/Users/dev/workspace/miambi/shellbell/apps/agent",
       isFocusedOnMac: true,
     });
     expect(b.capabilities).toEqual({
@@ -152,9 +161,9 @@ describe("HerdrBackend.connect", () => {
     await connect();
     expect(idsOf("session-added")).toEqual(["term_a", "term_b", "term_c"]);
     expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([
-      ["term_a", "blocked"],
+      ["term_a", "unknown"],
       ["term_b", "unknown"],
-      ["term_c", "working"],
+      ["term_c", "blocked"],
     ]);
     // `session-added` must reach the agent before the state that describes it.
     expect(types().indexOf("session-added")).toBeLessThan(types().indexOf("agent-state"));
@@ -200,11 +209,11 @@ describe("HerdrBackend.getScreen / getHistory", () => {
       source: "visible",
       format: "ansi",
     });
-    expect(screen.cols).toBe(80);
-    expect(screen.rows).toBe(24);
-    expect(screen.lines).toHaveLength(24);
-    expect(screen.scrollbackTotal).toBe(120); // rows above the viewport, NOT +rows
-    expect(screen.cursor).toEqual({ x: 18, y: 3 });
+    expect(screen.cols).toBe(187);
+    expect(screen.rows).toBe(51);
+    expect(screen.lines).toHaveLength(51);
+    expect(screen.scrollbackTotal).toBe(0); // the real capture is a fresh, non-scrolled pane
+    expect(screen.cursor).toEqual({ x: 13, y: 36 });
     await expect(b.getScreen("nope")).rejects.toBeInstanceOf(SessionGone);
   });
 
@@ -224,48 +233,64 @@ describe("HerdrBackend.getScreen / getHistory", () => {
   });
 
   it("pages history against the scrollbackTotal it emitted", async () => {
+    // The spike's own pane is a fresh, single-screen shell with no real scrollback (`scrollMax`
+    // 0) and a 51-row viewport bigger than its 37 captured lines, so a smaller viewport plus a
+    // synthetic `scrollMax` is layered on top of the REAL captured text here to exercise paging
+    // against a buffer smaller than the requested depth -- the real capture alone cannot.
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: {
+          panes: { pane_id: string; scroll?: { max_offset_from_bottom: number } }[];
+          layouts: { tab_id: string; panes: { pane_id: string; rect: { height: number } }[] }[];
+        };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p1");
+      if (pane?.scroll) pane.scroll.max_offset_from_bottom = 64;
+      const layout = snap.snapshot.layouts.find((l) => l.tab_id === "w1:t1");
+      const rect = layout?.panes.find((p) => p.pane_id === "w1:p1");
+      if (rect) rect.rect.height = 27;
+      return snap;
+    });
     const b = await connect();
     const screen = await b.getScreen("term_a");
-    const page1 = await b.getHistory("term_a", screen.scrollbackTotal, 10); // before = 120
+    expect(screen.rows).toBe(27);
+    expect(screen.scrollbackTotal).toBe(64);
+    const page1 = await b.getHistory("term_a", screen.scrollbackTotal, 10); // before = 64
     expect(herdr.called("pane.read").at(-1)?.params).toEqual({
       pane_id: "w1:p1",
       source: "recent",
       format: "ansi",
-      lines: 34, // depth 0 + count 10 + rows 24
+      lines: 37, // depth 0 + count 10 + rows 27, but the real buffer only ever has 37 lines
     });
-    expect(page1.lines.map((l) => l.r[0]?.t)).toEqual([
-      "line 17",
-      "line 18",
-      "line 19",
-      "line 20",
-      "line 21",
-      "line 22",
-      "line 23",
-      "line 24",
-      "line 25",
-      "line 26",
+    expect(page1.lines.map((l) => l.r.map((r) => r.t).join(""))).toEqual([
+      " ~  pnpm -F shellbell spike:herdr                                                                                                                                       ok | 02:48:31 PM ",
+      "Scope: 3 of 116 projects",
+      '[WARN] Moving qrcode that was installed by a different package manager to "node_modules/.ignored"',
+      "Packages: +29",
+      "+++++++++++++++++++++++++++++",
+      "Progress: resolved 29, reused 17, downloaded 12, added 29, done",
+      "",
+      "dependencies:",
+      "+ qrcode 1.5.4",
+      "",
     ]);
     expect(page1.oldestAvailable).toBe(0);
 
-    // Deeper than herdr's buffer: a short page, and `oldestAvailable` stops the phone paging.
-    const page2 = await b.getHistory("term_a", 100, 10);
-    expect(page2.lines.map((l) => l.r[0]?.t)).toEqual([
-      "line 01",
-      "line 02",
-      "line 03",
-      "line 04",
-      "line 05",
-      "line 06",
-    ]);
-    expect(page2.oldestAvailable).toBe(94);
+    // Deeper than the 37-line captured buffer: a short page, and `oldestAvailable` stops the
+    // phone paging further back than the buffer actually goes.
+    const page2 = await b.getHistory("term_a", 20, 10);
+    expect(page2.lines).toEqual([]);
+    expect(page2.oldestAvailable).toBe(20);
   });
 
   it("caps a history read at herdr's 1000-line limit", async () => {
     const b = await connect({ syncDebounceMs: 5000 });
-    await b.getHistory("term_a", 120, 200); // depth 0 + 200 + 24
-    expect(herdr.called("pane.read").at(-1)?.params.lines).toBe(224);
-    await b.getHistory("term_a", 0, 200); // depth 120 + 200 + 24
-    expect(herdr.called("pane.read").at(-1)?.params.lines).toBe(344);
+    // The real capture's scrollMax is 0, so "depth" is 0 regardless of `before` until a scroll
+    // event moves it -- only `count + rows` (200 + 51) drives `want` until then.
+    await b.getHistory("term_a", 120, 200);
+    expect(herdr.called("pane.read").at(-1)?.params.lines).toBe(251);
+    await b.getHistory("term_a", 0, 200);
+    expect(herdr.called("pane.read").at(-1)?.params.lines).toBe(251);
     herdr.pushEvent("pane.scroll_changed", {
       pane_id: "w1:p1",
       scroll: { offset_from_bottom: 0, max_offset_from_bottom: 5000, viewport_rows: 24 },
@@ -430,10 +455,12 @@ describe("HerdrBackend event handling", () => {
       title: "npm run dev",
     });
 
-    // A refresh where nothing's title or cwd moved emits nothing.
+    // A refresh where nothing's title or cwd moved emits nothing. (`pane_updated` for a KNOWN pane
+    // is no longer a snapshot hint -- spec 8.13, revised -- so a different lifecycle hint drives
+    // this refresh.)
     events.length = 0;
     const snapshotsBefore = herdr.called("session.snapshot").length;
-    herdr.pushEvent("pane_updated", { pane: { pane_id: "w1:p1" } });
+    herdr.pushEvent("workspace_updated", { workspace_id: "w1" });
     await waitFor(() => herdr.called("session.snapshot").length > snapshotsBefore, 3000);
     await new Promise((r) => setTimeout(r, 60));
     expect(idsOf("title-changed")).toEqual([]);
@@ -557,7 +584,7 @@ describe("HerdrBackend event handling", () => {
     events.length = 0;
     const release = herdr.gate("session.snapshot");
     // A lifecycle hint schedules a snapshot refresh; its RPC is now gated (in flight, unanswered).
-    herdr.pushEvent("pane_updated", { pane: { pane_id: "w1:p1" } });
+    herdr.pushEvent("tab_renamed", { tab_id: "w1:t1", workspace_id: "w1", label: "x" });
     await waitFor(() => herdr.called("session.snapshot").length === 3);
 
     // While that snapshot is still pending, a FRESHER status event lands for the same pane.
@@ -570,7 +597,7 @@ describe("HerdrBackend event handling", () => {
     expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([["term_a", "idle"]]);
     events.length = 0;
 
-    // The snapshot's answer (still "blocked" -- it reflects the world as of BEFORE the event)
+    // The snapshot's answer (still "unknown" -- it reflects the world as of BEFORE the event)
     // must not revert the pane's status, and must not re-emit a stale `agent-state` for it.
     release();
     await new Promise((r) => setTimeout(r, 60));
@@ -648,88 +675,93 @@ describe("HerdrBackend event handling", () => {
   });
 });
 
-describe("HerdrBackend revision poller (spec 8.13 change detection)", () => {
-  it("polls only watched panes, skips odd revisions, and backs off when quiet", async () => {
-    const b = await connect({ syncDebounceMs: 5000 });
-    expect(herdr.called("pane.copy_motion")).toHaveLength(0);
+describe("HerdrBackend change detection via pane_updated revisions (spec 8.13, revised)", () => {
+  it("emits one screen-changed for a new revision, and nothing for a repeat", async () => {
+    await connect({ syncDebounceMs: 5000 });
+    events.length = 0;
+    herdr.bumpRevision("w1:p1");
+    await waitFor(() => idsOf("screen-changed").includes("term_a"));
+    expect(idsOf("screen-changed")).toEqual(["term_a"]);
 
-    b.setWatched(["term_a"]);
-    await waitFor(() => herdr.called("pane.copy_motion").length >= 1);
-    expect(herdr.called("pane.copy_motion")[0]?.params).toEqual({
-      pane_id: "w1:p1",
-      cursor: { row: 0, col: 0 },
-      motion: "line_end",
+    // The same revision arriving again (no bump, n=0) is a no-op.
+    events.length = 0;
+    herdr.bumpRevision("w1:p1", 0);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(idsOf("screen-changed")).toEqual([]);
+
+    // All panes are checked, watched or not -- there is no `setWatched` filter any more.
+    events.length = 0;
+    herdr.bumpRevision("w1:p2");
+    await waitFor(() => idsOf("screen-changed").includes("term_b"));
+  });
+
+  it("schedules a snapshot when pane_updated names a pane we have never seen", async () => {
+    await connect({ syncDebounceMs: 20 });
+    const before = herdr.called("session.snapshot").length;
+    herdr.pushEvent("pane_updated", { pane: { pane_id: "w9:p9", revision: 1 } });
+    await waitFor(() => herdr.called("session.snapshot").length > before, 3000);
+  });
+
+  it("re-applying a snapshot emits screen-changed only when a pane's revision actually moved (Step 2)", async () => {
+    await connect({ syncDebounceMs: 20 });
+    events.length = 0;
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: { panes: { pane_id: string; revision: number }[] };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p1");
+      if (pane) pane.revision = 99;
+      return snap;
     });
-    // Every "nothing happened" window below MUST be longer than one poll interval, or it proves
-    // nothing at all: after a probe, `nextAt = now + POLL_FAST_MS` (200 ms), so an 80 ms wait
-    // would simply mean no probe ran. `probed()` + the explicit growth assertions make each
-    // negative window state "a probe ran and chose not to emit", which is the actual rule.
-    const probed = () => herdr.called("pane.copy_motion").length;
+    // A pure metadata hint forces exactly the kind of re-snapshot a reconnect would run.
+    herdr.pushEvent("tab_renamed", { tab_id: "w1:t1", workspace_id: "w1", label: "x" });
+    await waitFor(() => idsOf("screen-changed").includes("term_a"), 3000);
 
-    // The first probe only takes a baseline — the tracker already snapshots on view.
-    const afterBaseline = probed();
-    await new Promise((r) => setTimeout(r, 300));
-    expect(probed()).toBeGreaterThan(afterBaseline); // it really did keep polling
-    expect(idsOf("screen-changed")).toEqual([]);
-
+    // The SAME snapshot re-applied a second time carries no further change.
     events.length = 0;
-    herdr.revision = 8;
-    await waitFor(() => idsOf("screen-changed").includes("term_a"));
-
-    // An odd revision means a write is in flight: no emit, and no baseline update either.
-    events.length = 0;
-    const beforeOdd = probed();
-    herdr.revision = 9;
-    await new Promise((r) => setTimeout(r, 300));
-    expect(probed()).toBeGreaterThan(beforeOdd); // at least one probe SAW the odd revision
-    expect(idsOf("screen-changed")).toEqual([]);
-    // …and because the odd value never became the baseline, the next even one still reads as a
-    // change even though 10 differs from the skipped 9 by the same amount it differs from 8.
-    herdr.revision = 10;
-    await waitFor(() => idsOf("screen-changed").includes("term_a"));
-
-    // Steady state: nothing more while the revision holds.
-    events.length = 0;
-    const beforeQuiet = probed();
-    await new Promise((r) => setTimeout(r, 300));
-    expect(probed()).toBeGreaterThan(beforeQuiet);
+    const snapshotsBefore = herdr.called("session.snapshot").length;
+    herdr.pushEvent("tab_renamed", { tab_id: "w1:t1", workspace_id: "w1", label: "x2" });
+    await waitFor(() => herdr.called("session.snapshot").length > snapshotsBefore, 3000);
+    await new Promise((r) => setTimeout(r, 60));
     expect(idsOf("screen-changed")).toEqual([]);
   });
 
-  it("stops polling on unwatch and on close, and never fires after them", async () => {
-    const b = await connect({ syncDebounceMs: 5000 });
-    b.setWatched(["term_a"]);
-    await waitFor(() => herdr.called("pane.copy_motion").length >= 2);
-    b.setWatched([]);
-    const after = herdr.called("pane.copy_motion").length;
-    // > one poll interval (200 ms), so "unchanged" means "the timer is really off", not
-    // "the next tick had not come round yet".
-    await new Promise((r) => setTimeout(r, 300));
-    expect(herdr.called("pane.copy_motion").length).toBe(after);
-
-    b.setWatched(["term_b"]);
-    await waitFor(() => herdr.called("pane.copy_motion").length > after);
+  it("applies agent_status from pane_updated latest-wins, with exactly one agent-state per transition and no title change", async () => {
+    await connect({ syncDebounceMs: 5000 });
     events.length = 0;
-    await b.close();
-    const atClose = herdr.called("pane.copy_motion").length;
-    await new Promise((r) => setTimeout(r, 300));
-    expect(herdr.called("pane.copy_motion").length).toBe(atClose);
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "working", revision: 2 },
+    });
+    await waitFor(() => agentStateEvents().length === 1);
+    expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "working" });
+    // `pane_updated` carries no `agent`/`display_agent` name, so the title is left alone.
+    expect(idsOf("title-changed")).toEqual([]);
+    // Same revision as the fixture (2): the status changed, but the screen did not.
     expect(idsOf("screen-changed")).toEqual([]);
-    backend = null;
+
+    events.length = 0;
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 2 },
+    });
+    await waitFor(() => agentStateEvents().length === 1);
+    expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "blocked" });
+
+    // A repeat of the same status is a no-op.
+    events.length = 0;
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 2 },
+    });
+    await new Promise((r) => setTimeout(r, 40));
+    expect(types()).not.toContain("agent-state");
   });
 
-  it("survives a probe that fails or answers without a revision", async () => {
+  it("never calls pane.copy_motion — it does not exist in Herdr 0.8.2 (docs/spike-herdr.md Q9)", async () => {
     const b = await connect({ syncDebounceMs: 5000 });
-    herdr.reply("pane.copy_motion", () => ({ type: "pane_copy_motion", pane_id: "w1:p1" }));
-    b.setWatched(["term_a"]);
-    await waitFor(() => herdr.called("pane.copy_motion").length >= 2);
-    expect(idsOf("screen-changed")).toEqual([]);
-    herdr.fail("pane.copy_motion", "internal_error", "boom");
-    const beforeFailures = herdr.called("pane.copy_motion").length;
-    await new Promise((r) => setTimeout(r, 300)); // > one poll interval: a failing probe DID run
-    expect(herdr.called("pane.copy_motion").length).toBeGreaterThan(beforeFailures);
-    expect(idsOf("screen-changed")).toEqual([]);
-    expect(b.isConnected).toBe(true);
+    herdr.bumpRevision("w1:p1");
+    await waitFor(() => idsOf("screen-changed").includes("term_a"));
+    await b.getScreen("term_a");
+    await b.sendText("term_a", "ls\r");
+    expect(herdr.called("pane.copy_motion")).toEqual([]);
   });
 });
 
@@ -790,16 +822,13 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
-  it("re-seeds the revision poller for a watched pane across a restart", async () => {
-    // Fix 1: `onStreamEnd` clears `probes` on every disconnect but leaves `watched` alone (the
-    // terminal_id survives a pane_id renumbering), so a pane the phone is still watching must
-    // resume polling under its NEW pane id once the reconnect snapshot lands, without the phone
-    // ever calling `setWatched` again.
-    const b = await connect();
+  it("treats every reappearing pane as a first sighting, not a revision change (Step 2: silent on first sight)", async () => {
+    // `onStreamEnd` clears the whole pane map on a real disconnect, so a reconnect snapshot's panes
+    // all read as `was === undefined` -- first sight, silent per Step 2 -- and the phone already
+    // gets the stronger "fetch me fresh" signal from `session-added`. This guards against double
+    // -firing `screen-changed` on top of it.
+    await connect();
     const path = herdr.path;
-    b.setWatched(["term_a"]);
-    await waitFor(() => herdr.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:p1"));
-    events.length = 0;
 
     await herdr.stop();
     await waitFor(() => idsOf("session-removed").length === 3, 3000);
@@ -808,27 +837,23 @@ describe("HerdrBackend restart (spec 8.13 socket-gone)", () => {
     installDefaults(herdr, () => {
       const snap = snapshotResult() as {
         snapshot: {
-          panes: { pane_id: string }[];
+          panes: { pane_id: string; terminal_id: string; revision: number }[];
           layouts: { panes: { pane_id: string }[] }[];
         };
       };
       for (const p of snap.snapshot.panes) p.pane_id = p.pane_id.replace(":p", ":q");
       for (const l of snap.snapshot.layouts)
         for (const p of l.panes) p.pane_id = p.pane_id.replace(":p", ":q");
+      // term_a kept working while the socket was down: its content moved, unlike term_b/term_c.
+      const pane = snap.snapshot.panes.find((p) => p.terminal_id === "term_a");
+      if (pane) pane.revision += 5;
       return snap;
     });
     events.length = 0;
     await herdr.start();
 
     await waitFor(() => idsOf("session-added").includes("term_a"), 5000);
-    // The poller resumes against the NEW pane id...
-    await waitFor(
-      () => herdr.called("pane.copy_motion").some((r) => r.params.pane_id === "w1:q1"),
-      3000,
-    );
-    // ...and its first post-reconnect probe is treated as a change (an unknown baseline, not a
-    // silent one), so a viewer whose screen went stale while the socket was down gets refreshed.
-    await waitFor(() => idsOf("screen-changed").includes("term_a"), 3000);
+    expect(idsOf("screen-changed")).toEqual([]);
   });
 });
 
@@ -851,7 +876,6 @@ describe("HerdrBackend bootstrap event buffer (M-6)", () => {
       client,
       log: captureLog,
       reconnectMs: 30,
-      revisionPollMs: 20,
       syncDebounceMs: 20,
       scrollRefreshMs: 0,
     });

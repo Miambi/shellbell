@@ -57,8 +57,8 @@ describe.skipIf(!live)("live herdr", () => {
 
     const events: BackendEvent[] = [];
     b.on((e) => events.push(e));
-    // The revision poller only runs for watched panes (spec 8.13), so ask for this one.
-    b.setWatched([id]);
+    // Change detection is event-driven for every pane, watched or not (spec 8.13, revised): a
+    // `pane_updated` event with a new `revision` fires `screen-changed` on its own.
     await b.sendText(id, "echo shellbell-herdr-live-ok\r");
     await new Promise((r) => setTimeout(r, 2500));
 

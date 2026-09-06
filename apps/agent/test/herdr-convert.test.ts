@@ -18,18 +18,21 @@ const TEXT = fixture.result.read.text;
 const flat = (l: Line) => l.r.map((r) => r.t).join("");
 
 describe("parseAnsiLines", () => {
-  it("splits the ANSI blob into styled rows and drops the trailing newline's empty row", () => {
+  it("splits the ANSI blob into 37 styled rows and drops the trailing newline's empty row", () => {
+    // `docs/spike-herdr.md` (Task 8 spike): the captured pane's `pane.read visible ansi` text --
+    // real terminal output from re-running `pnpm -F shellbell spike:herdr` in its own pane, CSI
+    // finals all `m` (Q5). This pins the real shape rather than a synthetic screen.
     const lines = parseAnsiLines(TEXT);
-    expect(lines.map(flat)).toEqual([
-      "➜  shellbell git:(main)",
-      "$ pnpm -F shellbell test",
-      "✓ test/herdr-client.test.ts (7)",
-      "漢字 wide-cell row",
-    ]);
-    expect(lines[0]?.r[0]).toMatchObject({ t: "➜", fg: 2, b: true });
-    expect(lines[0]?.r[2]).toMatchObject({ t: "shellbell", fg: 6 });
-    // Ghostty's VT formatter trims trailing blanks, so rows are ragged and never padded to cols.
-    expect(lines[3]?.r[0]).toMatchObject({ t: "漢字", fg: 3, n: 4 });
+    expect(lines).toHaveLength(37);
+    // One styled run: the prompt segment's bold, coloured "~".
+    expect(lines[0]?.r[1]).toMatchObject({ t: "~", fg: 39, bg: 234, b: true });
+    expect(lines[0]?.r[4]).toMatchObject({ t: "pnpm", fg: 2 });
+    // A genuinely blank row (not bottom padding -- an interior blank line in the real output).
+    expect(lines[6]).toEqual({ r: [] });
+    expect(lines[9]).toEqual({ r: [] });
+    // The last row: the shell's still-running prompt marker.
+    expect(flat(lines[36] as Line)).toBe("└─ Running...");
+    expect(lines[36]?.r[0]).toMatchObject({ t: "└─", fg: 13 });
   });
 
   it("returns an empty array for an empty read", () => {
@@ -48,12 +51,22 @@ describe("fitLines", () => {
 });
 
 describe("lineCells / fakeCursor", () => {
-  it("counts wide cells and parks the cursor after the last non-blank row", () => {
+  it("counts cells and parks the cursor after the last non-blank row of the real capture", () => {
     const lines = parseAnsiLines(TEXT);
-    expect(lineCells(lines[3] as Line)).toBe(18); // 漢字 = 4 cells + " wide-cell row" = 14
-    expect(fakeCursor(lines, 80)).toEqual({ x: 18, y: 3 });
+    // "└─ Running..." = 2 (box-drawing, narrow) + 1 (space) + 10 ("Running...") = 13 cells.
+    expect(lineCells(lines[36] as Line)).toBe(13);
+    expect(fakeCursor(lines, 187)).toEqual({ x: 13, y: 36 }); // the pane's real rect width
     expect(fakeCursor([{ r: [] }, { r: [] }], 80)).toEqual({ x: 0, y: 0 });
     expect(fakeCursor([], 80)).toEqual({ x: 0, y: 0 });
+  });
+
+  it("counts a wide-cell run by its cached cell count, not its code-point length", () => {
+    // Herdr's ANSI reads report a wide (CJK) run's cell count explicitly when it differs from the
+    // code-point count (spec 8.13); this pins that path without depending on the spike ever
+    // capturing one (docs/spike-herdr.md's one real pane never printed wide text).
+    const wide: Line = { r: [{ t: "漢字", n: 4 }, { t: " wide-cell row" }] };
+    expect(lineCells(wide)).toBe(18); // 4 cells + 14 code points, none double-width
+    expect(fakeCursor([wide], 80)).toEqual({ x: 18, y: 0 });
   });
 
   it("clamps x to the last column of a full-width row", () => {
@@ -66,16 +79,18 @@ describe("lineCells / fakeCursor", () => {
 
 describe("herdrScreen", () => {
   it("pads to rows, keeps cols from the layout rect, and reports rows-above-viewport", () => {
-    const screen = herdrScreen({ text: TEXT, rows: 6, cols: 80, scrollMax: 120 });
-    expect(screen.rows).toBe(6);
-    expect(screen.cols).toBe(80);
-    expect(screen.lines).toHaveLength(6);
-    expect(screen.lines[4]).toEqual({ r: [] });
-    expect(screen.lines[5]).toEqual({ r: [] });
+    // The real pane's rect is 187x51 (docs/spike-herdr.md Q7); its 37 captured lines pad with 14
+    // blank rows at the bottom (Ghostty trims trailing blanks, so the source never sends them).
+    const screen = herdrScreen({ text: TEXT, rows: 51, cols: 187, scrollMax: 0 });
+    expect(screen.rows).toBe(51);
+    expect(screen.cols).toBe(187);
+    expect(screen.lines).toHaveLength(51);
+    expect(screen.lines[37]).toEqual({ r: [] });
+    expect(screen.lines[50]).toEqual({ r: [] });
     // spec 8.13 (ruling 5): scrollbackTotal is max_offset_from_bottom -- the rows ABOVE the
     // viewport -- so the phone's `historyFrom` starts exactly where our history pages end.
-    expect(screen.scrollbackTotal).toBe(120);
-    expect(screen.cursor).toEqual({ x: 18, y: 3 });
+    expect(screen.scrollbackTotal).toBe(0);
+    expect(screen.cursor).toEqual({ x: 13, y: 36 });
   });
 
   it("keeps the bottom of a read that is longer than the viewport", () => {

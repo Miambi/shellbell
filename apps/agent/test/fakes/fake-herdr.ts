@@ -16,6 +16,82 @@ interface Stream {
 }
 
 /**
+ * The method list Herdr 0.8.2 actually accepts (`docs/spike-herdr.md`, from the server's own
+ * `invalid_request` error text). `pane.copy_motion` is deliberately absent -- it does not exist in
+ * this build -- so it falls through the default handler's fallback exactly like the real server's
+ * rejection of it.
+ */
+const KNOWN_HERDR_METHODS = new Set([
+  "ping",
+  "server.stop",
+  "server.live_handoff",
+  "server.reload_config",
+  "server.agent_manifests",
+  "server.reload_agent_manifests",
+  "notification.show",
+  "client.window_title.set",
+  "client.window_title.clear",
+  "session.snapshot",
+  "agent.list",
+  "agent.get",
+  "agent.read",
+  "agent.explain",
+  "agent.send_keys",
+  "agent.rename",
+  "agent.view.set",
+  "agent.view.clear",
+  "agent.focus",
+  "agent.start",
+  "agent.prompt",
+  "agent.wait",
+  "pane.split",
+  "pane.swap",
+  "pane.move",
+  "pane.zoom",
+  "pane.layout",
+  "pane.process_info",
+  "layout.export",
+  "layout.apply",
+  "layout.set_split_ratio",
+  "pane.neighbor",
+  "pane.edges",
+  "pane.focus_direction",
+  "pane.resize",
+  "pane.list",
+  "pane.current",
+  "pane.get",
+  "pane.focus",
+  "pane.input.set",
+  "pane.rename",
+  "pane.send_text",
+  "pane.send_keys",
+  "pane.send_input",
+  "pane.read",
+  "pane.report_agent",
+  "pane.report_agent_session",
+  "pane.report_metadata",
+  "pane.clear_agent_authority",
+  "pane.release_agent",
+  "pane.close",
+  "popup.close",
+  "events.subscribe",
+  "events.wait",
+  "pane.wait_for_output",
+]);
+/** Prefixes Herdr accepts as `namespace.*` (workspace.*, worktree.*, tab.*, pane.graphics.*, …). */
+const KNOWN_HERDR_WILDCARDS = [
+  "workspace.",
+  "worktree.",
+  "tab.",
+  "pane.graphics.",
+  "integration.",
+  "plugin.",
+];
+function isKnownWildcard(method: string): boolean {
+  return KNOWN_HERDR_WILDCARDS.some((prefix) => method.startsWith(prefix));
+}
+
+/**
  * Stand-in for the Herdr socket server. It models the transport facts that shape our client
  * (research §1): **one request per connection** — the server reads exactly one line, answers it and
  * hangs up — NDJSON framing, and an `events.subscribe` connection that stays open, acks with
@@ -30,8 +106,8 @@ export class FakeHerdr {
   /** Lines written on a connection after its first one: the real server never reads them. */
   readonly ignoredLines: string[] = [];
   connections = 0;
-  /** What `pane.copy_motion` reports as `content_revision`; tests bump it. */
-  revision = 2;
+  /** Per-pane `PaneInfo`, keyed by `pane_id` — the shape `bumpRevision` mutates and re-emits. */
+  private readonly panesById = new Map<string, Record<string, unknown>>();
   /**
    * Events to write in the SAME buffer as the next `events.subscribe` ack. A real server can
    * coalesce the ack and the first event lines into one TCP chunk; this is how a test reproduces
@@ -244,6 +320,27 @@ export class FakeHerdr {
     socket.end(`${JSON.stringify({ id: msg.id, result: value })}\n`);
   }
 
+  /**
+   * Spec 8.13 / `docs/spike-herdr.md`: mutates the pane's `revision` and emits `pane_updated` with
+   * a full `PaneInfo` to every stream subscribed to `pane.updated` -- exactly what the real server
+   * does on every shell command (two bumps: output, then prompt). `pane.send_text`/`pane.send_keys`
+   * call this once each; a test that wants to drive change detection directly calls it too.
+   */
+  bumpRevision(paneId: string, n = 1): void {
+    const prev = this.panesById.get(paneId) ?? {
+      pane_id: paneId,
+      terminal_id: paneId,
+      workspace_id: "w1",
+      tab_id: "w1:t1",
+      focused: false,
+      agent_status: "unknown",
+      revision: 0,
+    };
+    const pane = { ...prev, pane_id: paneId, revision: (prev.revision as number) + n };
+    this.panesById.set(paneId, pane);
+    this.pushEvent("pane_updated", { pane });
+  }
+
   private defaultHandler(method: string): (params: Record<string, unknown>) => unknown {
     switch (method) {
       case "ping":
@@ -253,15 +350,22 @@ export class FakeHerdr {
           protocol: 22,
           capabilities: { live_handoff: true, detached_server_daemon: true },
         });
-      case "pane.copy_motion":
-        return (p) => ({
-          type: "pane_copy_motion",
-          pane_id: p.pane_id,
-          cursor: p.cursor,
-          content_revision: this.revision,
-        });
+      case "pane.send_text":
+      case "pane.send_keys":
+        return (p) => {
+          if (typeof p.pane_id === "string") this.bumpRevision(p.pane_id);
+          return { type: "ok" };
+        };
       default:
-        return () => ({ type: "ok" });
+        // Herdr 0.8.2 rejects any method it does not recognise with `invalid_request: unknown
+        // variant` (docs/spike-herdr.md Q9) -- `pane.copy_motion` no longer exists, so it lands
+        // here like any other name outside the server's real method list; everything the server
+        // DOES accept but this fake does not specifically model still answers `ok`.
+        return KNOWN_HERDR_METHODS.has(method) || isKnownWildcard(method)
+          ? () => ({ type: "ok" })
+          : () => ({
+              __error: { code: "invalid_request", message: `unknown variant \`${method}\`` },
+            });
     }
   }
 }

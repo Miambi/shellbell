@@ -134,14 +134,6 @@ export interface TabCreatedResult {
   root_pane: PaneInfo;
 }
 
-export interface CopyMotionResult {
-  type: "pane_copy_motion";
-  pane_id: string;
-  cursor: { row: number; col: number };
-  /** `runtime.content_seq()` — the terminal's real content counter. Odd = a write is in flight. */
-  content_revision: number;
-}
-
 /** A streamed event line: lifecycle events are snake_case, subscription events are dotted. */
 export interface HerdrEvent {
   event: string;

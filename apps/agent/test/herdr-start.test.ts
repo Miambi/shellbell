@@ -80,7 +80,7 @@ describe("startHerdrBackend", () => {
       log,
       socketPath,
       retryMs: 20,
-      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+      backendOptions: { reconnectMs: 60_000, syncDebounceMs: 60_000 },
     });
     // spec 8.12 (ruling 11): the member is registered immediately, so the agent is subscribed to
     // its events before `connect()` can emit any -- but it is NOT advertised while it is down.
@@ -104,7 +104,7 @@ describe("startHerdrBackend", () => {
       log,
       socketPath,
       retryMs: 20,
-      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+      backendOptions: { reconnectMs: 60_000, syncDebounceMs: 60_000 },
     });
     server = new FakeHerdr(socketPath);
     server.reply("session.snapshot", emptySnapshot);
@@ -134,7 +134,7 @@ describe("startHerdrBackend", () => {
       log,
       socketPath,
       retryMs: 20,
-      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+      backendOptions: { reconnectMs: 60_000, syncDebounceMs: 60_000 },
       onUnavailable: () => {
         unavailableCalls += 1;
       },
@@ -175,7 +175,7 @@ describe("startHerdrBackend", () => {
       log: captureLog,
       socketPath,
       retryMs: 20,
-      backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+      backendOptions: { reconnectMs: 60_000, syncDebounceMs: 60_000 },
     });
     await waitFor(() => calls.some((c) => c.msg === "herdr not available"));
     const call = calls.find((c) => c.msg === "herdr not available");
@@ -199,7 +199,7 @@ describe("startHerdrBackend", () => {
           log,
           socketPath,
           retryMs: 20,
-          backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 60_000 },
+          backendOptions: { reconnectMs: 60_000, syncDebounceMs: 60_000 },
           onConnected: () => {
             throw new Error("CLI banner print blew up");
           },

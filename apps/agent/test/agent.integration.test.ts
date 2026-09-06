@@ -764,7 +764,7 @@ describe("Agent end to end (fake relay, fake backend)", () => {
           log,
           socketPath: herdrServer.path,
           retryMs: 20,
-          backendOptions: { reconnectMs: 60_000, revisionPollMs: 60_000, syncDebounceMs: 20 },
+          backendOptions: { reconnectMs: 60_000, syncDebounceMs: 20 },
         });
         // Give the retry loop a few rounds to prove absence alone sends no hello.
         await new Promise((r) => setTimeout(r, 100));

@@ -4,26 +4,30 @@
     "type": "session_snapshot",
     "snapshot": {
       "version": "0.8.2",
-      "protocol": 22,
+      "protocol": 20,
       "focused_workspace_id": "w1",
       "focused_tab_id": "w1:t1",
       "focused_pane_id": "w1:p1",
       "workspaces": [
-        {
-          "workspace_id": "w2",
-          "number": 2,
-          "label": "notes",
-          "focused": false,
-          "pane_count": 1,
-          "tab_count": 1
-        },
         {
           "workspace_id": "w1",
           "number": 1,
           "label": "shellbell",
           "focused": true,
           "pane_count": 2,
-          "tab_count": 1
+          "tab_count": 1,
+          "active_tab_id": "w1:t1",
+          "agent_status": "unknown"
+        },
+        {
+          "workspace_id": "w2",
+          "number": 2,
+          "label": "notes",
+          "focused": false,
+          "pane_count": 1,
+          "tab_count": 1,
+          "active_tab_id": "w2:t1",
+          "agent_status": "blocked"
         }
       ],
       "tabs": [
@@ -33,7 +37,8 @@
           "number": 1,
           "label": "agents",
           "focused": true,
-          "pane_count": 2
+          "pane_count": 2,
+          "agent_status": "unknown"
         },
         {
           "tab_id": "w2:t1",
@@ -41,7 +46,8 @@
           "number": 1,
           "label": "logs",
           "focused": false,
-          "pane_count": 1
+          "pane_count": 1,
+          "agent_status": "blocked"
         }
       ],
       "panes": [
@@ -51,18 +57,6 @@
           "workspace_id": "w2",
           "tab_id": "w2:t1",
           "focused": false,
-          "agent_status": "working",
-          "revision": 1,
-          "terminal_title_stripped": "pnpm test",
-          "cwd": "/Users/dev/code/shellbell",
-          "scroll": { "offset_from_bottom": 0, "max_offset_from_bottom": 40, "viewport_rows": 40 }
-        },
-        {
-          "pane_id": "w1:p1",
-          "terminal_id": "term_a",
-          "workspace_id": "w1",
-          "tab_id": "w1:t1",
-          "focused": true,
           "agent_status": "blocked",
           "revision": 7,
           "title": "claude",
@@ -72,6 +66,24 @@
           "display_agent": "Claude Code",
           "terminal_title_stripped": "claude",
           "scroll": { "offset_from_bottom": 0, "max_offset_from_bottom": 120, "viewport_rows": 24 }
+        },
+        {
+          "pane_id": "w1:p1",
+          "terminal_id": "term_a",
+          "workspace_id": "w1",
+          "tab_id": "w1:t1",
+          "focused": true,
+          "cwd": "/Users/dev",
+          "foreground_cwd": "/Users/dev/workspace/miambi/shellbell/apps/agent",
+          "terminal_title": "pnpm -F shellbell spike:herdr",
+          "terminal_title_stripped": "pnpm -F shellbell spike:herdr",
+          "agent_status": "unknown",
+          "scroll": {
+            "offset_from_bottom": 0,
+            "max_offset_from_bottom": 0,
+            "viewport_rows": 51
+          },
+          "revision": 2
         },
         {
           "pane_id": "w1:p2",
@@ -91,18 +103,18 @@
           "workspace_id": "w1",
           "tab_id": "w1:t1",
           "zoomed": false,
-          "area": { "x": 0, "y": 0, "width": 160, "height": 24 },
+          "area": { "x": 0, "y": 0, "width": 266, "height": 51 },
           "focused_pane_id": "w1:p1",
           "panes": [
             {
-              "pane_id": "w1:p2",
-              "focused": false,
-              "rect": { "x": 81, "y": 0, "width": 79, "height": 24 }
-            },
-            {
               "pane_id": "w1:p1",
               "focused": true,
-              "rect": { "x": 0, "y": 0, "width": 80, "height": 24 }
+              "rect": { "x": 0, "y": 0, "width": 187, "height": 51 }
+            },
+            {
+              "pane_id": "w1:p2",
+              "focused": false,
+              "rect": { "x": 187, "y": 0, "width": 79, "height": 24 }
             }
           ],
           "splits": []
@@ -125,11 +137,11 @@
       ],
       "agents": [
         {
-          "pane_id": "w1:p1",
-          "terminal_id": "term_a",
-          "workspace_id": "w1",
-          "tab_id": "w1:t1",
-          "focused": true,
+          "pane_id": "w2:p1",
+          "terminal_id": "term_c",
+          "workspace_id": "w2",
+          "tab_id": "w2:t1",
+          "focused": false,
           "agent_status": "blocked",
           "revision": 7,
           "name": "claude-code",

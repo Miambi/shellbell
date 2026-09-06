@@ -244,62 +244,20 @@ async function main(): Promise<void> {
     if (recent) save("herdr-pane-read-recent.json", { id: "sb8", result: recent });
   }
 
-  const copyMotionRevisions: number[] = [];
-  let motion: unknown;
+  let paneGetRevision: number | undefined;
   if (paneId) {
-    motion = await timed("pane.copy_motion", 20, async () => {
-      const r = await client.request<{ content_revision?: number }>("pane.copy_motion", {
-        pane_id: paneId,
-        cursor: { row: 0, col: 0 },
-        motion: "line_end",
-      });
-      if (typeof r.content_revision === "number") copyMotionRevisions.push(r.content_revision);
-      return r;
-    });
-    if (motion) save("herdr-copy-motion.json", { id: "sb9", result: motion });
-    console.log(
-      "content_revision samples across the 20-call latency loop:",
-      copyMotionRevisions,
-      "-> ",
-      new Set(copyMotionRevisions).size > 1 ? "advanced" : "held constant",
-      copyMotionRevisions.some((v) => v % 2 === 1) ? "(odd values observed)" : "(all even)",
-    );
-
     const paneGet = await step("pane.get", () =>
       client.request<PaneInfoResult>("pane.get", { pane_id: paneId }),
     );
     if (paneGet) {
       save("herdr-pane-get.json", { id: "sb10", result: paneGet });
+      paneGetRevision = paneGet.pane?.revision;
       console.log(
         "pane.get scroll (pane.scroll_changed fallback path):",
         JSON.stringify(paneGet.pane?.scroll ?? null),
       );
+      console.log("pane.get revision:", paneGetRevision);
     }
-  }
-
-  // Poll cost at scale: the adaptive poller opens one connection per watched pane per tick. Each
-  // pane's request is caught individually so one stale pane doesn't erase the rest of the sample.
-  for (const n of [1, 5, 20]) {
-    const targets = panes.slice(0, n).map((p) => p.pane_id);
-    if (targets.length < n) break;
-    const t0 = performance.now();
-    let ok = 0;
-    for (const id of targets) {
-      try {
-        await client.request("pane.copy_motion", {
-          pane_id: id,
-          cursor: { row: 0, col: 0 },
-          motion: "line_end",
-        });
-        ok++;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        failures.push({ step: `sequential copy_motion x${n} (pane ${id})`, error: message });
-      }
-    }
-    console.log(
-      `sequential copy_motion x${n}: ${(performance.now() - t0).toFixed(1)} ms total (${ok}/${targets.length} ok)`,
-    );
   }
 
   const two = await twoRequestsOnOneConnection(path);
@@ -382,6 +340,9 @@ async function main(): Promise<void> {
     null;
   let scrollChangedSample: Record<string, unknown> | null = null;
   let layoutUpdatedSample: Record<string, unknown> | null = null;
+  // Spec 8.13 (revised): `pane.copy_motion` does not exist -- change detection runs on
+  // `pane_updated.pane.revision` instead, so this is what the spike now reports per pane.
+  const revisionsByPane = new Map<string, number[]>();
   const subscribeStartedAt = performance.now();
   const stream = await step("events.subscribe (30s window)", () =>
     client.subscribe(
@@ -411,6 +372,14 @@ async function main(): Promise<void> {
             agentStatusSample = { event: e.event, data: e.data, atMs };
             save("herdr-agent-status-event.json", { event: e.event, data: e.data });
           }
+          if (e.event.includes("updated") && e.event.includes("pane")) {
+            const pane = (e.data as { pane?: { pane_id?: string; revision?: number } }).pane;
+            if (pane?.pane_id && typeof pane.revision === "number") {
+              const seen = revisionsByPane.get(pane.pane_id) ?? [];
+              seen.push(pane.revision);
+              revisionsByPane.set(pane.pane_id, seen);
+            }
+          }
           if (!scrollChangedSample && e.event.includes("scroll_changed"))
             scrollChangedSample = e.data;
           if (!layoutUpdatedSample && e.event.includes("layout")) layoutUpdatedSample = e.data;
@@ -439,7 +408,7 @@ async function main(): Promise<void> {
   );
   lines.push(`Q3 responses to two pipelined requests on one connection (expect 1): ${two.length}`);
   lines.push(
-    `Q4 latencies: see "ping:"/"session.snapshot:"/"pane.read visible ansi:"/"pane.read recent ansi 200:"/"pane.copy_motion:" p50/max lines above, plus the sequential copy_motion x1/x5/x20 totals above.`,
+    `Q4 latencies: see "ping:"/"session.snapshot:"/"pane.read visible ansi:"/"pane.read recent ansi 200:" p50/max lines above -- every call costs one server tick (~100 ms).`,
   );
   lines.push(
     `Q5 pane.read visible ansi: CSI finals seen=[${csiFinals.join(" ")}] (expect only "m"); rows returned=${visibleRows ?? "(not captured)"}; padded-vs-trimmed and 256-colour/truecolor/CJK encoding require eyeballing the saved fixture (herdr-pane-read-visible.json).`,
@@ -452,7 +421,11 @@ async function main(): Promise<void> {
     `Q8 pane.scroll_changed: sample data=${JSON.stringify(scrollChangedSample)}; pane.get fallback scroll (see console "pane.get scroll" line above) confirms whether the fallback path is still needed.`,
   );
   lines.push(
-    `Q9 content_revision across ${copyMotionRevisions.length} sequential copy_motion calls on one pane: ${JSON.stringify(copyMotionRevisions)} -> ${new Set(copyMotionRevisions).size > 1 ? "advanced" : "held constant"}${copyMotionRevisions.some((v) => v % 2 === 1) ? ", odd values observed" : ""}. Focus/idle behaviour requires manually repeating with the pane unfocused/idle.`,
+    `Q9 revision (pane.copy_motion does not exist in this build -- change detection runs on ` +
+      `pane_updated.pane.revision instead): revisions observed per pane during the 30s window: ` +
+      `${JSON.stringify(Object.fromEntries(revisionsByPane))}; pane.get.revision for the primary ` +
+      `pane: ${paneGetRevision ?? "(not captured)"}. Focus/idle behaviour requires manually ` +
+      `repeating with the pane unfocused/idle.`,
   );
   lines.push(
     `Q10 agent state event: ${agentStatusSample ? `event="${(agentStatusSample as { event: string }).event}" data=${JSON.stringify((agentStatusSample as { data: Record<string, unknown> }).data)} arrived +${(agentStatusSample as { atMs: number }).atMs.toFixed(0)}ms into the subscription window` : "no pane.agent_status_changed event observed this run — re-run and make an agent block/unblock during the 30s window"}. Working->blocked and blocked->idle latency needs the human's own action timestamp compared to this line.`,
