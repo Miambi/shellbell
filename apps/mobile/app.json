@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "Shellbell",
+    "slug": "shellbell",
+    "scheme": "shellbell",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#000000",
+    "ios": {
+      "bundleIdentifier": "dev.bilalahmad.shellbell",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan the pairing QR shown by your computer."
+      }
+    },
+    "android": {
+      "package": "dev.bilalahmad.shellbell",
+      "permissions": ["CAMERA", "VIBRATE"]
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-camera", { "cameraPermission": "Scan the pairing QR shown by your computer." }],
+      "expo-secure-store",
+      ["expo-notifications", { "color": "#10B981" }],
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+            "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf",
+            "./assets/fonts/JetBrainsMonoNerdFont-Italic.ttf",
+            "./assets/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf"
+          ]
+        }
+      ]
+    ],
+    "extra": { "eas": { "projectId": "REPLACE_AFTER_eas_init" } }
+  }
+}

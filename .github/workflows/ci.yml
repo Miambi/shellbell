@@ -16,6 +16,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm -F @shellbell/mobile check:vectors
+      - run: pnpm -F @shellbell/mobile doctor
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
