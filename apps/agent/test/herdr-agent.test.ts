@@ -77,6 +77,19 @@ function harness() {
 describe("herdr through the agent's units", () => {
   it("shows an already-blocked agent without ringing, then rings on the next transition", async () => {
     const h = harness();
+    // `pane.agent_status_changed` is a hint, not a mutation (spec 8.13, revised 2026-09-06,
+    // Task 11): it schedules a `session.snapshot` refresh rather than applying directly, so the
+    // fake's snapshot reply must track term_b's "world" status for that debounced refresh to
+    // answer correctly.
+    let termBStatus = "unknown";
+    server.reply("session.snapshot", () => {
+      const snap = snapshot() as {
+        snapshot: { panes: { pane_id: string; agent_status: string }[] };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p2");
+      if (pane) pane.agent_status = termBStatus;
+      return snap;
+    });
     handle = startHerdrBackend({
       registry: h.registry,
       log,
@@ -96,11 +109,15 @@ describe("herdr through the agent's units", () => {
     expect(h.rings).toEqual([]);
     expect(h.notified).toEqual([]);
 
-    // Now a real transition: working -> blocked rings, and reaches the relay as `notify`.
+    // Now a real transition: working -> blocked rings, and reaches the relay as `notify`. Each
+    // push is a hint; the debounced snapshot it schedules is what actually applies the
+    // transition once it answers with the new "world" status set above.
+    termBStatus = "working";
     server.pushEvent("pane.agent_status_changed", { pane_id: "w1:p2", agent_status: "working" });
     await waitFor(() =>
       h.seen.some((e) => e.type === "agent-state" && e.sessionId === "herdr:term_b"),
     );
+    termBStatus = "blocked";
     server.pushEvent("pane.agent_status_changed", { pane_id: "w1:p2", agent_status: "blocked" });
     await waitFor(() => h.rings.length === 1, 3000);
     expect(h.rings[0]).toMatchObject({ sessionId: "herdr:term_b", kind: "blocked" });

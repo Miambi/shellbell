@@ -5524,6 +5524,40 @@ string inside real captured terminal scrollback (the spike's own pane, having ju
 left as-is; every hit in `.ts` source is a comment explaining the method's absence or the test that
 asserts it, matching this task's gate as run.
 
+Task 11 (2026-09-06) hardened the backend against the subscription replay. Deltas:
+
+- **Assumed:** a `pane_updated` for an already-known pane applies its payload whenever the
+  `revision` differs from the stored one (Task 8). **Measured:** a third spike run showed
+  `events.subscribe` replaying a bounded backlog of ~25 recent events — including old
+  `pane_updated` revisions 1…8 — at a 100 ms cadence right after the ack, before any live event
+  (`docs/spike-herdr.md` "Third run"). Applying a replayed *older* revision emitted spurious
+  `screen-changed`s and could rewind the stored revision. **Changed:** `handleEvent`'s
+  `pane_updated` case now requires `info.revision` to be *strictly greater* than the stored
+  `pane.revision`; an equal or older numeric revision returns immediately with no scroll, status,
+  title/cwd sync, or `screen-changed` — the stored revision never moves backwards. `applySnapshot`
+  is unaffected (a snapshot is authoritative and may move the revision either way).
+- **Assumed:** `pane.agent_status_changed` is applied directly, latest-wins (Task 8). **Measured:**
+  the same replay burst re-delivered a stale `pane.agent_status_changed` (Third run); this event
+  carries no revision or sequence number at all, so a replayed stale status could flip an
+  already-transitioned pane back and ring spuriously. **Changed:** the handler no longer mutates
+  anything directly — it calls `scheduleSync("snapshot")` like every other hint, and no longer
+  stamps `statusSeq` (that freshness stamp, review fix 4, now belongs solely to the
+  revision-ordered `pane_updated` path). `applySnapshot` already emitted `agent-state` on a
+  transition and `title-changed` on a title change, so nothing else moved; `blocked` rings now
+  trail the transition by the debounce plus one snapshot round trip (~350 ms) instead of applying
+  instantly, matching the live `pane_updated` for the same transition (measured ~0.6 s later) that
+  usually applies first anyway. Spec 8.13's own "applied directly, latest-wins" sentence (just above
+  the "hint, not a mutation" bullet it contradicted) is marked superseded in place rather than
+  deleted, to keep the revision history honest about the walked-back design.
+- Tests updated for both: `herdr-backend.test.ts` gained two bootstrap-replay tests (a stale
+  `pane_updated` burst and a stale `pane.agent_status_changed` hint, both via a new
+  `FakeHerdr.replay()` helper that queues events onto the existing `ackRider`), an
+  equal/older-revision-ignored test, and the retained Task 8 "applies directly" test now uses
+  strictly increasing revisions (2 collided with the fixture's own stored revision for term_a/
+  term_b, which the new rule rejects). `herdr-agent.test.ts`'s end-to-end ring test now serves a
+  dynamic `session.snapshot` tracking the "world" status a `pane.agent_status_changed` hint claims,
+  since the event itself no longer carries the transition.
+
 ---
 
 ## Pre-execution corrections (2026-09-05)
@@ -5887,17 +5921,17 @@ a stored 8 emits seven spurious `screen-changed` and rewinds the revision) and
 `apps/agent/test/fakes/fake-herdr.ts` (a `replay(events)` helper that pushes a burst right after the
 `subscription_started` ack).
 
-- [ ] **Step 1: monotonic revisions.** In the `pane_updated` case: if `typeof info.revision ===
+- [x] **Step 1: monotonic revisions.** In the `pane_updated` case: if `typeof info.revision ===
   "number"` and `pane.revision` is a number and `info.revision <= pane.revision`, return without
   touching anything (no scroll, no status, no title/cwd sync, no `screen-changed`). Only a strictly
   newer revision applies the payload and emits. `applySnapshot` keeps its own rule (a snapshot is
   authoritative; it may move the revision either way but emits `screen-changed` only when it moved).
-- [ ] **Step 2: agent_status_changed becomes a hint.** Replace the direct application with
+- [x] **Step 2: agent_status_changed becomes a hint.** Replace the direct application with
   `scheduleSync("snapshot")`; drop the `statusSeq` stamping from that path (keep it for
   `pane_updated`, which is revision-ordered). `applySnapshot` already emits `agent-state` on a
   transition and `title-changed` on a title change — verify, and make it so if not. The comment block
   that calls the event "the one event whose whole payload is the new value" is rewritten.
-- [ ] **Step 3: tests.** (a) bootstrap with a fake replay burst of stale `pane_updated` (revisions
+- [x] **Step 3: tests.** (a) bootstrap with a fake replay burst of stale `pane_updated` (revisions
   below the snapshot's) → zero `screen-changed`, revision unchanged; (b) a replayed
   `pane.agent_status_changed` with a stale status → no `agent-state` emitted before the snapshot,
   and the snapshot (which still says the current status) emits nothing either; (c) a live
@@ -5905,6 +5939,6 @@ a stored 8 emits seven spurious `screen-changed` and rewinds the revision) and
   within the debounce; (d) a `pane_updated` with a newer revision and new `agent_status` still applies
   directly (Task 8 test retained); (e) equal revision → ignored. Update any test that asserted direct
   application (`applies agent status directly …`).
-- [ ] **Step 4: errata + gates + commit.** Append to "Post-spike errata"; `pnpm lint:fix && pnpm lint`,
+- [x] **Step 4: errata + gates + commit.** Append to "Post-spike errata"; `pnpm lint:fix && pnpm lint`,
   `pnpm typecheck`, `perl -e 'alarm 600; exec @ARGV' pnpm -F shellbell test` (twice); commit
   `fix(agent): herdr ignores replayed events — monotonic revisions, agent status via snapshot`.

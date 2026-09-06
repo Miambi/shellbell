@@ -1257,7 +1257,9 @@ as a bare hint.
   own; a title or `cwd` that moved still schedules the same debounced snapshot refresh above so
   `title-changed` fires for it.
 - **`pane.agent_status_changed` is applied directly, latest-wins** — it is the other event whose
-  whole payload is the new value, and it is the one that must not wait 250 ms.
+  whole payload is the new value, and it is the one that must not wait 250 ms. (Superseded
+  2026-09-06 by the "hint, not a mutation" bullet above — replay reordering means this can no
+  longer be applied directly.)
 - `pane.focused`/`tab.focused`/`workspace.focused` → `focus-changed`; `pane.scroll_changed` updates
   the cached scroll metrics; `layout.updated` updates rects (both axes) and emits `layout-changed`.
 

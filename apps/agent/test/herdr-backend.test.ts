@@ -175,6 +175,59 @@ describe("HerdrBackend.connect", () => {
     expect(types().indexOf("session-added")).toBeLessThan(types().indexOf("agent-state"));
   });
 
+  it("ignores a stale pane_updated replay burst at bootstrap (spec 8.13 Replay, Task 11)", async () => {
+    // `events.subscribe` replays a bounded backlog of recent events right after its ack, at a
+    // 100 ms cadence, before any live event (`docs/spike-herdr.md` "Third run"). `herdr.replay`
+    // models that: these land on `ackRider`, get buffered while the stream is not yet live, and
+    // are only processed AFTER the snapshot (revision 2 for term_a) has already been applied.
+    herdr.replay([
+      {
+        event: "pane_updated",
+        data: { pane: { pane_id: "w1:p1", agent_status: "working", revision: 1 } },
+      },
+      {
+        event: "pane_updated",
+        data: { pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 2 } },
+      },
+    ]);
+    await connect({ syncDebounceMs: 5000 });
+    // Neither the older (1) nor the equal (2) replayed revision moved anything.
+    expect(idsOf("screen-changed")).toEqual([]);
+    expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([
+      ["term_a", "unknown"],
+      ["term_b", "unknown"],
+      ["term_c", "blocked"],
+    ]);
+    // Proof the stored revision truly never rewound: a genuinely newer one still applies.
+    events.length = 0;
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "working", revision: 3 },
+    });
+    await waitFor(() => idsOf("screen-changed").includes("term_a"));
+  });
+
+  it("a replayed pane.agent_status_changed hint at bootstrap adds no agent-state beyond the snapshot's own (spec 8.13, Task 11)", async () => {
+    // A stale status replayed right after the ack -- it carries no revision, so only the
+    // (unaffected) snapshot it schedules gets to speak, and that snapshot still answers "unknown"
+    // for term_a, same as the one bootstrap already applied.
+    herdr.replay([
+      { event: "pane.agent_status_changed", data: { pane_id: "w1:p1", agent_status: "blocked" } },
+    ]);
+    await connect({ syncDebounceMs: 20 });
+    // Only the initial snapshot's own agent-state events -- the replayed hint itself emits
+    // nothing.
+    expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([
+      ["term_a", "unknown"],
+      ["term_b", "unknown"],
+      ["term_c", "blocked"],
+    ]);
+    const before = herdr.called("session.snapshot").length;
+    await waitFor(() => herdr.called("session.snapshot").length > before, 3000);
+    await new Promise((r) => setTimeout(r, 60));
+    // The follow-up snapshot (still "unknown" for term_a) changed nothing either.
+    expect(agentStateEvents()).toHaveLength(3);
+  });
+
   it("refuses to connect when herdr is not running", async () => {
     await herdr.stop();
     const client = new HerdrClient({ log, socketPath: herdr.path, requestTimeoutMs: 200 });
@@ -551,41 +604,71 @@ describe("HerdrBackend event handling", () => {
     expect(herdr.called("pane.focus").at(-1)?.params).toEqual({ pane_id: "w1:p7" });
   });
 
-  it("applies agent status directly and updates the title", async () => {
-    const b = await connect({ syncDebounceMs: 5000 });
+  it("treats pane.agent_status_changed as a hint, not a mutation: it schedules a snapshot instead of applying directly (spec 8.13, revised 2026-09-06, Task 11)", async () => {
+    const b = await connect({ syncDebounceMs: 20 });
     events.length = 0;
+    const before = herdr.called("session.snapshot").length;
     herdr.pushEvent(AGENT_EVENT.event, AGENT_EVENT.data);
-    await waitFor(() => types().includes("agent-state"));
-    expect(events.find((e) => e.type === "agent-state")).toMatchObject({
-      sessionId: "term_a",
-      state: "working",
-      agent: "claude", // the real event carries only `agent` (no display_agent), see the fixture note
-    });
-    // No snapshot was needed: this event's payload IS the new value.
-    expect(herdr.called("session.snapshot")).toHaveLength(2);
-    // A repeat of the same state is a no-op.
-    events.length = 0;
-    herdr.pushEvent(AGENT_EVENT.event, AGENT_EVENT.data);
-    await new Promise((r) => setTimeout(r, 40));
-    expect(types()).not.toContain("agent-state");
+    // The event itself never applies anything directly -- no immediate agent-state.
+    expect(types()).toEqual([]);
+    await waitFor(() => herdr.called("session.snapshot").length > before, 3000);
+    // The snapshot it triggered still answers "unknown" for term_a (the default fixture), so
+    // there is nothing to settle on either.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(types()).toEqual([]);
 
-    // A different pane, and a title that really changed: routed by pane_id, title emitted.
+    // Make the world (the snapshot) actually say "blocked" and re-fire the same hint: the
+    // snapshot it schedules is the one that emits `agent-state`, exactly once, within the
+    // debounce plus one round trip (spec 8.13: `blocked` rings trail by ~350 ms).
     events.length = 0;
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: { panes: { pane_id: string; agent_status: string }[] };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p1");
+      if (pane) pane.agent_status = "blocked";
+      return snap;
+    });
+    herdr.pushEvent(AGENT_EVENT.event, AGENT_EVENT.data);
+    await waitFor(() => agentStateEvents().length === 1, 3000);
+    expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "blocked" });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(agentStateEvents()).toHaveLength(1); // exactly one, no duplicate from a later snapshot
+
+    // A different pane whose title really changed: the hint's own snapshot is what actually
+    // writes it (I-1) -- the event itself carries no `agent`/`display_agent` name any more.
+    events.length = 0;
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: { panes: { pane_id: string; agent_status: string; agent?: string }[] };
+      };
+      // term_a stays "blocked" here too -- the world already settled on it above, and this reply
+      // must not accidentally revert it back to the default fixture's "unknown".
+      const paneA = snap.snapshot.panes.find((p) => p.pane_id === "w1:p1");
+      if (paneA) paneA.agent_status = "blocked";
+      const paneB = snap.snapshot.panes.find((p) => p.pane_id === "w1:p2");
+      if (paneB) {
+        paneB.agent_status = "working";
+        paneB.agent = "npm run dev";
+      }
+      return snap;
+    });
     herdr.pushEvent("pane.agent_status_changed", {
       pane_id: "w1:p2",
       workspace_id: "w1",
       agent_status: "working",
-      title: "npm run dev",
     });
-    await waitFor(() => types().includes("agent-state"));
-    expect(idsOf("title-changed")).toEqual(["term_b"]);
+    await waitFor(() => idsOf("title-changed").includes("term_b"), 3000);
     expect((await b.listSessions()).find((s) => s.id === "term_b")).toMatchObject({
       title: "npm run dev",
       state: "running",
     });
   });
 
-  it("keeps a fresher event-applied agent status over a snapshot requested before it (fix 4)", async () => {
+  it("keeps a fresher event-applied agent status over a snapshot requested before it (fix 4) — via the revision-ordered pane_updated path", async () => {
+    // Task 11 (spec 8.13, revised 2026-09-06): `pane.agent_status_changed` is now a hint and no
+    // longer stamps `statusSeq`, so it cannot race a `session.snapshot` this way any more; only
+    // `pane_updated` (revision-ordered) still applies directly and owns fix 4's freshness stamp.
     const b = await connect({ syncDebounceMs: 20 });
     events.length = 0;
     const release = herdr.gate("session.snapshot");
@@ -593,11 +676,18 @@ describe("HerdrBackend event handling", () => {
     herdr.pushEvent("tab_renamed", { tab_id: "w1:t1", workspace_id: "w1", label: "x" });
     await waitFor(() => herdr.called("session.snapshot").length === 3);
 
-    // While that snapshot is still pending, a FRESHER status event lands for the same pane.
-    herdr.pushEvent("pane.agent_status_changed", {
-      pane_id: "w1:p1",
-      workspace_id: "w1",
-      agent_status: "idle",
+    // While that snapshot is still pending, a FRESHER, newer-revision `pane_updated` lands for
+    // the same pane. Title/cwd are given the pane's own current values so this doesn't ALSO
+    // schedule a second, unrelated snapshot refresh (a title/cwd mismatch would) that could race
+    // the gated one below and confuse this test's own freshness assertion.
+    herdr.pushEvent("pane_updated", {
+      pane: {
+        pane_id: "w1:p1",
+        agent_status: "idle",
+        revision: 3,
+        terminal_title_stripped: "pnpm -F shellbell spike:herdr",
+        foreground_cwd: "/Users/dev/workspace/miambi/shellbell/apps/agent",
+      },
     });
     await waitFor(() => types().includes("agent-state"));
     expect(agentStateEvents().map((e) => [e.sessionId, e.state])).toEqual([["term_a", "idle"]]);
@@ -732,33 +822,60 @@ describe("HerdrBackend change detection via pane_updated revisions (spec 8.13, r
     expect(idsOf("screen-changed")).toEqual([]);
   });
 
-  it("applies agent_status from pane_updated latest-wins, with exactly one agent-state per transition and no title change", async () => {
+  it("applies agent_status from pane_updated latest-wins when the revision is strictly newer, with exactly one agent-state per transition and no title change (Task 8, retained)", async () => {
     await connect({ syncDebounceMs: 5000 });
     events.length = 0;
+    // The fixture's own revision for term_a is 2 (spec 8.13 replay rule, Task 11): only a
+    // strictly newer revision applies the payload, and a moved revision always emits
+    // `screen-changed` alongside the status.
     herdr.pushEvent("pane_updated", {
-      pane: { pane_id: "w1:p1", agent_status: "working", revision: 2 },
+      pane: { pane_id: "w1:p1", agent_status: "working", revision: 3 },
     });
     await waitFor(() => agentStateEvents().length === 1);
     expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "working" });
     // `pane_updated` carries no `agent`/`display_agent` name, so the title is left alone.
     expect(idsOf("title-changed")).toEqual([]);
-    // Same revision as the fixture (2): the status changed, but the screen did not.
-    expect(idsOf("screen-changed")).toEqual([]);
+    expect(idsOf("screen-changed")).toEqual(["term_a"]);
 
     events.length = 0;
     herdr.pushEvent("pane_updated", {
-      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 2 },
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 4 },
     });
     await waitFor(() => agentStateEvents().length === 1);
     expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "blocked" });
 
-    // A repeat of the same status is a no-op.
+    // A repeat of the same status at a newer revision still moves the revision (screen-changed)
+    // but the status itself is a no-op.
     events.length = 0;
     herdr.pushEvent("pane_updated", {
-      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 2 },
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 5 },
     });
-    await new Promise((r) => setTimeout(r, 40));
+    await waitFor(() => idsOf("screen-changed").includes("term_a"));
     expect(types()).not.toContain("agent-state");
+  });
+
+  it("ignores a pane_updated whose revision is not strictly newer than the stored one — replay or reorder (spec 8.13, Task 11)", async () => {
+    await connect({ syncDebounceMs: 20 });
+    events.length = 0;
+    const before = herdr.called("session.snapshot").length;
+    // Equal to the fixture's own revision (2): a replayed or reordered event, not new
+    // information -- no scroll, no status, no title/cwd sync, no `screen-changed`.
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "working", revision: 2 },
+    });
+    // A strictly older revision is ignored the same way.
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 1 },
+    });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(types()).toEqual([]);
+    expect(herdr.called("session.snapshot")).toHaveLength(before); // no title/cwd sync either
+    // Proof the stored revision never moved backwards: a genuinely newer one still applies.
+    herdr.pushEvent("pane_updated", {
+      pane: { pane_id: "w1:p1", agent_status: "blocked", revision: 3 },
+    });
+    await waitFor(() => idsOf("screen-changed").includes("term_a"));
+    expect(agentStateEvents()[0]).toMatchObject({ sessionId: "term_a", state: "blocked" });
   });
 
   it("never calls pane.copy_motion — it does not exist in Herdr 0.8.2 (docs/spike-herdr.md Q9)", async () => {
@@ -771,12 +888,24 @@ describe("HerdrBackend change detection via pane_updated revisions (spec 8.13, r
   });
 
   it("schedules a snapshot when a known pane's pane_updated title/cwd differs, without writing the title itself (review round 1, item 2)", async () => {
-    const b = await connect({ syncDebounceMs: 20 });
     // The real captured event targets w1:p2 (term_b, "zsh") with a terminal_title_stripped of
     // "dev@<host>:~" -- a real `cd`/reprompt on a plain shell pane, which is the only case where
-    // `pane_updated` is the sole signal a title ever changed. The snapshot the debounced refresh
-    // fetches is made to agree with it, exactly like a real herdr would report after that `cd`.
-    expect(PANE_UPDATED_EVENT.data.pane).toMatchObject({ pane_id: "w1:p2" });
+    // `pane_updated` is the sole signal a title ever changed. Its own `revision` (2) equals the
+    // fixture's stored one for term_b, so term_b starts one revision behind (1) here -- otherwise
+    // the spec 8.13 replay rule (Task 11) would reject this real, un-doctored payload as not
+    // strictly newer.
+    expect(PANE_UPDATED_EVENT.data.pane).toMatchObject({ pane_id: "w1:p2", revision: 2 });
+    installDefaults(herdr, () => {
+      const snap = snapshotResult() as {
+        snapshot: { panes: { pane_id: string; revision: number }[] };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p2");
+      if (pane) pane.revision = 1;
+      return snap;
+    });
+    const b = await connect({ syncDebounceMs: 20 });
+    // The snapshot the debounced refresh fetches is made to agree with the title change, exactly
+    // like a real herdr would report after that `cd`.
     herdr.reply("session.snapshot", () => {
       const snap = snapshotResult() as {
         snapshot: {

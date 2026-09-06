@@ -141,9 +141,11 @@ interface Pane {
   scrollStale: boolean;
   scrollFetchedAt: number;
   /**
-   * `eventSeq` value stamped when a live `pane_agent_status_changed` last updated `agentStatus`.
-   * Guards against an in-flight `session.snapshot` reverting a status a fresher event already
-   * applied while the RPC was outstanding (spec 8.13 race, review fix 4).
+   * `eventSeq` value stamped when a live, revision-ordered `pane_updated` last updated
+   * `agentStatus`. Guards against an in-flight `session.snapshot` reverting a status a fresher
+   * event already applied while the RPC was outstanding (spec 8.13 race, review fix 4).
+   * `pane_agent_status_changed` no longer stamps this (spec 8.13, revised 2026-09-06): it is a
+   * hint, not a mutation, so there is nothing of its own to protect from being reverted.
    */
   statusSeq: number;
   /**
@@ -193,9 +195,11 @@ export class HerdrBackend implements TerminalBackend {
   private workspaces = new Set<string>();
   private focusedWorkspace: string | null = null;
   /**
-   * Bumped every time a live `pane_agent_status_changed` event applies to a pane; captured just
-   * before each `session.snapshot` request so the (later) response can tell whether a per-pane
-   * status it is about to apply has since gone stale (review fix 4).
+   * Bumped every time a live, revision-ordered `pane_updated` event applies a status to a pane;
+   * captured just before each `session.snapshot` request so the (later) response can tell whether
+   * a per-pane status it is about to apply has since gone stale (review fix 4). Not touched by
+   * `pane_agent_status_changed` (spec 8.13, revised 2026-09-06): that event is a hint, so it has
+   * nothing of its own to protect from reversion.
    */
   private eventSeq = 0;
 
@@ -576,9 +580,9 @@ export class HerdrBackend implements TerminalBackend {
   }
 
   private async refreshSnapshot(): Promise<void> {
-    // Captured BEFORE the round-trip: any `pane_agent_status_changed` event that bumps a pane's
-    // `statusSeq` past this value while the request is outstanding is fresher than the response
-    // about to arrive (review fix 4).
+    // Captured BEFORE the round-trip: any live, revision-ordered `pane_updated` event that bumps a
+    // pane's `statusSeq` past this value while the request is outstanding is fresher than the
+    // response about to arrive (review fix 4).
     const requestSeq = this.eventSeq;
     const res = await this.client.request<SessionSnapshotResult>("session.snapshot", {});
     if (this.closed) return;
@@ -694,7 +698,7 @@ export class HerdrBackend implements TerminalBackend {
       const was = prev.get(id);
       const rect = rects.get(info.pane_id);
       const snapshotState = agentStateOf(info.agent_status);
-      // Review fix 4: a `pane_agent_status_changed` event applied to this pane AFTER the
+      // Review fix 4: a live, revision-ordered `pane_updated` event applied to this pane AFTER the
       // `session.snapshot` request was issued is fresher than the value this response carries —
       // keep it rather than reverting (and never emit a stale `agent-state` for the revert).
       const statusSeq = was?.statusSeq ?? 0;
@@ -707,9 +711,10 @@ export class HerdrBackend implements TerminalBackend {
       // Same freshness rule as `statusSeq` above: a live `pane_updated` that landed after this
       // `session.snapshot` request was issued already applied a `revision` at least this fresh, so
       // the (older) snapshot answer must not rewind it or emit a spurious `screen-changed` for the
-      // "revert". `pane_agent_status_changed` also stamps `statusSeq` unconditionally, so this stays
-      // correct even when the fresher event never touched `revision` at all -- `was.revision` is
-      // simply left untouched in that case.
+      // "revert". `staleStatus` is driven entirely by `pane_updated`'s own `statusSeq` stamp now
+      // (`pane_agent_status_changed` no longer stamps it), so this stays correct even when the
+      // fresher event never touched `revision` at all -- `was.revision` is simply left untouched in
+      // that case.
       const revision = staleStatus
         ? (was?.revision ?? (typeof info.revision === "number" ? info.revision : 0))
         : typeof info.revision === "number"
@@ -840,6 +845,19 @@ export class HerdrBackend implements TerminalBackend {
           this.scheduleSync("snapshot");
           return;
         }
+        // Spec 8.13 (revised 2026-09-06): `events.subscribe` replays a bounded backlog of recent
+        // events -- including old `pane_updated` revisions -- right after its ack, at a 100 ms
+        // cadence, before any live event (`docs/spike-herdr.md` "Third run"). A `revision` that is
+        // not strictly newer than the stored one is that replay (or a reorder) and is ignored
+        // entirely: no scroll, no status, no title/cwd sync, no `screen-changed`. The stored
+        // revision never moves backwards; only a snapshot (`applySnapshot`) is allowed to do that,
+        // and only because it is authoritative.
+        if (
+          typeof info?.revision === "number" &&
+          typeof pane.revision === "number" &&
+          info.revision <= pane.revision
+        )
+          return;
         if (
           titleOf(info as PaneInfo) !== pane.title ||
           (info?.foreground_cwd ?? info?.cwd) !== pane.cwd
@@ -869,30 +887,18 @@ export class HerdrBackend implements TerminalBackend {
       case "pane_agent_status_changed": {
         const pane = this.paneByPaneId(str(data.pane_id));
         if (!pane) return;
-        // Review fix 4: stamp freshness unconditionally (even a repeat status still proves this
-        // pane's data is at least this recent), so an in-flight `session.snapshot` requested
-        // before this event cannot revert it once the response finally arrives.
-        pane.statusSeq = ++this.eventSeq;
-        const state = agentStateOf(data.agent_status);
-        const agent = str(data.display_agent) ?? str(data.agent);
-        const title = str(data.title);
-        // Herdr suppresses spinner-only churn, so any title here is a real one.
-        if (agent || title) {
-          const next = agent || title || pane.title;
-          if (next !== pane.title) {
-            pane.title = next;
-            this.emit({ type: "title-changed", sessionId: pane.terminalId });
-          }
-        }
-        if (pane.agentStatus === state) return;
-        pane.agentStatus = state;
-        this.emit({
-          type: "agent-state",
-          sessionId: pane.terminalId,
-          state,
-          agent,
-          at: Date.now(),
-        });
+        // Spec 8.13 (revised 2026-09-06): a hint, not a mutation. It carries no revision, and the
+        // subscription replay re-delivers stale ones (`docs/spike-herdr.md` "Third run"), so
+        // applying it directly could flip a pane back to a status it left seconds ago. Schedule
+        // the same debounced snapshot refresh as every other hint; `applySnapshot` is
+        // authoritative for `agent_status` and already emits `agent-state` on a transition and
+        // `title-changed` on a title change (it reads the snapshot's own `agent`/`display_agent`
+        // fields), so there is nothing left to apply here directly. No `statusSeq` stamp either --
+        // that freshness rule now belongs only to `pane_updated`, which is revision-ordered. The
+        // live `pane_updated` Herdr emits for the same transition (measured ~0.6 s later, spec
+        // 8.13) carries a revision and needs no round trip, so it usually applies first; `blocked`
+        // rings otherwise trail the transition by the debounce plus one snapshot (~350 ms).
+        this.scheduleSync("snapshot");
         return;
       }
       case "pane_scroll_changed": {

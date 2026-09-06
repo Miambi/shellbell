@@ -197,6 +197,17 @@ export class FakeHerdr {
     }
     return delivered;
   }
+  /**
+   * Spec 8.13 "Replay (measured 2026-09-06)" / `docs/spike-herdr.md` "Third run": right after the
+   * `subscription_started` ack the real server replays a bounded backlog of recent events (a
+   * `pane_updated` sequence with old revisions, a stale `pane.agent_status_changed`, …) at a 100 ms
+   * cadence before any live event. Queuing them onto `ackRider` reproduces that burst landing in
+   * the SAME buffer as the ack, exactly like the real server's coalesced chunk.
+   */
+  replay(events: { event: string; data: Record<string, unknown> }[]): void {
+    this.ackRider.push(...events);
+  }
+
   /** Write a raw line to every stream, bypassing subscription filtering (framing tests). */
   pushRaw(line: string): void {
     this.pushBytes(Buffer.from(line, "utf8"));
