@@ -57,7 +57,7 @@ export default function PairScreen() {
             borderRadius: tokens.radius.md,
           }}
         >
-          <Text style={{ color: "#000", fontWeight: "600" }}>Allow camera</Text>
+          <Text style={{ color: tokens.bg, fontWeight: "600" }}>Allow camera</Text>
         </Pressable>
       </View>
     );
@@ -160,7 +160,7 @@ export default function PairScreen() {
               alignSelf: "center",
             }}
           >
-            <Text style={{ color: "#000", fontWeight: "600" }}>Scan again</Text>
+            <Text style={{ color: tokens.bg, fontWeight: "600" }}>Scan again</Text>
           </Pressable>
         ) : null}
       </View>

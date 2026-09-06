@@ -4,6 +4,7 @@ import * as ExpoNotifications from "expo-notifications";
 import { Platform } from "react-native";
 import { connectionManager } from "../net/manager";
 import { useConnectionsStore } from "../store/connections";
+import { tokens } from "../theme/tokens";
 import { foregroundToast, validProjectId } from "./routing";
 
 export interface PermissionState {
@@ -41,7 +42,8 @@ export const expoNotificationsApi: NotificationsApi = {
       name: "Rings",
       importance: ExpoNotifications.AndroidImportance.HIGH,
       vibrationPattern: [0, 250, 100, 250],
-      lightColor: "#10B981",
+      // spec 10.9: emerald is the app's fixed brand accent, not a per-computer accent.
+      lightColor: tokens.accents.emerald,
     });
   },
   async getPermissions() {

@@ -213,7 +213,7 @@ export function InputBar({
               justifyContent: "center",
             }}
           >
-            <Text style={{ color: text.trim() ? "#000" : tokens.textFaint, fontWeight: "700" }}>
+            <Text style={{ color: text.trim() ? tokens.bg : tokens.textFaint, fontWeight: "700" }}>
               ↩
             </Text>
           </Pressable>

@@ -57,7 +57,12 @@ export const LineView = memo(function LineView({
   const charWidth = fontSize * 0.6;
   if (line.r.length === 0) {
     return (
-      <Text style={{ fontFamily: FONT.regular, fontSize, lineHeight, color: tokens.text }}> </Text>
+      <Text
+        allowFontScaling={false}
+        style={{ fontFamily: FONT.regular, fontSize, lineHeight, color: tokens.text }}
+      >
+        {" "}
+      </Text>
     );
   }
   const runs = keyedRuns(line);
@@ -66,10 +71,11 @@ export const LineView = memo(function LineView({
     return (
       <Text
         numberOfLines={1}
+        allowFontScaling={false}
         style={{ fontFamily: FONT.regular, fontSize, lineHeight, color: tokens.text }}
       >
         {runs.map(({ r, key }) => (
-          <Text key={key} style={runStyle(r, fontSize)}>
+          <Text key={key} allowFontScaling={false} style={runStyle(r, fontSize)}>
             {r.t}
           </Text>
         ))}
@@ -91,6 +97,7 @@ export const LineView = memo(function LineView({
           >
             <Text
               numberOfLines={1}
+              allowFontScaling={false}
               style={{ ...style, backgroundColor: "transparent", lineHeight }}
             >
               {r.t}

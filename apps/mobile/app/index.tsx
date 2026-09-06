@@ -1,6 +1,7 @@
 import { FlashList } from "@shopify/flash-list";
 import { Link, useRouter } from "expo-router";
 import { Pressable, Text, View } from "react-native";
+import Animated, { Easing, LinearTransition } from "react-native-reanimated";
 import { useComputersStore } from "../src/store/computers";
 import { useConnectionsStore } from "../src/store/connections";
 import { tokens } from "../src/theme/tokens";
@@ -17,6 +18,9 @@ const STATUS_TEXT: Record<string, string> = {
   offline: "reconnecting…",
   error: "needs attention",
 };
+
+/** spec 10.9: 150 ms ease-out layout transition when a row is added or removed. */
+const ROW_TRANSITION = LinearTransition.duration(150).easing(Easing.out(Easing.ease));
 
 const ERROR_TEXT: Record<string, string> = {
   unpaired: "unpaired",
@@ -53,32 +57,38 @@ export default function Computers() {
                 ? "computer offline"
                 : (STATUS_TEXT[c?.status ?? "idle"] ?? "idle");
             return (
-              <Pressable onPress={() => router.push(`/c/${item.fp}`)}>
-                <Card accent={accent}>
-                  <Text style={{ color: tokens.text, fontSize: 17, fontWeight: "600" }}>
-                    {item.name}
-                  </Text>
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      gap: 8,
-                      marginTop: 6,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Pill color={c?.status === "online" ? accent : tokens.textFaint} text={label} />
-                    <Text style={{ color: tokens.textMuted }}>
-                      {c?.sessions.length ?? 0} sessions
+              <Animated.View layout={ROW_TRANSITION}>
+                <Pressable onPress={() => router.push(`/c/${item.fp}`)}>
+                  <Card accent={accent}>
+                    <Text style={{ color: tokens.text, fontSize: 17, fontWeight: "600" }}>
+                      {item.name}
                     </Text>
-                  </View>
-                </Card>
-              </Pressable>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        gap: 8,
+                        marginTop: 6,
+                        alignItems: "center",
+                      }}
+                    >
+                      <Pill
+                        color={c?.status === "online" ? accent : tokens.textFaint}
+                        text={label}
+                      />
+                      <Text style={{ color: tokens.textMuted }}>
+                        {c?.sessions.length ?? 0} sessions
+                      </Text>
+                    </View>
+                  </Card>
+                </Pressable>
+              </Animated.View>
             );
           }}
         />
       )}
       <Link href="/pair" asChild>
         <Pressable
+          accessibilityLabel="Pair a computer"
           style={{
             position: "absolute",
             right: 20,
@@ -91,7 +101,7 @@ export default function Computers() {
             justifyContent: "center",
           }}
         >
-          <Text style={{ color: "#000", fontSize: 28, lineHeight: 30 }}>+</Text>
+          <Text style={{ color: tokens.bg, fontSize: 28, lineHeight: 30 }}>+</Text>
         </Pressable>
       </Link>
       <Link

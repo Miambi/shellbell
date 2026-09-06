@@ -2,6 +2,7 @@ import { FlashList } from "@shopify/flash-list";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useMemo } from "react";
 import { Alert, Pressable, Text, View } from "react-native";
+import Animated, { Easing, LinearTransition } from "react-native-reanimated";
 import { connectionManager } from "../../../src/net/manager";
 import { useComputersStore } from "../../../src/store/computers";
 import { useConnectionsStore } from "../../../src/store/connections";
@@ -15,11 +16,14 @@ import { statePill } from "../../../src/util/session-state";
 
 const ERROR_COPY: Record<string, { text: string; action: string }> = {
   unpaired: { text: "This phone was unpaired on the computer.", action: "Re-pair" },
-  "re-pair": { text: "Keys are out of sync. Re-pair this computer.", action: "Re-pair" },
+  "re-pair": { text: "This computer's keys are out of sync.", action: "Re-pair" },
   superseded: { text: "This computer is open in another Shellbell session.", action: "Retry" },
   rejected: { text: "The relay rejected this phone's identity.", action: "Re-pair" },
   relay: { text: "The relay refused the connection.", action: "Retry" },
 };
+
+/** spec 10.9: 150 ms ease-out layout transition when a row is added or removed. */
+const ROW_TRANSITION = LinearTransition.duration(150).easing(Easing.out(Easing.ease));
 
 export default function Sessions() {
   const { fp } = useLocalSearchParams<{ fp: string }>();
@@ -91,7 +95,7 @@ export default function Sessions() {
   if (rows.length === 0 && conn?.status === "online") {
     return (
       <EmptyState
-        text="No terminal sessions. Open iTerm2 or start tmux on the Mac."
+        text="No terminal sessions — open iTerm2 or start tmux on the Mac."
         action={{ label: "New session", onPress: newSession }}
       />
     );
@@ -113,68 +117,73 @@ export default function Sessions() {
         renderItem={({ item }) => {
           if (item.kind === "header") {
             return (
-              <Text
-                style={{
-                  color: tokens.textMuted,
-                  fontSize: 12,
-                  letterSpacing: 1,
-                  marginTop: 12,
-                  marginBottom: 6,
-                }}
-              >
-                {item.text.toUpperCase()}
-              </Text>
+              <Animated.View layout={ROW_TRANSITION}>
+                <Text
+                  style={{
+                    color: tokens.textMuted,
+                    fontSize: 12,
+                    letterSpacing: 1,
+                    marginTop: 12,
+                    marginBottom: 6,
+                  }}
+                >
+                  {item.text.toUpperCase()}
+                </Text>
+              </Animated.View>
             );
           }
           const pill = statePill(item.s.state);
           return (
-            <Pressable
-              onPress={() => router.push(`/c/${fp}/s/${sidToRoute(item.s.id)}`)}
-              style={{
-                paddingVertical: 10,
-                borderBottomColor: tokens.border,
-                borderBottomWidth: 1,
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 10,
-              }}
-            >
-              <View
+            <Animated.View layout={ROW_TRANSITION}>
+              <Pressable
+                onPress={() => router.push(`/c/${fp}/s/${sidToRoute(item.s.id)}`)}
                 style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: 4,
-                  backgroundColor: item.s.isFocusedOnMac ? accent : tokens.textFaint,
+                  paddingVertical: 10,
+                  borderBottomColor: tokens.border,
+                  borderBottomWidth: 1,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 10,
                 }}
-              />
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: tokens.text, fontSize: 15 }} numberOfLines={1}>
-                  {item.s.title}
-                </Text>
-                {item.s.cwd ? (
-                  <Text style={{ color: tokens.textMuted, fontSize: 12 }} numberOfLines={1}>
-                    {item.s.cwd}
-                  </Text>
-                ) : null}
-              </View>
-              <Pill tone="muted" text={backendLabel(item.s.backend)} />
-              {pill ? <Pill tone={pill.tone} text={pill.label} /> : null}
-              {(conn?.unread[item.s.id] ?? 0) > 0 ? (
+              >
                 <View
                   style={{
                     width: 8,
                     height: 8,
                     borderRadius: 4,
-                    backgroundColor: tokens.accents.rose,
+                    backgroundColor: item.s.isFocusedOnMac ? accent : tokens.textFaint,
                   }}
                 />
-              ) : null}
-            </Pressable>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: tokens.text, fontSize: 15 }} numberOfLines={1}>
+                    {item.s.title}
+                  </Text>
+                  {item.s.cwd ? (
+                    <Text style={{ color: tokens.textMuted, fontSize: 12 }} numberOfLines={1}>
+                      {item.s.cwd}
+                    </Text>
+                  ) : null}
+                </View>
+                <Pill tone="muted" text={backendLabel(item.s.backend)} />
+                {pill ? <Pill tone={pill.tone} text={pill.label} /> : null}
+                {(conn?.unread[item.s.id] ?? 0) > 0 ? (
+                  <View
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: 4,
+                      backgroundColor: tokens.accents.rose,
+                    }}
+                  />
+                ) : null}
+              </Pressable>
+            </Animated.View>
           );
         }}
       />
       {dimmed ? <StatusOverlay text={overlay} tone="muted" /> : null}
       <Pressable
+        accessibilityLabel="New session"
         onPress={newSession}
         style={{
           position: "absolute",
@@ -183,12 +192,15 @@ export default function Sessions() {
           width: 56,
           height: 56,
           borderRadius: 28,
-          backgroundColor: accent,
+          // spec 10.9: the computer's accent tints exactly card stripe, session dot, cursor, send
+          // button and connection indicator — this "+" is a fixed brand action, like the pairing
+          // FAB on the computers list, not a sixth accented surface.
+          backgroundColor: tokens.accents.emerald,
           alignItems: "center",
           justifyContent: "center",
         }}
       >
-        <Text style={{ color: "#000", fontSize: 28, lineHeight: 30 }}>+</Text>
+        <Text style={{ color: tokens.bg, fontSize: 28, lineHeight: 30 }}>+</Text>
       </Pressable>
     </View>
   );
