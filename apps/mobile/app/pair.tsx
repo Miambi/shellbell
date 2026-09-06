@@ -1,4 +1,5 @@
 import { CameraView, useCameraPermissions } from "expo-camera";
+import Constants from "expo-constants";
 import * as Device from "expo-device";
 import * as Haptics from "expo-haptics";
 import { useRouter } from "expo-router";
@@ -6,6 +7,7 @@ import { useRef, useState } from "react";
 import { Alert, Platform, Pressable, Text, View } from "react-native";
 import { loadOrCreateIdentity, savePairSecret } from "../src/identity/keys";
 import { type PairingCode, PairingError, parsePairingQr, runPairing } from "../src/net/pairing";
+import { ScanGuard } from "../src/net/scan-guard";
 import { useComputersStore } from "../src/store/computers";
 import { tokens } from "../src/theme/tokens";
 
@@ -20,11 +22,14 @@ const COPY: Record<PairingCode, string> = {
   relay: "Couldn't reach the relay.",
 };
 
+const APP_VERSION = Constants.expoConfig?.version ?? "0.1.0";
+
 export default function PairScreen() {
   const [perm, requestPerm] = useCameraPermissions();
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const scanned = useRef(false);
+  const [needsRescan, setNeedsRescan] = useState(false);
+  const guard = useRef(new ScanGuard());
   const router = useRouter();
   const add = useComputersStore((s) => s.add);
 
@@ -66,13 +71,14 @@ export default function PairScreen() {
     });
 
   const onScan = async (data: string) => {
-    if (scanned.current) return;
-    scanned.current = true;
+    if (!guard.current.canHandle(data)) return;
+    guard.current.begin(data);
     setError(null);
     try {
       const { qr, displayName, fpPrefix } = parsePairingQr(data, { allowInsecure: __DEV__ });
       if (!(await confirm(displayName, fpPrefix))) {
-        scanned.current = false;
+        guard.current.end("cancelled");
+        setNeedsRescan(true);
         return;
       }
       setBusy("Pairing… confirm on your computer");
@@ -83,7 +89,7 @@ export default function PairScreen() {
         phoneFp: fp,
         phoneName: Device.deviceName ?? "My phone",
         platform: Platform.OS === "ios" ? "ios" : "android",
-        appVersion: "0.1.0",
+        appVersion: APP_VERSION,
       });
       await savePairSecret(r.computerFp, r.secret);
       add({
@@ -95,14 +101,22 @@ export default function PairScreen() {
         lastSeenAt: null,
         pushEnabled: true,
       });
+      guard.current.end("success");
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.replace(`/c/${r.computerFp}`);
     } catch (e) {
       setError(e instanceof PairingError ? COPY[e.code] : COPY.relay);
-      scanned.current = false;
+      guard.current.end("error");
+      setNeedsRescan(true);
     } finally {
       setBusy(null);
     }
+  };
+
+  const onRescanTap = () => {
+    guard.current.rearm();
+    setNeedsRescan(false);
+    setError(null);
   };
 
   return (
@@ -118,6 +132,19 @@ export default function PairScreen() {
         </Text>
         {error ? (
           <Text style={{ color: tokens.accents.rose, textAlign: "center" }}>{error}</Text>
+        ) : null}
+        {needsRescan ? (
+          <Pressable
+            onPress={onRescanTap}
+            style={{
+              backgroundColor: tokens.accents.emerald,
+              padding: 12,
+              borderRadius: tokens.radius.md,
+              alignSelf: "center",
+            }}
+          >
+            <Text style={{ color: "#000", fontWeight: "600" }}>Scan again</Text>
+          </Pressable>
         ) : null}
       </View>
     </View>

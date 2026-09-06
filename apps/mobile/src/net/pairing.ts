@@ -46,8 +46,12 @@ export interface PairingResult {
   secret: PairSecret;
 }
 
+const Key32 = z
+  .instanceof(Uint8Array)
+  .refine((b) => b.length === 32, { message: "expected 32 bytes" });
+
 const ResponseBody = z.object({
-  x25519Pub: z.instanceof(Uint8Array),
+  x25519Pub: Key32,
   computerName: z.string().min(1).max(64),
   accent: z.string().min(1).max(32),
 });
@@ -179,34 +183,46 @@ export function runPairing(o: {
             finish(new PairingError(REJECT_TO_CODE[m.reason] ?? "no-window"));
             return;
           case "pairing-response": {
-            const ad = pairingAd("response", qr.c, o.phoneFp);
-            const body = ResponseBody.parse(decodeCbor(open(kPsk, m.box, ad)));
-            const kPair = derivePairKey(
-              o.identity.x25519.priv,
-              body.x25519Pub,
-              code,
-              qr.c,
-              o.phoneFp,
-            );
-            finish(null, {
-              computerFp: qr.c,
-              computerName: body.computerName,
-              accent: body.accent,
-              relayUrl: qr.r,
-              secret: {
-                kPair,
-                computerEd25519Pub: fromBase64Url(qr.e),
-                computerX25519Pub: body.x25519Pub,
-              },
-            });
+            // Isolated from the outer catch: only a genuine failure to open/validate *this* box
+            // (wrong code, tampered box, a low-order X25519 point) means "bad-code" -- a decode or
+            // send fault anywhere else in this handler is a relay-side/wire fault, not proof the
+            // pairing code itself is wrong.
+            let result: PairingResult;
+            try {
+              const ad = pairingAd("response", qr.c, o.phoneFp);
+              const body = ResponseBody.parse(decodeCbor(open(kPsk, m.box, ad)));
+              const kPair = derivePairKey(
+                o.identity.x25519.priv,
+                body.x25519Pub,
+                code,
+                qr.c,
+                o.phoneFp,
+              );
+              result = {
+                computerFp: qr.c,
+                computerName: body.computerName,
+                accent: body.accent,
+                relayUrl: qr.r,
+                secret: {
+                  kPair,
+                  computerEd25519Pub: fromBase64Url(qr.e),
+                  computerX25519Pub: body.x25519Pub,
+                },
+              };
+            } catch {
+              finish(new PairingError("bad-code"));
+              return;
+            }
+            finish(null, result);
             return;
           }
           default:
             return;
         }
       } catch {
-        // A malformed frame, a bad box, or a low-order X25519 point: never throw into the socket.
-        finish(new PairingError("bad-code"));
+        // A malformed envelope, an unrecognised ctrl enum, or a `ws.send` failure: never throw
+        // into the socket callback, but this is a wire/relay fault, not evidence of a bad code.
+        finish(new PairingError("relay"));
       }
     };
   });

@@ -321,7 +321,36 @@ describe("runPairing (scripted socket)", () => {
     await expect(promise).rejects.toMatchObject({ code: "bad-code" });
   });
 
-  it("a malformed frame rejects bad-code instead of throwing into the socket callback", async () => {
+  it("a wrong-length x25519Pub in the response rejects bad-code without reaching derivePairKey", async () => {
+    const { mac, macFp, code, qr } = makeQr();
+    const { identity, phoneFp, phoneName, platform, appVersion } = basePhoneOpts();
+    const { Ctor, sockets } = socketFactory();
+    const promise = runPairing({
+      qr,
+      identity,
+      phoneFp,
+      phoneName,
+      platform,
+      appVersion,
+      WebSocketImpl: Ctor as never,
+    });
+    const sock = sockets[0];
+    if (!sock) throw new Error("no socket created");
+    const kPsk = derivePskKey(code, macFp);
+    const box = seal(
+      kPsk,
+      encodeCbor({
+        x25519Pub: mac.x25519.pub.slice(0, 16),
+        computerName: "MBP",
+        accent: "emerald",
+      }),
+      pairingAd("response", macFp, phoneFp),
+    );
+    expect(() => sock.triggerCtrl({ type: "pairing-response", phoneFp, box })).not.toThrow();
+    await expect(promise).rejects.toMatchObject({ code: "bad-code" });
+  });
+
+  it("a malformed frame rejects relay instead of throwing into the socket callback", async () => {
     const { qr } = makeQr();
     const { identity, phoneFp, phoneName, platform, appVersion } = basePhoneOpts();
     const { Ctor, sockets } = socketFactory();
@@ -337,7 +366,30 @@ describe("runPairing (scripted socket)", () => {
     const sock = sockets[0];
     if (!sock) throw new Error("no socket created");
     expect(() => sock.onmessage?.({ data: new Uint8Array([1, 2, 3, 4, 5]) })).not.toThrow();
-    await expect(promise).rejects.toMatchObject({ code: "bad-code" });
+    await expect(promise).rejects.toMatchObject({ code: "relay" });
+  });
+
+  it("an unrecognised ctrl enum rejects relay, not bad-code", async () => {
+    const { qr } = makeQr();
+    const { identity, phoneFp, phoneName, platform, appVersion } = basePhoneOpts();
+    const { Ctor, sockets } = socketFactory();
+    const promise = runPairing({
+      qr,
+      identity,
+      phoneFp,
+      phoneName,
+      platform,
+      appVersion,
+      WebSocketImpl: Ctor as never,
+    });
+    const sock = sockets[0];
+    if (!sock) throw new Error("no socket created");
+    // auth-fail.reason stays strict (R54 ruling 1): an enum value a newer relay introduces still
+    // fails parseCtrlLoose, and that is a wire fault, not proof the pairing code is wrong.
+    expect(() =>
+      sock.triggerCtrl({ type: "auth-fail", reason: "a-reason-from-the-future" } as never),
+    ).not.toThrow();
+    await expect(promise).rejects.toMatchObject({ code: "relay" });
   });
 
   it("ignores text frames without disrupting the handshake", async () => {
