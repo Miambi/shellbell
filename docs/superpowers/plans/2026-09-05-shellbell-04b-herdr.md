@@ -5715,3 +5715,59 @@ command is `alarm`-bounded; `Agent`'s existing `hello` handshake cannot double-f
 `registry.add` runs before `new Agent(...)` in `agent.integration.test.ts` and the `first` guard
 absorbs the initial `backendsKey`; and only Task 7 Step 3 and Task 9 Step 2 — both Human-run only —
 ever touch a real Herdr socket.
+
+## Task 8 (revised 2026-09-06 after the spike) — controller ruling R68
+
+`docs/spike-herdr.md` now exists. The spike proved the plan's central assumption wrong:
+`pane.copy_motion` is not a method in Herdr 0.8.2, while `pane.updated` events carry a monotonic
+`revision`. Task 8 therefore replaces the revision poller with event-driven change detection, in
+addition to adopting the fixtures. Spec §8.13 "Change detection" has been rewritten accordingly.
+
+**Files:** modify `apps/agent/src/backends/herdr/{backend,types}.ts`, `apps/agent/scripts/spike-herdr.ts`,
+`apps/agent/test/fakes/fake-herdr.ts`, `apps/agent/test/herdr-backend.test.ts`,
+`apps/agent/test/herdr-agent.test.ts`, `apps/agent/test/herdr-start.test.ts` (option removal only),
+fixtures under `apps/agent/test/fixtures/` (captured ones are already on disk, uncommitted); delete
+`apps/agent/test/fixtures/herdr-copy-motion.json`; add `apps/agent/test/fixtures/herdr-pane-updated-event.json`
+(the sanitized payload in `docs/spike-herdr.md`).
+
+- [ ] **Step 1: event-driven revisions.** In `handleEvent`, `pane_updated` is no longer a snapshot
+  hint. Read `data.pane` (`PaneInfo`). Unknown `pane_id` → `scheduleSync("snapshot")` (new pane).
+  Known pane → in place: update `scrollMax`/`rows` from `scroll` (as `pane_scroll_changed` does),
+  `scrollStale = false`; apply `agent_status` through the same latest-wins path as
+  `pane_agent_status_changed` (stamp `statusSeq`, emit `agent-state` only on a transition; `agent`/
+  `display_agent` names are absent here, so leave the title alone); if `typeof pane.revision ===
+  "number"` and it differs from the stored `revision` → store it and emit `screen-changed` for
+  that pane (all panes, watched or not — the tracker filters). Keep the existing
+  `pane_agent_status_changed` case unchanged.
+- [ ] **Step 2: snapshot re-seed.** `applySnapshot` stores each pane's `revision` from the snapshot
+  and, for a pane that already existed with a different numeric revision, emits `screen-changed`
+  (this covers events missed while the event stream was down). First sight of a pane stores the
+  revision silently.
+- [ ] **Step 3: delete the poller.** Remove `runProbes`, `probes`, `pollTimer`, `polling`,
+  `intervalFor`, `POLL_*`/`SETTLE_*`, `revisionPollMs`, `CopyMotionResult`, and the `setWatched`
+  method (the `TerminalBackend.setWatched?` hook stays optional in `types.ts`; nothing else
+  implements it — verify with grep and leave the registry untouched). Remove `revisionPollMs` from
+  every test's `backendOptions`.
+- [ ] **Step 4: fake server.** `FakeHerdr` drops its `pane.copy_motion` handler and gains a helper
+  `bumpRevision(paneId, n = 1)` that mutates the pane's `revision` and emits `pane_updated` with the
+  full `PaneInfo` to every subscriber whose subscriptions include `pane.updated`. `pane.send_text` /
+  `pane.send_keys` call it once. Rejecting `pane.copy_motion` with `invalid_request` (like the real
+  server) is the new default for any unknown method if the fake does not already do that.
+- [ ] **Step 5: tests** (replace the copy_motion tests in `herdr-backend.test.ts` ~640–730 and the
+  `herdr-agent.test.ts` probes at ~168–220): (a) `pane_updated` with a new revision → one
+  `screen-changed` for that terminal id; (b) same revision again → nothing; (c) unknown pane →
+  `session.snapshot` requested; (d) a snapshot after reconnect whose revision moved → `screen-changed`,
+  unchanged → nothing; (e) `agent_status` `working` → `blocked` inside `pane_updated` → exactly one
+  `agent-state`; (f) `herdr.called("pane.copy_motion")` is empty across the suite; (g) the agent-level
+  test asserts a phone viewing a Herdr pane receives a screen frame after `bumpRevision` (no
+  poll option needed).
+- [ ] **Step 6: fixtures.** Review the four rewritten fixtures for identifiers (`grep -i bilal` must
+  be empty), delete `herdr-copy-motion.json`, add `herdr-pane-updated-event.json`, then follow the
+  original Task 8 Step 2 table for every failing expectation (`pane.read` rows are trimmed — the
+  padding rule must hold; `ping.protocol` is 20). If `parseSgrLine` meets a CSI final other than `m`
+  in the captured ANSI, stop and report.
+- [ ] **Step 7: spike script.** Drop the `copy_motion` sections (Q4 line, Q9) and instead report the
+  `pane_updated` revisions observed for each pane during the 30 s window, plus `pane.get.revision`.
+- [ ] **Step 8: errata + commit.** Append bullets to "Post-spike errata" below (assumption → measured
+  → change), run `pnpm lint:fix && pnpm lint`, `pnpm typecheck`, `perl -e 'alarm 600; exec @ARGV' pnpm test`,
+  and commit as `feat(agent): herdr change detection via pane_updated revisions; adopt spike fixtures`.

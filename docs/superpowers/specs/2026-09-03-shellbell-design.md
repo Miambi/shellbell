@@ -1256,16 +1256,19 @@ TUI agent an ANSI read never scrolls the app, and a deep read of a busy agent an
 `agent_not_idle` — in both cases fall back to the visible read and report `oldestAvailable` so the
 phone stops paging.
 
-**Change detection.** Herdr has no screen-change push (`pane.output_changed` is not a subscription
-and `events.wait` rejects it), so a *revision poller* runs **only for panes at least one phone is
-viewing** (`TerminalBackend.setWatched(nativeIds)`, driven by the screen tracker): call
-`pane.copy_motion` (side-effect free, needs no focus) and compare `content_revision`; on change emit
-`screen-changed`. The interval is **adaptive** — 200 ms while the pane keeps changing, 500 ms after
-5 s unchanged, 1000 ms cap — because every probe is a fresh connection and Herdr spawns a thread per
-connection. The 1000 ms cap engages after 15 s unchanged (`SETTLE_SLOW_MS`). An **odd** `content_revision` means a write is in flight: skip it without emitting.
-Non-viewed panes are never polled, which means the 8.8 idle heuristic only runs for Herdr shells
-**while a phone is viewing them**; agent panes are covered by agent state instead, which needs no
-polling.
+**Change detection** (revised 2026-09-06 after the spike against Herdr 0.8.2). Herdr **does** push
+screen changes: the `pane.updated` subscription delivers a `pane_updated` event whose `pane` object
+is a full `PaneInfo` (`pane_id`, `terminal_id`, `revision`, `agent_status`, `scroll`, `focused`,
+`cwd`, `terminal_title`, …) and whose `revision` is a monotonic content counter — measured: two
+events per shell command (output, then prompt), the first within ~100 ms of the input, and **none**
+while the pane is idle. `pane.get` and `session.snapshot` return the same `revision`. The backend
+therefore keeps `revision` per pane and emits `screen-changed` whenever a `pane_updated` event (or a
+snapshot applied after a reconnect) carries a different value; a `pane_updated` for an unknown
+`pane_id` is a snapshot hint. `pane.copy_motion` **does not exist** in this build (the server rejects
+it as an unknown variant), so there is no revision poller, no `setWatched` dependency for change
+detection, and the 8.8 idle heuristic runs for every Herdr shell pane, viewed or not. Every request
+costs ~105 ms round-trip (one connection per request; the server polls state every 100 ms), which
+is fine for on-demand reads and would not have been fine for polling.
 
 **Agent state → rings.** Subscribe to `pane.agent_status_changed`; emit a new backend event
 `{ type: "agent-state", sessionId, state: "working"|"blocked"|"idle"|"done"|"unknown", agent?, at }`
