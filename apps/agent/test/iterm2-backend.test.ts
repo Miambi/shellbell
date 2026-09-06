@@ -383,6 +383,25 @@ describe("ITerm2Backend", () => {
     expect(b.hostJob("bogus")).toBeUndefined();
   });
 
+  it("a layout-change notification for an already-subscribed session keeps hostJob (fix round 1)", async () => {
+    const client = new FakeClient();
+    client.jobNames = { S1: "herdr" };
+    const b = new ITerm2Backend(client as never, log);
+    await b.connect();
+    expect(b.hostJob("S1")).toBe("herdr");
+
+    // A layout-change notification that keeps the same sessions (e.g. a focus/size ripple)
+    // rebuilds each Native record from scratch -- `runApplyLayout` must carry `job` forward from
+    // the previous record the same way it already carries `cwd`, or the host session's hostJob is
+    // wiped back to `undefined` and it reappears in `listSessions()` for good.
+    client.emit(
+      "notification",
+      create(NotificationSchema, { layoutChangedNotification: { listSessionsResponse: layout() } }),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(b.hostJob("S1")).toBe("herdr");
+  });
+
   it("a failing new_session ListSessions refresh never produces an unhandled rejection, and the backend stays connected", async () => {
     const client = new FakeClient();
     const b = new ITerm2Backend(client as never, log);

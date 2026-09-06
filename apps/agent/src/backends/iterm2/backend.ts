@@ -373,6 +373,7 @@ export class ITerm2Backend implements TerminalBackend {
                 id,
                 title: prev?.title || s.title || "Session",
                 cwd: prev?.cwd,
+                job: prev?.job,
                 cols: s.gridSize?.width ?? 80,
                 rows: s.gridSize?.height ?? 24,
                 windowId: w.windowId ?? "",
