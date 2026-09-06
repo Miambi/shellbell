@@ -25,6 +25,10 @@ class Manager {
   /** Bumped by `closeAll`; a `connectAll` in flight when it changes must not resume as if
    *  still foregrounded (spec 11.3: a backgrounded phone must not hold a connection open). */
   private generation = 0;
+  /** Set (R57) when a computer was skipped/bailed this round and might need a retry once the
+   *  app is confirmed active again; consumed only where a `starting` lock actually releases (see
+   *  `connectAll`), never eagerly, so a still-in-flight lock is never busy-polled. */
+  private rerun = false;
   private sub: { remove: () => void } | null = null;
   private unsubscribeComputers: (() => void) | null = null;
 
@@ -61,14 +65,27 @@ class Manager {
     if (!deps) return;
     const gen = this.generation;
     for (const c of useComputersStore.getState().computers) {
-      // Single-flight: `starting` is set synchronously, before the first await.
-      if (this.conns.has(c.fp) || this.starting.has(c.fp)) continue;
+      if (this.conns.has(c.fp)) continue;
+      if (this.starting.has(c.fp)) {
+        // Another connectAll is already handling this fp (mid-`loadPairSecret`); that call may
+        // bail below without ever creating a connection if a background/foreground flap changed
+        // the generation out from under it (R57). Flag a rerun -- it is only ever consumed once
+        // *some* call's own lock below actually releases, never eagerly here: this path never
+        // awaits, so eagerly retrying here would busy-loop against a lock that hasn't had a
+        // chance to clear yet.
+        this.rerun = true;
+        continue;
+      }
       this.starting.add(c.fp);
       try {
         const secret = await loadPairSecret(c.fp);
-        // Backgrounded (or superseded by a newer connectAll) while awaiting SecureStore: bail
-        // rather than resuming as if still foregrounded — `closeAll` already bumped `generation`.
-        if (this.generation !== gen || AppState.currentState !== "active") continue;
+        // Never create a socket for a stale generation -- but the app may be active again by the
+        // time this settles, so flag a rerun rather than stranding this computer until the next
+        // AppState/store trigger (R57).
+        if (this.generation !== gen || AppState.currentState !== "active") {
+          this.rerun = true;
+          continue;
+        }
         if (!secret) continue;
         if (this.conns.has(c.fp)) continue;
         const conn = new ComputerConnection({
@@ -87,6 +104,15 @@ class Manager {
         conn.connect();
       } finally {
         this.starting.delete(c.fp);
+        // Self-healing (R57): a lock just released, which guarantees real async progress was
+        // made (this path only runs after an `await`) -- if anything was flagged as missed while
+        // this or another call was in flight, re-scan once. Loop-safe: clear before recursing so
+        // a rerun that itself needs another rerun isn't silently swallowed by this call clearing
+        // it afterwards.
+        if (this.rerun && AppState.currentState === "active") {
+          this.rerun = false;
+          void this.connectAll();
+        }
       }
     }
     if (this.generation !== gen) return;

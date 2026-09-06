@@ -141,4 +141,51 @@ describe("ConnectionManager", () => {
     expect(created).toHaveLength(0);
     connectionManager.stop();
   });
+
+  it("R57: a background/foreground flap during loadPairSecret self-heals to exactly one connection", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    const secret = {
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    };
+    let resolveSecret!: (v: unknown) => void;
+    // The first call (call A, from `start()`) hangs until we resolve it below; any call made by
+    // a self-healing rerun resolves immediately, as a real SecureStore retry would.
+    (loadPairSecret as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () =>
+          new Promise((r) => {
+            resolveSecret = r;
+          }),
+      )
+      .mockResolvedValue(secret);
+    const { connectionManager } = await import("../src/net/manager");
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      pushToken: async () => null,
+    });
+    // `connectAll` (call A) is now suspended awaiting the first `loadPairSecret`.
+    await setAppState("background"); // bumps the generation; nothing to close yet
+    await setAppState("active"); // the re-triggered connectAll (call B) finds f1 still "starting"
+    // Give the self-healing machinery a few ticks *without* resolving call A yet, proving it
+    // does not busy-loop or connect early while the original call is genuinely still in flight.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(created).toHaveLength(0);
+    // Now let the original await resolve: it bails on the stale generation and flags a rerun,
+    // which re-scans against the (by-then active) current state and connects for real.
+    resolveSecret(secret);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(created).toHaveLength(1);
+    expect(created[0]?.connect).toHaveBeenCalledTimes(1);
+    connectionManager.stop();
+  });
 });
