@@ -128,6 +128,11 @@ export class BackendRegistry implements TerminalBackend {
         });
       }
     }
+    // spec 8.12: hide the iTerm2 session hosting a herdr/tmux client while that multiplexer's
+    // backend is connected -- computed once, not per session, since it depends only on which
+    // members are registered and connected right now.
+    const herdrHostHidden = this.memberConnected("herdr");
+    const tmuxHostHidden = this.memberConnected("tmux");
     // spec 8.12/15: one backend's failure must never affect the others -- settle each member's
     // `listSessions()` independently, log the failure, and return whatever the survivors have.
     const lists = await Promise.all(
@@ -143,10 +148,27 @@ export class BackendRegistry implements TerminalBackend {
           const w = this.members.get("tmux")?.tmuxWindowIdOf?.(s.id);
           if (w && hidden.has(w)) continue;
         }
+        if (name === "iterm2" && iterm) {
+          let job: string | undefined;
+          try {
+            job = iterm.hostJob?.(s.id);
+          } catch (err) {
+            this.log.warn("hostJob failed; host session will not be de-duped this round", {
+              err: err instanceof Error ? err.name : String(err),
+            });
+          }
+          if ((job === "herdr" && herdrHostHidden) || (job === "tmux" && tmuxHostHidden)) continue;
+        }
         out.push(withPrefix(name, s));
       }
     }
     return out;
+  }
+
+  /** Spec 8.12/8.13: present and its transport is not known to be down. */
+  private memberConnected(name: BackendName): boolean {
+    const b = this.members.get(name);
+    return !!b && b.isConnected !== false;
   }
 
   private async safeListSessions(

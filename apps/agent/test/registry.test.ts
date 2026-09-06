@@ -32,6 +32,59 @@ describe("BackendRegistry", () => {
     expect(prefixId("iterm2", "x")).toBe("iterm2:x");
   });
 
+  it("hides the iTerm2 session hosting a connected herdr/tmux client (spec 8.12)", async () => {
+    const reg = new BackendRegistry(createLogger({ stdout: false }));
+    const iterm = new FakeBackend();
+    iterm.addSession("herdr-host", {});
+    iterm.addSession("tmux-host", {});
+    iterm.addSession("cc-tab", {});
+    iterm.addSession("shell", {});
+    iterm.hostJob = (id: string) => {
+      if (id === "herdr-host") return "herdr";
+      if (id === "tmux-host") return "tmux";
+      if (id === "cc-tab") return undefined; // -CC tab: iTerm2 backend itself hides this case
+      return "zsh";
+    };
+    reg.add(iterm);
+
+    // (b) herdr backend absent -> the herdr host session is shown.
+    expect((await reg.listSessions()).map((s) => s.id)).toEqual([
+      "iterm2:herdr-host",
+      "iterm2:tmux-host",
+      "iterm2:cc-tab",
+      "iterm2:shell",
+    ]);
+
+    const herdr = new FakeBackend("herdr");
+    reg.add(herdr);
+    const tmux = new FakeBackend("tmux");
+    reg.add(tmux);
+
+    // (a)/(c) herdr and tmux both connected -> both host sessions hidden; (d) the -CC tab and
+    // (e) the plain shell are unaffected.
+    expect((await reg.listSessions()).map((s) => s.id)).toEqual(["iterm2:cc-tab", "iterm2:shell"]);
+
+    // (f) a hidden session is still addressable -- hiding is a listing rule, not a routing one.
+    expect((await reg.getScreen("iterm2:herdr-host")).rows).toBeGreaterThan(0);
+
+    // (b) herdr's transport goes down -> its host session reappears; tmux's stays hidden.
+    herdr.isConnected = false;
+    expect((await reg.listSessions()).map((s) => s.id)).toEqual([
+      "iterm2:herdr-host",
+      "iterm2:cc-tab",
+      "iterm2:shell",
+    ]);
+
+    // tmux disconnects too -> its host session reappears as well.
+    reg.remove("tmux");
+    expect((await reg.listSessions()).map((s) => s.id)).toEqual([
+      "iterm2:herdr-host",
+      "iterm2:tmux-host",
+      "iterm2:cc-tab",
+      "iterm2:shell",
+    ]);
+  });
+
   it("one backend failing does not affect the other (spec 15)", async () => {
     const reg = new BackendRegistry(createLogger({ stdout: false }));
     const iterm = new FakeBackend();

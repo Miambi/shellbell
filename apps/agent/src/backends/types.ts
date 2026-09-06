@@ -84,6 +84,15 @@ export interface TerminalBackend {
   on(handler: (e: BackendEvent) => void): () => void;
   tmuxWindowIds?(): Set<string>;
   tmuxWindowIdOf?(nativeId: string): string | undefined;
+  /**
+   * Spec 8.12 (host-session de-duplication): the executable name of the job running inside this
+   * iTerm2 session (its `jobName` variable) -- `"herdr"` or `"tmux"` when a multiplexer client
+   * runs there, `undefined` otherwise. Also `undefined` for a `-CC` integration tab (it already
+   * has a `tmux_window_id`, so the existing `tmuxWindowIds()` rule de-dupes it on the tmux side
+   * instead): callers only need to check `hostJob === "herdr"` / `"tmux"`, not re-derive the
+   * `-CC` exception themselves. Never log the raw value (spec 8.10 -- it can name a private tool).
+   */
+  hostJob?(sessionId: string): string | undefined;
   /** SHIPPED — do not remove. Per-session capabilities, when this backend can distinguish (e.g.
    * `BackendRegistry` fanning out to distinct member backends by id prefix). Optional: a
    * single-backend implementation can omit it, and callers fall back to the aggregate

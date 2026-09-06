@@ -49,6 +49,8 @@ interface Native {
   tabIndex: number;
   paneIndex: number;
   tmuxWindowId?: string;
+  /** Spec 8.12: the `jobName` variable -- executable name only (e.g. `herdr`, `tmux`, `zsh`). */
+  job?: string;
 }
 
 const UNAVAILABLE_HINT =
@@ -182,6 +184,18 @@ export class ITerm2Backend implements TerminalBackend {
     const out = new Set<string>();
     for (const s of this.sessions.values()) if (s.tmuxWindowId) out.add(s.tmuxWindowId);
     return out;
+  }
+
+  /**
+   * Spec 8.12: the `jobName` of the process running in `sessionId`, or `undefined` for a `-CC`
+   * integration tab (it already carries a `tmux_window_id`, so the tmux-side rule de-dupes it
+   * instead -- this method must not also report it as a `tmux` host job, or the registry would
+   * try to hide it a second, wrong way).
+   */
+  hostJob(sessionId: string): string | undefined {
+    const n = this.sessions.get(sessionId);
+    if (!n || n.tmuxWindowId) return undefined;
+    return n.job;
   }
 
   async getScreen(sessionId: string): Promise<Screen> {
@@ -411,7 +425,7 @@ export class ITerm2Backend implements TerminalBackend {
           }),
         },
       }),
-      ...["session.name", "session.path"].map((name) =>
+      ...["session.name", "session.path", "jobName"].map((name) =>
         create(NotificationRequestSchema, {
           session: id,
           subscribe: true,
@@ -438,14 +452,16 @@ export class ITerm2Backend implements TerminalBackend {
     // trips above were in flight -- re-check before touching it, and again after the variable
     // fetch's own awaits, rather than trusting a reference captured before any `await`.
     if (!this.sessions.has(id)) return;
-    const [name, path] = await Promise.all([
+    const [name, path, job] = await Promise.all([
       this.variable(id, "session.name"),
       this.variable(id, "session.path"),
+      this.variable(id, "jobName"),
     ]);
     const cur = this.sessions.get(id);
     if (!cur) return;
     if (name) cur.title = name;
     if (path) cur.cwd = path;
+    if (job) cur.job = job;
   }
 
   private async variable(id: string, name: string): Promise<string | undefined> {
@@ -536,6 +552,8 @@ export class ITerm2Backend implements TerminalBackend {
         const val = JSON.parse(v.jsonNewValue ?? "null");
         if (v.name === "session.name" && typeof val === "string") s.title = val;
         if (v.name === "session.path" && typeof val === "string") s.cwd = val;
+        // Do not log `val` here (spec 8.10) -- `jobName` can name a private tool.
+        if (v.name === "jobName" && typeof val === "string") s.job = val;
       } catch {
         return;
       }

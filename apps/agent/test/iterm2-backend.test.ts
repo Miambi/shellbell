@@ -43,6 +43,8 @@ class FakeClient extends EventEmitter<{ notification: [Notification]; close: [] 
   failConnects = 0;
   failListSessions = 0;
   calls: ClientSub[] = [];
+  /** Per-session `jobName` override for the fake `variableRequest` reply; default `"zsh"`. */
+  jobNames: Record<string, string> = {};
   async connect() {
     this.connects++;
     if (this.failConnects > 0) {
@@ -83,7 +85,11 @@ class FakeClient extends EventEmitter<{ notification: [Notification]; close: [] 
         const name = sub.value.get[0];
         const sid = sub.value.scope.case === "sessionId" ? sub.value.scope.value : "";
         const v =
-          name === "session.name" ? JSON.stringify(`title-${sid}`) : JSON.stringify(`/home/${sid}`);
+          name === "session.name"
+            ? JSON.stringify(`title-${sid}`)
+            : name === "jobName"
+              ? JSON.stringify(this.jobNames[sid] ?? "zsh")
+              : JSON.stringify(`/home/${sid}`);
         return reply({
           case: "variableResponse",
           value: create(VariableResponseSchema, { status: 0, values: [v] }),
@@ -162,9 +168,28 @@ describe("ITerm2Backend", () => {
     ]);
     expect(list[2]?.cols).toBe(100);
     expect(b.tmuxWindowIds?.()).toEqual(new Set(["@5"]));
+    // Adoption fetches `jobName` too (default "zsh" from the fake) -- but S3 is a `-CC`
+    // integration tab (it has a `tmuxWindowId`), so `hostJob` reports it as `undefined`: the
+    // existing tmux-side rule de-dupes it instead (spec 8.12).
+    expect(b.hostJob("S1")).toBe("zsh");
+    expect(b.hostJob("S3")).toBeUndefined();
 
     const notifs = client.calls.filter((c) => c.case === "notificationRequest");
-    expect(notifs.length).toBeGreaterThanOrEqual(4 + 3 * 4); // 4 global + per session: screen, prompt, 2 variables
+    expect(notifs.length).toBeGreaterThanOrEqual(4 + 3 * 5); // 4 global + per session: screen, prompt, 3 variables
+
+    const jobNameSub = notifs.find(
+      (c) =>
+        c.case === "notificationRequest" &&
+        c.value.session === "S1" &&
+        c.value.arguments.case === "variableMonitorRequest" &&
+        c.value.arguments.value.name === "jobName",
+    );
+    expect(
+      jobNameSub?.case === "notificationRequest" &&
+        jobNameSub.value.arguments.case === "variableMonitorRequest"
+        ? [jobNameSub.value.arguments.value.scope, jobNameSub.value.arguments.value.identifier]
+        : undefined,
+    ).toEqual([1, "S1"]); // VariableScope.SESSION, session id
 
     const promptSub = notifs.find(
       (c) =>
@@ -319,6 +344,43 @@ describe("ITerm2Backend", () => {
     // Let the new_session-triggered ListSessions refresh (fire-and-forget) settle before the
     // test ends, so it can't leak a pending timer/rejection into the next test.
     await new Promise((r) => setTimeout(r, 0));
+  });
+
+  it("a jobName variable-change notification updates hostJob (spec 8.12)", async () => {
+    const client = new FakeClient();
+    client.jobNames = { S1: "herdr" };
+    const b = new ITerm2Backend(client as never, log);
+    await b.connect();
+    expect(b.hostJob("S1")).toBe("herdr"); // adoption fetched it
+    expect(b.hostJob("S2")).toBe("zsh");
+
+    const events: string[] = [];
+    b.on((e) => events.push(e.type + ("sessionId" in e ? `:${e.sessionId}` : "")));
+    client.emit(
+      "notification",
+      create(NotificationSchema, {
+        variableChangedNotification: create(VariableChangedNotificationSchema, {
+          identifier: "S2",
+          name: "jobName",
+          jsonNewValue: JSON.stringify("tmux"),
+        }),
+      }),
+    );
+    expect(b.hostJob("S2")).toBe("tmux");
+    expect(events).toEqual(["title-changed:S2"]);
+
+    // Unknown session id: no-op, does not throw.
+    client.emit(
+      "notification",
+      create(NotificationSchema, {
+        variableChangedNotification: create(VariableChangedNotificationSchema, {
+          identifier: "bogus",
+          name: "jobName",
+          jsonNewValue: JSON.stringify("herdr"),
+        }),
+      }),
+    );
+    expect(b.hostJob("bogus")).toBeUndefined();
   });
 
   it("a failing new_session ListSessions refresh never produces an unhandled rejection, and the backend stays connected", async () => {
