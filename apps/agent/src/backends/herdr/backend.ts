@@ -680,7 +680,10 @@ export class HerdrBackend implements TerminalBackend {
     // I-1: the snapshot is the sole writer of `title`/`cwd`, so it is the only place that can
     // notice one changed on a pane that merely got renamed/`cd`ed -- the event path already emits
     // `title-changed` for its own title updates (`pane.agent_status_changed`), this closes the gap
-    // for `pane.updated`/`tab.renamed`/`pane.moved`, all of which only ever schedule a snapshot.
+    // for `tab.renamed`/`pane.moved` (which only ever schedule a snapshot) and for a KNOWN pane's
+    // `pane.updated` once that handler's own title/cwd check (below) has scheduled one too --
+    // `pane.updated` carries no `agent`/`display_agent` name, so this snapshot pass is what
+    // actually applies a shell pane's new title/cwd and emits `title-changed` for it.
     const titleChanged = new Set<string>();
     // Spec 8.13 (revised): a pane that already existed with a different numeric `revision` missed
     // its `pane_updated` event while the stream was down (reconnect gap) -- emit `screen-changed`
@@ -701,8 +704,19 @@ export class HerdrBackend implements TerminalBackend {
       const title = titleOf(info);
       const cwd = info.foreground_cwd ?? info.cwd;
       if (was && (was.title !== title || was.cwd !== cwd)) titleChanged.add(id);
-      const revision = typeof info.revision === "number" ? info.revision : (was?.revision ?? 0);
+      // Same freshness rule as `statusSeq` above: a live `pane_updated` that landed after this
+      // `session.snapshot` request was issued already applied a `revision` at least this fresh, so
+      // the (older) snapshot answer must not rewind it or emit a spurious `screen-changed` for the
+      // "revert". `pane_agent_status_changed` also stamps `statusSeq` unconditionally, so this stays
+      // correct even when the fresher event never touched `revision` at all -- `was.revision` is
+      // simply left untouched in that case.
+      const revision = staleStatus
+        ? (was?.revision ?? (typeof info.revision === "number" ? info.revision : 0))
+        : typeof info.revision === "number"
+          ? info.revision
+          : (was?.revision ?? 0);
       if (
+        !staleStatus &&
         was &&
         typeof info.revision === "number" &&
         typeof was.revision === "number" &&
@@ -812,8 +826,11 @@ export class HerdrBackend implements TerminalBackend {
       // Spec 8.13 (revised after the Task 8 spike): `pane_updated.pane` is a full `PaneInfo`, not a
       // hint. An unknown `pane_id` means a pane appeared and only the snapshot can add it; a known
       // pane is updated in place -- scroll, agent status (latest-wins, no name field here so the
-      // title is untouched), and the monotonic `revision`, which is what change detection now runs
-      // on (there is no `pane.copy_motion` in Herdr 0.8.2 -- `docs/spike-herdr.md` Q9).
+      // title itself is never WRITTEN from this payload), and the monotonic `revision`, which is
+      // what change detection now runs on (there is no `pane.copy_motion` in Herdr 0.8.2 --
+      // `docs/spike-herdr.md` Q9). A plain shell pane's title/cwd only ever change via this event,
+      // though, so a moved `titleOf(info)`/`cwd` still schedules the debounced snapshot refresh --
+      // the only thing that actually writes `title`/`cwd` (I-1) -- so `title-changed` keeps firing.
       case "pane_updated": {
         const info = data.pane as Partial<PaneInfo> | undefined;
         const paneId = str(info?.pane_id);
@@ -823,13 +840,18 @@ export class HerdrBackend implements TerminalBackend {
           this.scheduleSync("snapshot");
           return;
         }
+        if (
+          titleOf(info as PaneInfo) !== pane.title ||
+          (info?.foreground_cwd ?? info?.cwd) !== pane.cwd
+        )
+          this.scheduleSync("snapshot");
         const scroll = scrollOf(info?.scroll);
         if (scroll && typeof scroll.max_offset_from_bottom === "number") {
           pane.scrollMax = scroll.max_offset_from_bottom;
           if (!pane.rowsFromRect && typeof scroll.viewport_rows === "number")
             pane.rows = Math.max(1, scroll.viewport_rows);
+          pane.scrollStale = false;
         }
-        pane.scrollStale = false;
         // Review fix 4's freshness stamp applies here too: this event's payload is at least as
         // fresh as anything a `session.snapshot` requested earlier could answer with.
         pane.statusSeq = ++this.eventSeq;

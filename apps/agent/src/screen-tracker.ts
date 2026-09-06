@@ -154,9 +154,11 @@ export class ScreenTracker {
   }
 
   /**
-   * Spec 8.13: tells the backend which sessions at least one phone is viewing. Backends that push
-   * screen changes ignore it; the herdr backend polls exactly this set and nothing else. The full
-   * set is sent every time it changes, never a delta.
+   * Spec 8.13: tells the backend which sessions at least one phone is viewing, via the optional
+   * `TerminalBackend.setWatched?` hook. No shipped backend implements it any more -- herdr's
+   * change detection is fully event-driven off `pane_updated.pane.revision` for every pane,
+   * watched or not (docs/spike-herdr.md) -- but the hook and this fan-out stay for a future
+   * backend that needs to know. The full set is sent every time it changes, never a delta.
    */
   private pushWatched(): void {
     const ids = [...this.sessions.entries()]

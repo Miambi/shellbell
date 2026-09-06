@@ -317,7 +317,28 @@ export class FakeHerdr {
       socket.end(`${JSON.stringify({ id: msg.id, error })}\n`);
       return;
     }
+    // Remember every pane a `session.snapshot` reply describes, so `bumpRevision` seeds a bump
+    // from the pane's REAL current fields (agent_status included) instead of a hardcoded stub --
+    // a bump on a pane the test's own fixture already reports as e.g. "working" must not emit a
+    // spurious `agent-state` by claiming "unknown".
+    if (method === "session.snapshot") this.rememberPanes(value);
     socket.end(`${JSON.stringify({ id: msg.id, result: value })}\n`);
+  }
+
+  private rememberPanes(snapshotResult: unknown): void {
+    const panes = (snapshotResult as { snapshot?: { panes?: unknown } } | undefined)?.snapshot
+      ?.panes;
+    if (!Array.isArray(panes)) return;
+    for (const pane of panes) {
+      if (
+        pane &&
+        typeof pane === "object" &&
+        typeof (pane as { pane_id?: unknown }).pane_id === "string"
+      ) {
+        const paneId = (pane as { pane_id: string }).pane_id;
+        this.panesById.set(paneId, { ...(pane as Record<string, unknown>) });
+      }
+    }
   }
 
   /**
@@ -347,7 +368,10 @@ export class FakeHerdr {
         return () => ({
           type: "pong",
           version: "0.8.2",
-          protocol: 22,
+          // docs/spike-herdr.md Q2: the real server answered protocol 20, not the pre-spike
+          // synthetic 22 -- this is Herdr's non-authoritative BINARY generation (spec 8.13), so
+          // nothing depends on the exact number, but the fake should still model the real server.
+          protocol: 20,
           capabilities: { live_handoff: true, detached_server_daemon: true },
         });
       case "pane.send_text":

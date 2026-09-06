@@ -1227,17 +1227,25 @@ cells) and are refreshed on `layout.updated`; if a rect is missing, `rows` falls
 
 **Bootstrap and event handling.** Open `events.subscribe` and wait for its ack, buffering everything
 that arrives; then `session.snapshot`; then apply the snapshot; then process the buffered events.
-Because no event carries a revision, ordering against the snapshot is impossible, so the events are
-split by kind:
+Most lifecycle events carry no revision or sequence number, so ordering them against the snapshot is
+impossible; `pane.updated` is the exception (see Change detection below) — its payload is a full
+`PaneInfo` (including `revision`), applied directly against an already-known pane rather than treated
+as a bare hint.
 
-- **Lifecycle events are hints, never mutations.** `pane.created/closed/exited/moved/updated`,
-  `tab.*` and `workspace.*` schedule **one debounced (250 ms), single-flight `session.snapshot`
-  refresh**; the snapshot is the only writer of the pane map. The refresh reconciles: panes that
-  disappeared emit `session-removed`, new panes emit `session-added`, and the round ends with
-  `layout-changed`. This is also why the subscription set never has to be rebuilt for a new pane
-  (see below), so there is no self-triggering resubscribe loop.
-- **`pane.agent_status_changed` is applied directly, latest-wins** — it is the one event whose whole
-  payload is the new value, and it is the one that must not wait 250 ms.
+- **Lifecycle events are hints, never mutations.** `pane.created/closed/exited/moved`, `tab.*` and
+  `workspace.*` schedule **one debounced (250 ms), single-flight `session.snapshot` refresh**; the
+  snapshot is the sole writer of the pane map's membership (a pane appearing or disappearing). The
+  refresh reconciles: panes that disappeared emit `session-removed`, new panes emit `session-added`,
+  and the round ends with `layout-changed`. This is also why the subscription set never has to be
+  rebuilt for a new pane (see below), so there is no self-triggering resubscribe loop. `pane.updated`
+  for a `pane_id` not yet in the map is one such hint (a new pane).
+- **`pane.updated` for an already-known pane is applied directly, latest-wins** — its `scroll`,
+  `agent_status` and `revision` update that pane in place with no `session.snapshot` round trip (see
+  Change detection). It carries no `agent`/`display_agent` name, so it never rewrites the title on its
+  own; a title or `cwd` that moved still schedules the same debounced snapshot refresh above so
+  `title-changed` fires for it.
+- **`pane.agent_status_changed` is applied directly, latest-wins** — it is the other event whose
+  whole payload is the new value, and it is the one that must not wait 250 ms.
 - `pane.focused`/`tab.focused`/`workspace.focused` → `focus-changed`; `pane.scroll_changed` updates
   the cached scroll metrics; `layout.updated` updates rects (both axes) and emits `layout-changed`.
 

@@ -40,7 +40,7 @@ describe("checkHerdr", () => {
     expect(await checkHerdr({ log, socketPath: server.path })).toEqual({
       name: "herdr",
       ok: true,
-      detail: "v0.8.2 protocol 22",
+      detail: "v0.8.2 protocol 20",
     });
   });
 

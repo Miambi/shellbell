@@ -109,7 +109,7 @@ describe("HerdrClient.request", () => {
 describe("HerdrClient.ping", () => {
   it("returns the pong for a supported version", async () => {
     const pong = await client().ping();
-    expect(pong).toMatchObject({ version: "0.8.2", protocol: 22 });
+    expect(pong).toMatchObject({ version: "0.8.2", protocol: 20 });
   });
 
   it("refuses an old herdr by VERSION, not by protocol number", async () => {

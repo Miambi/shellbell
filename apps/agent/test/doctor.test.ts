@@ -149,7 +149,7 @@ describe("runDoctor's herdr check (Minor, Task 6 review: injectable via RunDocto
     expect(checks.find((c) => c.name === "herdr")).toEqual({
       name: "herdr",
       ok: true,
-      detail: "v0.8.2 protocol 22",
+      detail: "v0.8.2 protocol 20",
     });
   });
 });

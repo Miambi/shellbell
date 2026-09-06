@@ -54,6 +54,7 @@
         {
           "pane_id": "w2:p1",
           "terminal_id": "term_c",
+          "_synthetic": true,
           "workspace_id": "w2",
           "tab_id": "w2:t1",
           "focused": false,
@@ -88,6 +89,7 @@
         {
           "pane_id": "w1:p2",
           "terminal_id": "term_b",
+          "_synthetic": true,
           "workspace_id": "w1",
           "tab_id": "w1:t1",
           "focused": false,
@@ -139,6 +141,7 @@
         {
           "pane_id": "w2:p1",
           "terminal_id": "term_c",
+          "_synthetic": true,
           "workspace_id": "w2",
           "tab_id": "w2:t1",
           "focused": false,

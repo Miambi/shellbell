@@ -17,10 +17,11 @@ const load = (name: string) =>
  * shell pane. `herdr-session-snapshot.json` adopts that capture verbatim as `term_a` (renamed from
  * its real `term_65ac0d4d5c3b51` terminal_id for readability -- an opaque per-run token, not a
  * measurement) and keeps two pre-existing SYNTHETIC sibling panes, `term_b` (idle zsh) and `term_c`
- * (a blocked Claude Code agent in a second window), so this suite can still exercise multi-pane
- * bookkeeping (sorting, subscriptions, reconciliation) that the one-pane spike never touched. Only
- * `term_a`'s own fields (title, cwd, cols/rows, screen/history content, initial state "unknown")
- * are real; `term_b`/`term_c` are unrelated to anything the spike measured.
+ * (a blocked Claude Code agent in a second window, each marked `"_synthetic": true` in the fixture
+ * itself), so this suite can still exercise multi-pane bookkeeping (sorting, subscriptions,
+ * reconciliation) that the one-pane spike never touched. Only `term_a`'s own fields (title, cwd,
+ * cols/rows, screen/history content, initial state "unknown") are real; `term_b`/`term_c` are
+ * unrelated to anything the spike measured.
  */
 const SNAPSHOT = load("herdr-session-snapshot.json") as { result: unknown };
 const VISIBLE = load("herdr-pane-read-visible.json") as { result: unknown };
@@ -28,6 +29,11 @@ const RECENT = load("herdr-pane-read-recent.json") as {
   result: { read: { text: string } };
 };
 const AGENT_EVENT = load("herdr-agent-status-event.json") as {
+  event: string;
+  data: Record<string, unknown>;
+};
+/** The real sanitized `pane_updated` payload from `docs/spike-herdr.md`'s scratch-tab probe. */
+const PANE_UPDATED_EVENT = load("herdr-pane-updated-event.json") as {
   event: string;
   data: Record<string, unknown>;
 };
@@ -762,6 +768,66 @@ describe("HerdrBackend change detection via pane_updated revisions (spec 8.13, r
     await b.getScreen("term_a");
     await b.sendText("term_a", "ls\r");
     expect(herdr.called("pane.copy_motion")).toEqual([]);
+  });
+
+  it("schedules a snapshot when a known pane's pane_updated title/cwd differs, without writing the title itself (review round 1, item 2)", async () => {
+    const b = await connect({ syncDebounceMs: 20 });
+    // The real captured event targets w1:p2 (term_b, "zsh") with a terminal_title_stripped of
+    // "dev@<host>:~" -- a real `cd`/reprompt on a plain shell pane, which is the only case where
+    // `pane_updated` is the sole signal a title ever changed. The snapshot the debounced refresh
+    // fetches is made to agree with it, exactly like a real herdr would report after that `cd`.
+    expect(PANE_UPDATED_EVENT.data.pane).toMatchObject({ pane_id: "w1:p2" });
+    herdr.reply("session.snapshot", () => {
+      const snap = snapshotResult() as {
+        snapshot: {
+          panes: { pane_id: string; terminal_title_stripped?: string; title?: string }[];
+        };
+      };
+      const pane = snap.snapshot.panes.find((p) => p.pane_id === "w1:p2");
+      if (pane) {
+        pane.title = undefined;
+        pane.terminal_title_stripped = "dev@<host>:~";
+      }
+      return snap;
+    });
+    const before = herdr.called("session.snapshot").length;
+    events.length = 0;
+    herdr.pushEvent(PANE_UPDATED_EVENT.event, PANE_UPDATED_EVENT.data);
+    // `pane_updated` itself never writes the title -- it has no `agent`/`display_agent` name --
+    // so it must still read "zsh" synchronously, before the scheduled snapshot has even run.
+    expect((await b.listSessions()).find((s) => s.id === "term_b")).toMatchObject({ title: "zsh" });
+    await waitFor(() => herdr.called("session.snapshot").length > before, 3000);
+    await waitFor(() => idsOf("title-changed").includes("term_b"), 3000);
+    expect((await b.listSessions()).find((s) => s.id === "term_b")).toMatchObject({
+      title: "dev@<host>:~",
+    });
+  });
+
+  it("leaves a pending stale scroll flag alone when pane_updated carries no scroll (review round 1, item 3)", async () => {
+    const b = await connect({ syncDebounceMs: 5000, scrollRefreshMs: 0 });
+    herdr.reply("pane.get", (p) => ({
+      type: "pane_info",
+      pane: {
+        pane_id: p.pane_id,
+        terminal_id: "term_a",
+        workspace_id: "w1",
+        tab_id: "w1:t1",
+        focused: true,
+        agent_status: "unknown",
+        revision: 2,
+        scroll: { offset_from_bottom: 0, max_offset_from_bottom: 300, viewport_rows: 51 },
+      },
+    }));
+    // No numbers on the scroll event: marks the pane stale, per the PRIMARY path.
+    herdr.pushEvent("pane.scroll_changed", { pane_id: "w1:p1" });
+    // A `pane_updated` with no `scroll` field at all must not clear that stale flag (it is not
+    // itself a claim that scroll settled) -- unlike a `pane.scroll_changed` payload that DOES
+    // carry numbers, which legitimately would.
+    herdr.pushEvent("pane_updated", { pane: { pane_id: "w1:p1", agent_status: "unknown" } });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(herdr.called("pane.get")).toHaveLength(0); // not refreshed yet -- still pending
+    expect((await b.getScreen("term_a")).scrollbackTotal).toBe(300);
+    expect(herdr.called("pane.get")).toHaveLength(1); // getScreen finally cleared the staleness
   });
 });
 
