@@ -112,6 +112,10 @@ export default function PairScreen() {
             "Let Shellbell ring you?",
             "Shellbell rings you when a command finishes or a program is waiting.",
             [{ text: "Continue", onPress: () => resolve() }],
+            // Android alerts are cancelable by default (hardware Back / outside tap dismisses
+            // without firing a button's onPress). Without onDismiss the await above would never
+            // settle, wedging the first-run flow before the permission prompt and navigation.
+            { cancelable: false, onDismiss: () => resolve() },
           );
         });
         if (await requestPermissionOnce()) {

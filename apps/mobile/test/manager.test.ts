@@ -297,4 +297,83 @@ describe("ConnectionManager", () => {
     expect(() => connectionManager.notifyPushToggle("unknown", true)).not.toThrow();
     connectionManager.stop();
   });
+
+  it("M1: toggling push off falls back to the last known token when a fresh fetch resolves null", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    });
+    const { connectionManager } = await import("../src/net/manager");
+    let resolveToken = true;
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      // Resolves a real token on connect (so the manager caches it), then null afterwards --
+      // e.g. permission revoked or a transient Expo failure on the toggle's own fetch.
+      pushToken: async (fp: string) =>
+        resolveToken ? { token: `tok-${fp}`, platform: "ios", enabled: false } : null,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const conn = created[0];
+    if (!conn) throw new Error("test setup: no connection created");
+
+    // First toggle succeeds with a real token -- this is what populates the cache (the mocked
+    // `ComputerConnection.connect()` is a no-op, so it never calls `opts.pushToken` itself).
+    connectionManager.notifyPushToggle("f1", true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(conn.sendPushToken).toHaveBeenCalledWith({
+      token: "tok-f1",
+      platform: "ios",
+      enabled: true,
+    });
+
+    // Now a fresh fetch fails (permission revoked, transient Expo error, ...): the "off" toggle
+    // must still reach the relay using the token cached from the successful fetch above, since
+    // the protocol's `push-token.token` is required non-empty (packages/protocol/src/ctrl.ts).
+    resolveToken = false;
+    connectionManager.notifyPushToggle("f1", false);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(conn.sendPushToken).toHaveBeenCalledWith({
+      token: "tok-f1",
+      platform: "ios",
+      enabled: false,
+    });
+    connectionManager.stop();
+  });
+
+  it("M1: toggling push with no token ever cached is a silent no-op", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    });
+    const { connectionManager } = await import("../src/net/manager");
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      pushToken: async () => null,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const conn = created[0];
+    if (!conn) throw new Error("test setup: no connection created");
+
+    connectionManager.notifyPushToggle("f1", false);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(conn.sendPushToken).not.toHaveBeenCalled();
+    connectionManager.stop();
+  });
 });

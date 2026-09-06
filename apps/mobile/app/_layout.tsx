@@ -48,7 +48,9 @@ function cancelPendingOpen(): void {
  */
 function openTarget(t: NavTarget): void {
   cancelPendingOpen();
-  router.push(`/c/${t.computerFp}`);
+  // M3: `navigate` (not `push`) so repeated ring taps on the same computer reuse the existing
+  // screen instead of stacking duplicates that each need their own Back.
+  router.navigate(`/c/${t.computerFp}`);
   const route = t.sessionRoute;
   if (route === null) return;
   const sessionId = sidFromRoute(route);

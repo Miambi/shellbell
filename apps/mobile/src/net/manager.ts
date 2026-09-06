@@ -35,6 +35,11 @@ class Manager {
   private rerun = false;
   private sub: { remove: () => void } | null = null;
   private unsubscribeComputers: (() => void) | null = null;
+  /** Last push token the relay is known to have per computer (M1): the protocol's `push-token`
+   *  requires a non-empty `token` (packages/protocol/src/ctrl.ts), so an "off" toggle after a
+   *  fresh fetch fails (permission revoked, transient Expo error) has nothing valid to send
+   *  unless it falls back to a token we previously registered successfully. */
+  private lastToken = new Map<string, PushTokenInfo>();
 
   start(deps: ManagerDeps): void {
     this.deps = deps;
@@ -66,12 +71,33 @@ class Manager {
     const conn = this.conns.get(fp);
     const deps = this.deps;
     if (!conn || !deps) return;
-    deps
-      .pushToken(fp)
+    this.fetchToken(fp)
       .then((t) => {
-        if (t) conn.sendPushToken({ ...t, enabled });
+        if (t) {
+          conn.sendPushToken({ ...t, enabled });
+          return;
+        }
+        // M1: a fresh fetch failing (permission revoked, transient Expo error, placeholder
+        // projectId) must not silently strand `enabled: false` -- the protocol requires a
+        // non-empty token, so re-send the last token we know the relay already has with the
+        // new `enabled` value. If we have never registered a token for this computer there is
+        // genuinely nothing valid to send; this is a documented no-op, not a bug (the relay was
+        // never told push was on in the first place, so "off" needs no message).
+        const cached = this.lastToken.get(fp);
+        if (cached) conn.sendPushToken({ ...cached, enabled });
       })
       .catch(() => undefined);
+  }
+
+  /** Wraps `deps.pushToken` to remember the last non-null result per computer (M1), so a later
+   *  failed fetch (e.g. toggling push off) can still fall back to a token the relay already has. */
+  private fetchToken(fp: string): Promise<PushTokenInfo | null> {
+    const deps = this.deps;
+    if (!deps) return Promise.resolve(null);
+    return deps.pushToken(fp).then((t) => {
+      if (t) this.lastToken.set(fp, t);
+      return t;
+    });
   }
 
   private onAppState(s: AppStateStatus): void {
@@ -115,7 +141,7 @@ class Manager {
           phoneName: deps.phoneName,
           appVersion: deps.appVersion,
           kPair: secret.kPair,
-          pushToken: () => deps.pushToken(c.fp),
+          pushToken: () => this.fetchToken(c.fp),
           onStatus: (status, extra) => this.onStatus(c.fp, status, extra),
           onInner: (m) => this.onInner(c.fp, m),
         });

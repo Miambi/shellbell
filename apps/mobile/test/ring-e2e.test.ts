@@ -260,6 +260,33 @@ describe("ring end-to-end (spec 8.8, 10.8, 11.3): FakeRelay + real Agent/EventEn
       at: now(),
     });
     await waitFor(() => conn.inner.some((m) => m.type === "event" && m.sessionId === "s-short"));
+
+    // M12: don't trust the negative assertion below on timing alone -- `notify` travels
+    // agent->relay directly while `event` needs a second relay->phone hop, so checking
+    // `relay.ctrlFromAgent` right after the phone sees the `event` could still race a wrongly
+    // emitted `notify` that just hasn't landed yet. Give it an ordering barrier: run a second,
+    // independent command that DOES cross notifyMinCommandMs and wait for *that* session's
+    // `notify` to actually reach the relay first. The agent's event/ctrl pipeline is
+    // single-threaded and processes backend events in the order they're delivered, so by the
+    // time s-after-short's `notify` has arrived, any notify wrongly emitted for the earlier
+    // s-short command would already be sitting in `relay.ctrlFromAgent` too.
+    agent.events.onBackendEvent({
+      type: "command-start",
+      sessionId: "s-after-short",
+      command: "sleep 15",
+      at: now(),
+    });
+    t += 12_000;
+    agent.events.onBackendEvent({
+      type: "command-end",
+      sessionId: "s-after-short",
+      exitCode: 0,
+      at: now(),
+    });
+    await waitFor(() =>
+      relay.ctrlFromAgent.some((m) => m.type === "notify" && m.sessionId === "s-after-short"),
+    );
+
     expect(relay.ctrlFromAgent.some((m) => m.type === "notify" && m.sessionId === "s-short")).toBe(
       false,
     );

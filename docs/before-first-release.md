@@ -55,7 +55,3 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   captured without a real Herdr server. `pnpm -F shellbell spike:herdr` (Plan 04b Task 7, still
   pending) needs to run against a real Herdr server to capture real fixtures and write
   `docs/spike-herdr.md`, which does not exist yet.
-- **`eas.json` `cli.appVersionSource`.** `apps/mobile/eas.json`'s `production` profile sets
-  `autoIncrement: true` but the file has no top-level `cli.appVersionSource`. Recent EAS CLI
-  versions require this set explicitly (`"remote"` is the usual choice alongside
-  `autoIncrement`) — confirm and set it during Task 9, before the first `eas build`.
