@@ -26,11 +26,19 @@ It never stores, and never sees, terminal content, session titles, commands, or 
 an agent type. Not encrypted-and-discarded — never received in the first place: those bytes are
 sealed with a key only your phone and Mac hold.
 
-## Connection metadata logs
+## Logs
 
-For abuse handling, the hosted relay logs connection metadata — a fingerprint prefix, connection
-timestamps, and byte counts — retained for 7 days, then deleted. This is the only "logging" beyond
-the storage above, and it never includes message contents.
+The relay's own code logs only a handful of generic error strings when something goes wrong — for
+example `"do error"` or `"expo push failed"` paired with the error's name (never its message,
+never a fingerprint, session id, or byte count) — to help debug outages. It never logs message
+contents, fingerprints, or byte counts.
+
+Separately, the hosted relay has Cloudflare Workers Logs enabled (`observability` in
+`wrangler.jsonc`), which is Cloudflare's own platform logging: request metadata such as method,
+status code and duration, automatically — not something this codebase controls or adds fields to.
+Cloudflare retains Workers logs for a limited period (7 days on the free plan at the time of
+writing); see Cloudflare's own documentation for the current retention on whichever plan the
+hosted relay runs on.
 
 ## What a push notification carries
 
