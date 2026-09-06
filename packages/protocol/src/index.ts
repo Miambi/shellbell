@@ -6,6 +6,7 @@ export * from "./ctrl.js";
 export * from "./envelope.js";
 export * from "./inner.js";
 export * from "./keys.js";
+export * from "./loose.js";
 export * from "./qr.js";
 export * from "./screen.js";
 export * from "./sgr.js";

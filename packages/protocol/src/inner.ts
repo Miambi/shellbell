@@ -33,11 +33,14 @@ export const CapabilitiesSchema = z.object({
 });
 export type Capabilities = z.infer<typeof CapabilitiesSchema>;
 
-const sid = z.string().min(1).max(128);
+export const SidSchema = z.string().min(1).max(128);
+export const SessionStateSchema = z.enum(["unknown", "editing", "running", "finished", "blocked"]);
+export type SessionState = z.infer<typeof SessionStateSchema>;
+
 const reqId = z.string().min(1).max(64);
 
 export const SessionInfoSchema = z.object({
-  id: sid,
+  id: SidSchema,
   backend: BackendNameSchema,
   title: z.string().max(256),
   cwd: z.string().max(1024).optional(),
@@ -51,7 +54,7 @@ export const SessionInfoSchema = z.object({
   isFocusedOnMac: z.boolean(),
   // spec 8.13: `blocked` is Herdr's "an agent is waiting for a human" state. It is a first-class
   // session state, not a flavour of `running`: the app renders it differently and it rings.
-  state: z.enum(["unknown", "editing", "running", "finished", "blocked"]),
+  state: SessionStateSchema,
 });
 export type SessionInfo = z.infer<typeof SessionInfoSchema>;
 
@@ -63,14 +66,14 @@ export const CreateWhereSchema = z.union([
   }),
   z.object({
     kind: z.literal("split"),
-    sessionId: sid,
+    sessionId: SidSchema,
     direction: z.enum(["vertical", "horizontal"]),
   }),
 ]);
 export type CreateWhere = z.infer<typeof CreateWhereSchema>;
 
 const screenCommon = {
-  sessionId: sid,
+  sessionId: SidSchema,
   cursor: CursorSchema,
   scrollbackTotal: z.number().int().nonnegative(),
   gen: z.number().int().nonnegative(),
@@ -107,14 +110,14 @@ export const InnerMessageSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("history"),
-    sessionId: sid,
+    sessionId: SidSchema,
     before: z.number().int().nonnegative(),
     lines: z.array(LineSchema).max(200),
     oldestAvailable: z.number().int().nonnegative(),
   }),
   z.object({
     type: z.literal("event"),
-    sessionId: sid,
+    sessionId: SidSchema,
     kind: EventKindSchema,
     exitCode: z.number().int().optional(),
     durationMs: z.number().int().nonnegative().optional(),
@@ -126,23 +129,33 @@ export const InnerMessageSchema = z.discriminatedUnion("type", [
     reqId,
     ok: z.boolean(),
     error: z.string().max(256).optional(),
-    sessionId: sid.optional(),
+    sessionId: SidSchema.optional(),
   }),
   // phone -> agent (every one carries reqId except subscribe)
-  z.object({ type: z.literal("subscribe"), sessionId: sid.nullable() }),
-  z.object({ type: z.literal("input.line"), reqId, sessionId: sid, text: z.string().max(8192) }),
-  z.object({ type: z.literal("input.text"), reqId, sessionId: sid, text: z.string().max(65536) }),
-  z.object({ type: z.literal("input.key"), reqId, sessionId: sid, key: NamedKeySchema }),
+  z.object({ type: z.literal("subscribe"), sessionId: SidSchema.nullable() }),
+  z.object({
+    type: z.literal("input.line"),
+    reqId,
+    sessionId: SidSchema,
+    text: z.string().max(8192),
+  }),
+  z.object({
+    type: z.literal("input.text"),
+    reqId,
+    sessionId: SidSchema,
+    text: z.string().max(65536),
+  }),
+  z.object({ type: z.literal("input.key"), reqId, sessionId: SidSchema, key: NamedKeySchema }),
   z.object({
     type: z.literal("history.get"),
     reqId,
-    sessionId: sid,
+    sessionId: SidSchema,
     before: z.number().int().nonnegative(),
     count: z.number().int().min(1).max(200),
   }),
   z.object({ type: z.literal("session.create"), reqId, in: CreateWhereSchema }),
-  z.object({ type: z.literal("session.focus"), reqId, sessionId: sid }),
-  z.object({ type: z.literal("snapshot.get"), reqId, sessionId: sid }),
+  z.object({ type: z.literal("session.focus"), reqId, sessionId: SidSchema }),
+  z.object({ type: z.literal("snapshot.get"), reqId, sessionId: SidSchema }),
 ]);
 export type InnerMessage = z.infer<typeof InnerMessageSchema>;
 export type InnerMessageOf<T extends InnerMessage["type"]> = Extract<InnerMessage, { type: T }>;
