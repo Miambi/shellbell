@@ -558,8 +558,8 @@ describe("HerdrBackend event handling", () => {
     await waitFor(() => types().includes("agent-state"));
     expect(events.find((e) => e.type === "agent-state")).toMatchObject({
       sessionId: "term_a",
-      state: "idle",
-      agent: "Claude Code", // display name wins over the CLI slug
+      state: "working",
+      agent: "claude", // the real event carries only `agent` (no display_agent), see the fixture note
     });
     // No snapshot was needed: this event's payload IS the new value.
     expect(herdr.called("session.snapshot")).toHaveLength(2);
