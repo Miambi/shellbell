@@ -1175,8 +1175,20 @@ ranges and emoji presentation ranges; 1 otherwise. The range table shipped in Pl
   `tmux_window_id` reported by iTerm2. iTerm2 wins (native styles, prompt events).
 - **Ordering in `sessions`:** iTerm2 sessions first (window number, tab index, pane
   index), then tmux (session index, window index, pane index), then herdr (workspace
-  number, tab number, pane rect order). Herdr needs no de-duplication rule: its panes are
-  never also iTerm2 or tmux sessions.
+  number, tab number, pane rect order).
+- **Host-session de-duplication (added 2026-09-06):** a multiplexer's *client* runs inside an
+  iTerm2 session — `herdr` always, `tmux attach` whenever iTerm2's `-CC` integration is not
+  used — and that host session mirrors the whole multiplexer UI as one screen while the
+  multiplexer backend lists its panes individually: the phone would show the same content
+  twice and the host session's 8.8 idle heuristic would ring on top of the multiplexer's own
+  rings. Rule: the iTerm2 backend tracks each session's `jobName` variable (subscribed like
+  `session.name`; refreshed on `session.path`/`jobName` change notifications) and exposes
+  `hostJob(sessionId)`. `BackendRegistry.listSessions()` hides an iTerm2 session whose
+  `hostJob` is `herdr` while the herdr backend is connected, and one whose `hostJob` is
+  `tmux` and which is not a `-CC` tab (no `tmux_window_id`) while the tmux backend is
+  connected. The session reappears the moment the multiplexer backend disconnects or the
+  job exits, and inputs to a hidden session are still routed (hiding is a listing rule,
+  not a routing one). The `-CC` rule above is unchanged.
 
 ---
 

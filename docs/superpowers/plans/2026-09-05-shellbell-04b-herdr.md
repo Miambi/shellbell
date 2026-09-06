@@ -5839,3 +5839,38 @@ fixtures under `apps/agent/test/fixtures/` (captured ones are already on disk, u
 - [ ] **Step 8: errata + commit.** Append bullets to "Post-spike errata" below (assumption → measured
   → change), run `pnpm lint:fix && pnpm lint`, `pnpm typecheck`, `perl -e 'alarm 600; exec @ARGV' pnpm test`,
   and commit as `feat(agent): herdr change detection via pane_updated revisions; adopt spike fixtures`.
+
+## Task 10 (added 2026-09-06) — hide the iTerm2 session that hosts a multiplexer client (spec 8.12)
+
+Bilal's observation: Herdr's client runs inside iTerm2, so the iTerm2 backend already mirrors the
+whole Herdr UI as one session while the Herdr backend lists its panes — duplicate content and
+double rings. Spec §8.12 "Host-session de-duplication" is the authority; this task implements it.
+
+**Files:** modify `apps/agent/src/backends/iterm2/backend.ts`, `apps/agent/src/backends/types.ts`,
+`apps/agent/src/backends/registry.ts`; tests `apps/agent/test/iterm2-backend.test.ts`,
+`apps/agent/test/registry.test.ts` (and `test/fakes/fake-iterm2*.ts` if the fake needs to answer
+`jobName`).
+
+- [ ] **Step 1: `jobName` in the iTerm2 backend.** Where `session.name`/`session.path` are
+  subscribed (`NOTIFY_ON_VARIABLE_CHANGE`), also subscribe `jobName`; where `variable(id,
+  "session.name")` is fetched on adoption, also fetch `jobName`; store it as `job?: string` on the
+  native record; update it from the variable-change notification. Add `hostJob(sessionId): string |
+  undefined` to the iTerm2 backend and as an optional method on `TerminalBackend` in `types.ts`
+  (next to `tmuxWindowIds?`). `jobName` is the executable name only (`herdr`, `tmux`, `zsh`); do
+  not log it (spec 8.10 — it can name a private tool).
+- [ ] **Step 2: registry rule.** In `BackendRegistry.listSessions()`, after computing `hidden`, hide
+  an iTerm2 session `s` when `iterm.hostJob?.(s.id)` is `"herdr"` and the herdr member is
+  connected (`isConnected?.() !== false` and present), or `"tmux"` and the tmux member is
+  connected and `s` has no `tmuxWindowId` (the iTerm2 `SessionInfo` must expose whether it is a
+  `-CC` tab — add a boolean if `toInfo` does not already carry it; do not reuse `tmuxWindowIds()`
+  which is keyed the other way). Wrap in the same try/warn pattern as `tmuxWindowIds`. Routing
+  (`getScreen`, `sendInput`, …) is untouched: a hidden session is still addressable.
+- [ ] **Step 3: tests.** iTerm2 backend: a `jobName` variable-change notification updates
+  `hostJob`; adoption fetches it. Registry: (a) iTerm2 `herdr` host + herdr connected → hidden;
+  (b) herdr backend absent or `isConnected() === false` → shown; (c) `tmux` host without
+  `tmuxWindowId` + tmux connected → hidden; (d) `tmux` host that IS a `-CC` tab → shown (the
+  `-CC` rule hides the tmux side instead); (e) `zsh` host → shown; (f) hidden session still routes
+  `getScreen`. Reuse the fakes `registry.test.ts` already builds.
+- [ ] **Step 4: gates + commit.** `pnpm lint:fix && pnpm lint`, `pnpm typecheck`,
+  `perl -e 'alarm 600; exec @ARGV' pnpm -F shellbell test`; commit
+  `feat(agent): hide the iTerm2 session hosting a herdr or tmux client`.
