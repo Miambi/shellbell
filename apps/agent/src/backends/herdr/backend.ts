@@ -830,7 +830,7 @@ export class HerdrBackend implements TerminalBackend {
       // --- values on a pane that already exists ---
       // Spec 8.13 (revised after the Task 8 spike): `pane_updated.pane` is a full `PaneInfo`, not a
       // hint. An unknown `pane_id` means a pane appeared and only the snapshot can add it; a known
-      // pane is updated in place -- scroll, agent status (latest-wins, no name field here so the
+      // pane is updated in place -- scroll, agent status (latest-wins; `agent` may appear but no display name, so the
       // title itself is never WRITTEN from this payload), and the monotonic `revision`, which is
       // what change detection now runs on (there is no `pane.copy_motion` in Herdr 0.8.2 --
       // `docs/spike-herdr.md` Q9). A plain shell pane's title/cwd only ever change via this event,

@@ -1296,8 +1296,8 @@ is a full `PaneInfo` (`pane_id`, `terminal_id`, `revision`, `agent_status`, `scr
 `cwd`, `terminal_title`, …) and whose `revision` is a monotonic content counter — measured: two
 events per shell command (output, then prompt), the first within ~100 ms of the input, and **none**
 while the pane is idle. `pane.get` and `session.snapshot` return the same `revision`. The backend
-therefore keeps `revision` per pane and emits `screen-changed` whenever a `pane_updated` event (or a
-snapshot applied after a reconnect) carries a different value; a `pane_updated` for an unknown
+therefore keeps `revision` per pane and emits `screen-changed` whenever a `pane_updated` event carries a
+strictly newer value (or a snapshot applied after a reconnect moves it); a `pane_updated` for an unknown
 `pane_id` is a snapshot hint. `pane.copy_motion` **does not exist** in this build (the server rejects
 it as an unknown variant), so there is no revision poller, no `setWatched` dependency for change
 detection, and the 8.8 idle heuristic runs for every Herdr shell pane, viewed or not. Every request
