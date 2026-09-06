@@ -1538,8 +1538,9 @@ assigned when the line object is created) so FlashList re-renders only changed r
 - Cursor: absolutely-positioned block at `(cursor.x * charWidth, cursor.y * lineHeight)`
   over the screen region, accent at 70 % opacity, blinking via Reanimated only when the
   session is `running`/`editing`.
-- **Fit width**: override font size `viewportWidth / cols / 0.6` (min 5). **Pinch**
-  adjusts font size 5–24; persisted.
+- **Fit width**: override font size `(viewportWidth − horizontalPadding) / cols / 0.6` (min 5;
+  the padding term was added by Plan 05 — the app subtracts its 16 px gutter). **Pinch**
+  adjusts font size 5–24; persisted on gesture end (never per frame).
 - "↓ Jump to live" pill when not following the tail.
 - **History**: `onStartReached` → if `historyFrom > oldestAvailable` (or unknown), send
   `history.get { before: historyFrom, count: 200 }` and prepend. Stop when a short page
@@ -1565,7 +1566,10 @@ Bottom bar (glass on iOS where available), three rows:
      this app process, per computer, in memory only; `↑` button browses it.
    - **Raw mode** (toggle `⌨︎`; remembered per session): every character typed is sent
      immediately as `input.text`; Backspace → `input.key backspace`; Return →
-     `input.key enter`; the field stays empty. The raw-mode `TextInput` **must** set
+     `input.key enter`; the visible field mirrors what was typed and a differ against the
+     previous value emits the minimal sequence (Plan 05 errata: the field is not kept
+     empty — an empty field cannot receive Backspace from `onChangeText`, so Backspace is
+     also wired through `onKeyPress`). The raw-mode `TextInput` **must** set
      `autoCorrect={false}`, `autoCapitalize="none"`, `spellCheck={false}`,
      `autoComplete="off"`, `textContentType="none"`,
      `keyboardType={Platform.OS === "ios" ? "ascii-capable" : "visible-password"}`
@@ -1696,7 +1700,7 @@ Bodies are generic and fixed by kind (9.2): `prompt` → "A command finished —
 | iTerm2 not running / API off | Hint, retry every 10 s; relay socket stays up; that backend absent from `hello` | — | Shows "iTerm2 not running on *MBP*" when no backends are connected |
 | Relay unreachable | Backoff reconnect | — | Status `offline`; "Reconnecting…" pill; last screen stays visible |
 | Agent offline | — | `presence false` to phones; pairing window closed | Last screen dimmed + "Computer offline since 12:04" |
-| Phone unpaired on Mac | Removes pairing, sends `unpair` | Closes phone socket `4004` | On `4004`: marks computer "unpaired", offers Remove / Re-pair |
+| Phone unpaired on Mac | Removes pairing, sends `unpair` | Closes phone socket `4004` | On `4004`: marks computer "unpaired", offers Remove / Re-pair (the relay also uses `4004` for a computer expired by GC, spec 9.2 — the phone treats both the same) |
 | Phone unpairs while agent offline | Applies `unpaired` on next connect | Deletes row, records tombstone | — |
 | `K_pair` mismatch | 20 decrypt failures → close | — | Same → "Re-pair this computer" |
 | Duplicate agent process | New wins; old exits with a message | Closes old `4005` | — |
@@ -1835,6 +1839,9 @@ self-host.
   foreground/background, pending-input toast on close.
 - Raw-mode input differ: typed "ab", backspace, "c" → expected messages.
 - Manual QA checklist in `apps/mobile/QA.md`; on-device self-test screen for vectors.
+- Shipped by Plan 05 (2026-09-06): pairing e2e against the real agent `PairingManager` +
+  `FakeRelay`, connection e2e against the real `RelayClient`/`PhoneLink`, scan-guard,
+  vocabulary, keyed screen state, differ; `.tsx` screens are covered by `QA.md` only.
 
 **Cross-cutting:** `scripts/e2e-local.sh` runs the relay with `wrangler dev`; the agent
 runs with `--relay ws://localhost:8787`; a dev build of the app scans the printed QR.

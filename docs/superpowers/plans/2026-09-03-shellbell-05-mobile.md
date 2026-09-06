@@ -49,6 +49,40 @@ if the shipped file disagrees — the shipped file wins, and you must report the
 
 ---
 
+## Post-execution errata (2026-09-06)
+
+Executed on branch `sdd/plan-05-mobile` (Tasks 0–8, 3 fix rounds, 1 final fix wave; rulings R54–R61 in
+the SDD ledger). Where this text still differs from the shipped code, the code is the authority:
+
+- **Protocol (Task 0):** `packages/protocol` has a separate `tsconfig.test.json` (Node types for tests
+  only; `src/` stays Node-free); a drift-guard test pins the loose schemas' non-enum fields to the
+  strict ones.
+- **Scaffold (Task 1):** `newArchEnabled` is not a valid SDK 57 field (dropped); `react-native-screens`
+  resolved to `~4.26.2`; `typescript` excluded from `expo install --check`; the JetBrains Mono **Nerd
+  Font** v3.4.0 TTFs are embedded (OFL + MIT, `assets/fonts/LICENSE.md`) via the `expo-font` config
+  plugin only — no `useFonts(require(...))` JS path; iOS PostScript names are
+  `JetBrainsMonoNF-{Regular,Bold,Italic,BoldItalic}`; camera plugin has `recordAudioAndroid: false`.
+- **Connection (Task 4):** repeated agent `conn.hello` (same nonce) rejected; socket-identity guards;
+  `close()` in any readyState; `ConnectionManager` is generation-guarded and re-runs after a
+  background/foreground flap; `presence:false` during a handshake keeps the socket.
+- **Pairing (Task 5):** scan guard (same-payload dedupe, 2 s cooldown, explicit "Scan again"); response
+  `x25519Pub` must be 32 bytes; relay-side faults use the `relay` copy; `appVersion` from
+  `expo-constants`.
+- **Screens (Tasks 6–8):** `StatusOverlay` dims (never unmounts); `sessionEnded()` predicate handles a
+  session removed while viewed; cursor prop memoized via `buildCursor`; raw-mode Backspace is wired
+  through `onKeyPress` (an empty field emits no `onChangeText`); pinch persists on gesture end;
+  `SafeAreaProvider` + insets on bars; floating promises caught (identity failure shows a storage error
+  state); `InputBar` never registers a pending input while offline and always toasts on
+  `DeliveryUnknownError`; `input.line` guarded at 8 KB; unpair sends the `unpair` ctrl before wiping
+  `K_pair`; the notifications toggle sends `push-token {enabled}` when a token exists (token
+  acquisition itself is Plan 06); SecureStore items use `WHEN_UNLOCKED_THIS_DEVICE_ONLY` with a
+  one-time migration.
+- **Known limitations (documented):** unknown `auth-fail`/`pairing-reject` reasons still fail strictly
+  (surface as a relay error); unknown backends render but get no "New session" action; `.tsx` screens
+  are verified only via `QA.md`; `docs/spike-render.md` measurements are [HUMAN] and still blank.
+- **Spec drift recorded:** §10.5 fit-width padding; §10.6 raw-mode field wording; §12 `4004` overload;
+  §15 mobile test list (all edited in the spec on 2026-09-06).
+
 ## Global Constraints
 
 **Human-run rule.** Steps marked **[HUMAN]** must never be executed by an agent. They need a
