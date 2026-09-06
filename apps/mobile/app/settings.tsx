@@ -1,3 +1,4 @@
+import { Link } from "expo-router";
 import { ScrollView, StyleSheet, Text } from "react-native";
 import { tokens } from "../src/theme/tokens";
 
@@ -9,6 +10,11 @@ export default function SettingsScreen() {
       contentInsetAdjustmentBehavior="automatic"
     >
       <Text style={styles.text}>Settings (Task 8)</Text>
+      {__DEV__ && (
+        <Link href="/dev/render-spike" style={styles.link}>
+          Render spike
+        </Link>
+      )}
     </ScrollView>
   );
 }
@@ -25,5 +31,9 @@ const styles = StyleSheet.create({
   },
   text: {
     color: tokens.text,
+  },
+  link: {
+    marginTop: tokens.space[3],
+    color: tokens.accents.blue,
   },
 });

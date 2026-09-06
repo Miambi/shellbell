@@ -18,6 +18,7 @@ export default function RootLayout() {
         <Stack.Screen name="index" options={{ title: "Computers" }} />
         <Stack.Screen name="pair" options={{ presentation: "modal", title: "Pair" }} />
         <Stack.Screen name="settings" options={{ title: "Settings" }} />
+        <Stack.Screen name="dev/render-spike" options={{ title: "Render spike" }} />
       </Stack>
     </GestureHandlerRootView>
   );
