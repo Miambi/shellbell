@@ -27,6 +27,9 @@ export function Bar({ children, style }: PropsWithChildren<{ style?: ViewStyle }
     <View
       style={[
         {
+          // tokens.surface (#0B0B0D) at 92% opacity: the non-glass fallback still wants a
+          // translucent bar (so content scrolling underneath is faintly visible, echoing the
+          // GlassView look above), which an opaque token can't express.
           backgroundColor: "rgba(11,11,13,0.92)",
           borderColor: tokens.border,
           borderWidth: 1,

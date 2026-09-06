@@ -127,7 +127,7 @@ export function InputBar({
 
   return (
     <Bar style={{ gap: 6 }}>
-      {showChips ? <ReplyChips onLine={sendLine} onKey={sendKey} accent={accent} /> : null}
+      {showChips ? <ReplyChips onLine={sendLine} onKey={sendKey} /> : null}
       <QuickKeys onKey={sendKey} onPaste={() => void paste()} />
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Pressable
@@ -138,12 +138,12 @@ export function InputBar({
             height: 40,
             borderRadius: tokens.radius.md,
             borderWidth: 1,
-            borderColor: raw ? accent : tokens.border,
+            borderColor: raw ? tokens.text : tokens.border,
             alignItems: "center",
             justifyContent: "center",
           }}
         >
-          <Text style={{ color: raw ? accent : tokens.textMuted }}>⌨︎</Text>
+          <Text style={{ color: raw ? tokens.text : tokens.textMuted }}>⌨︎</Text>
         </Pressable>
         <View
           style={{
@@ -157,7 +157,7 @@ export function InputBar({
             paddingLeft: 12,
           }}
         >
-          <Text style={{ color: accent, fontWeight: "700" }}>{raw ? "»" : "$"}</Text>
+          <Text style={{ color: tokens.textMuted, fontWeight: "700" }}>{raw ? "»" : "$"}</Text>
           <TextInput
             value={raw ? rawText : text}
             onChangeText={
