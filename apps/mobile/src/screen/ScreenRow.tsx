@@ -2,15 +2,10 @@ import { memo } from "react";
 import { View } from "react-native";
 import type { KeyedLine } from "../store/screen";
 import { Cursor } from "./Cursor";
+import type { RowCursor } from "./cursorMemo";
 import { LineView } from "./LineView";
 
-export interface RowCursor {
-  x: number;
-  y: number;
-  accent: string;
-  blinking: boolean;
-  inferred: boolean;
-}
+export type { RowCursor } from "./cursorMemo";
 
 /**
  * One list cell. `screenIndex` is the row's position on the live screen (negative for history

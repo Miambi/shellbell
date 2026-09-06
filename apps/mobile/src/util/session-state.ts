@@ -34,3 +34,16 @@ export function wantsReply(state: string, lastEventKind: string | undefined): bo
     lastEventKind === "blocked"
   );
 }
+
+/**
+ * A session is "ended" once the app has already rendered it (a cached `view` exists) but its id
+ * has dropped out of the computer's `sessions` list. Until a view has ever arrived, an empty or
+ * missing entry just means the app is still connecting — not that the session ended.
+ */
+export function sessionEnded(
+  sessions: { id: string }[],
+  sid: string,
+  view: unknown | undefined,
+): boolean {
+  return view !== undefined && !sessions.some((s) => s.id === sid);
+}

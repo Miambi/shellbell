@@ -7,7 +7,7 @@ import {
   newSessionLabel,
 } from "../src/util/backends.js";
 import { cjkLines } from "../src/util/fixtures.js";
-import { cursorBlinks, statePill, wantsReply } from "../src/util/session-state.js";
+import { cursorBlinks, sessionEnded, statePill, wantsReply } from "../src/util/session-state.js";
 
 describe("cjk fixture", () => {
   it("declares cell widths that match stringCells", () => {
@@ -60,5 +60,15 @@ describe("session state vocabulary", () => {
     expect(cursorBlinks("running")).toBe(true);
     expect(cursorBlinks("blocked")).toBe(true);
     expect(cursorBlinks("finished")).toBe(false);
+  });
+
+  it("treats a session as ended only once a cached view exists and it drops off the list", () => {
+    const view = { some: "cached-view" };
+    expect(sessionEnded([], "a", view)).toBe(true);
+    expect(sessionEnded([{ id: "b" }], "a", view)).toBe(true);
+    expect(sessionEnded([{ id: "a" }], "a", view)).toBe(false);
+    // No cached view yet: still connecting, not ended — even if the sessions list is empty.
+    expect(sessionEnded([], "a", undefined)).toBe(false);
+    expect(sessionEnded([{ id: "a" }], "a", undefined)).toBe(false);
   });
 });

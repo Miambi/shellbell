@@ -1,7 +1,8 @@
 import { useKeepAwake } from "expo-keep-awake";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef } from "react";
-import { View } from "react-native";
+import { KeyboardAvoidingView, Platform, View } from "react-native";
+import { InputBar } from "../../../../src/input/InputBar";
 import { connectionManager } from "../../../../src/net/manager";
 import { ScreenView } from "../../../../src/screen/ScreenView";
 import { useComputersStore } from "../../../../src/store/computers";
@@ -9,9 +10,15 @@ import { useConnectionsStore } from "../../../../src/store/connections";
 import { tokens } from "../../../../src/theme/tokens";
 import { EmptyState } from "../../../../src/ui/EmptyState";
 import { StatusOverlay } from "../../../../src/ui/StatusOverlay";
+import { Toast } from "../../../../src/ui/Toast";
 import { backendLabel, cursorIsInferred } from "../../../../src/util/backends";
 import { sidFromRoute } from "../../../../src/util/routes";
-import { cursorBlinks, statePill } from "../../../../src/util/session-state";
+import {
+  cursorBlinks,
+  sessionEnded,
+  statePill,
+  wantsReply,
+} from "../../../../src/util/session-state";
 
 export default function Session() {
   useKeepAwake();
@@ -62,6 +69,9 @@ export default function Session() {
       });
   }, [fp, sessionId, view, oldest]);
 
+  // The session left the computer's `sessions` list but a cached `view` remains: it ended, and
+  // the app must stop offering input for it (R59 ruling 1).
+  const ended = sessionEnded(conn?.sessions ?? [], sessionId, view) || (!session && !view);
   const pill = session ? statePill(session.state) : null;
   const title = session ? `${session.title}${pill ? ` · ${pill.label}` : ""}` : "Session";
   const dimmed = conn?.status !== "online";
@@ -70,29 +80,52 @@ export default function Session() {
     : "Reconnecting…";
 
   return (
-    <View style={{ flex: 1, backgroundColor: tokens.bg }}>
-      <Stack.Screen
-        options={{ title, headerBackTitle: session ? backendLabel(session.backend) : undefined }}
-      />
-      {!session && !view ? (
-        <EmptyState
-          text="Session ended."
-          action={{ label: "Back", onPress: () => router.back() }}
+    <KeyboardAvoidingView
+      style={{ flex: 1 }}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <View style={{ flex: 1, backgroundColor: tokens.bg }}>
+        <Stack.Screen
+          options={{ title, headerBackTitle: session ? backendLabel(session.backend) : undefined }}
         />
-      ) : !view ? (
-        <EmptyState text="Waiting for output…" />
-      ) : (
-        <ScreenView
-          view={view}
-          accent={accent}
-          blinking={cursorBlinks(session?.state ?? "unknown")}
-          inferredCursor={cursorIsInferred(session?.backend ?? "")}
-          onLoadOlder={loadOlder}
-        />
-      )}
-      {/* Spec 12: dim the last screen; never unmount it. */}
-      {dimmed && view ? <StatusOverlay text={overlay} tone="muted" /> : null}
-      {/* InputBar is added in Task 8 */}
-    </View>
+        {ended ? (
+          <EmptyState
+            text="Session ended."
+            action={{ label: "Back", onPress: () => router.back() }}
+          />
+        ) : !view ? (
+          <EmptyState text="Waiting for output…" />
+        ) : (
+          <ScreenView
+            view={view}
+            accent={accent}
+            blinking={cursorBlinks(session?.state ?? "unknown")}
+            inferredCursor={cursorIsInferred(session?.backend ?? "")}
+            onLoadOlder={loadOlder}
+          />
+        )}
+        {/* Spec 12: dim the last screen; never unmount it. */}
+        {dimmed && view && !ended ? <StatusOverlay text={overlay} tone="muted" /> : null}
+        {ended ? null : (
+          <InputBar
+            fp={fp ?? ""}
+            sessionId={sessionId}
+            accent={accent}
+            showChips={wantsReply(
+              session?.state ?? "unknown",
+              conn?.events[sessionId]?.at(-1)?.kind,
+            )}
+          />
+        )}
+        {conn?.toast ? (
+          <Toast
+            text={conn.toast}
+            onDone={() =>
+              useConnectionsStore.getState().patch(fp ?? "", () => ({ toast: undefined }))
+            }
+          />
+        ) : null}
+      </View>
+    </KeyboardAvoidingView>
   );
 }

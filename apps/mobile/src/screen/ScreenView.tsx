@@ -5,7 +5,8 @@ import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useUiStore } from "../store/computers";
 import type { KeyedLine, ViewState } from "../store/screen";
 import { tokens } from "../theme/tokens";
-import { type RowCursor, ScreenRow } from "./ScreenRow";
+import { buildCursor, type RowCursor } from "./cursorMemo";
+import { ScreenRow } from "./ScreenRow";
 
 export function ScreenView({
   view,
@@ -31,6 +32,7 @@ export function ScreenView({
   const list = useRef<FlashListRef<KeyedLine>>(null);
   const [following, setFollowing] = useState(true);
   const startScale = useRef(fontSizeSetting);
+  const cursorRef = useRef<RowCursor | null>(null);
   const histLen = view.state.history.length;
 
   const pinch = Gesture.Pinch()
@@ -44,7 +46,10 @@ export function ScreenView({
     if (following) list.current?.scrollToEnd({ animated: false });
   }, [following]);
 
-  const cursor: RowCursor | null =
+  // Memoized on primitives (never a fresh literal) so `ScreenRow`'s `memo` bails for every row
+  // that doesn't own the cursor.
+  cursorRef.current = buildCursor(
+    cursorRef.current,
     view.state.cursor.y >= 0
       ? {
           x: view.state.cursor.x,
@@ -53,7 +58,9 @@ export function ScreenView({
           blinking,
           inferred: inferredCursor,
         }
-      : null;
+      : null,
+  );
+  const cursor = cursorRef.current;
 
   const renderItem = useCallback(
     ({ item, index }: { item: KeyedLine; index: number }) => (
