@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint, generateIdentity, parseQr } from "@shellbell/protocol";
@@ -475,5 +475,15 @@ describe("isEntryPoint (npm's bin symlink and pnpm's store can put a symlink on 
 
   it("is false when argv1 is undefined (e.g. a test importing the pure helpers above)", () => {
     expect(isEntryPoint(undefined, "file:///app/dist/cli.js")).toBe(false);
+  });
+
+  it("resolves a real symlink via the real realpathSync (no injected resolver), like npm's bin", () => {
+    const dir = tmpDir();
+    const real = join(dir, "cli.js");
+    const link = join(dir, "shellbell");
+    writeFileSync(real, "// fake bundle\n");
+    symlinkSync(real, link);
+    expect(isEntryPoint(link, `file://${real}`)).toBe(true);
+    expect(isEntryPoint(link, `file://${join(dir, "other.js")}`)).toBe(false);
   });
 });

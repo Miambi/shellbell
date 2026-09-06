@@ -32,4 +32,9 @@ export default defineConfig({
   // must also catch a real leaked import inside a string). Minifying strips comments, which is
   // what actually resolves the false positive; it also shrinks the published tarball.
   minify: true,
+  // Tried `sourcemap: true` (R66b): the .map came out ~1.09 MB against a 207 KB bundle (it
+  // embeds `sourcesContent` for every bundled dep, incl. cborg/@noble/*) -- over 5x tarball
+  // bloat for a `npx shellbell` CLI that should stay small, so left off. A crash still prints
+  // a full (if minified) stack via cli.ts's top-level `console.error(err)`.
+  sourcemap: false,
 });
