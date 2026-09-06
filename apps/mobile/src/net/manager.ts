@@ -22,6 +22,9 @@ class Manager {
   private conns = new Map<string, ComputerConnection>();
   private starting = new Set<string>();
   private deps: ManagerDeps | null = null;
+  /** Bumped by `closeAll`; a `connectAll` in flight when it changes must not resume as if
+   *  still foregrounded (spec 11.3: a backgrounded phone must not hold a connection open). */
+  private generation = 0;
   private sub: { remove: () => void } | null = null;
   private unsubscribeComputers: (() => void) | null = null;
 
@@ -56,12 +59,16 @@ class Manager {
   private async connectAll(): Promise<void> {
     const deps = this.deps;
     if (!deps) return;
+    const gen = this.generation;
     for (const c of useComputersStore.getState().computers) {
       // Single-flight: `starting` is set synchronously, before the first await.
       if (this.conns.has(c.fp) || this.starting.has(c.fp)) continue;
       this.starting.add(c.fp);
       try {
         const secret = await loadPairSecret(c.fp);
+        // Backgrounded (or superseded by a newer connectAll) while awaiting SecureStore: bail
+        // rather than resuming as if still foregrounded — `closeAll` already bumped `generation`.
+        if (this.generation !== gen || AppState.currentState !== "active") continue;
         if (!secret) continue;
         if (this.conns.has(c.fp)) continue;
         const conn = new ComputerConnection({
@@ -82,6 +89,7 @@ class Manager {
         this.starting.delete(c.fp);
       }
     }
+    if (this.generation !== gen) return;
     for (const [fp, conn] of this.conns) {
       if (!useComputersStore.getState().computers.some((c) => c.fp === fp)) {
         conn.close("user");
@@ -91,6 +99,7 @@ class Manager {
   }
 
   private closeAll(reason: "background" | "user"): void {
+    this.generation++;
     for (const [fp, conn] of this.conns) {
       const lost = conn.pendingReqIds();
       conn.close(reason);
@@ -117,9 +126,6 @@ class Manager {
     }));
     // Spec 12: any close with un-acked input raises the toast, not only a deliberate background.
     if (extra?.lostReqIds?.length) this.noteLostInputs(fp, extra.lostReqIds);
-    if (extra?.error === "unpaired") {
-      useComputersStore.getState().update(fp, { lastSeenAt: new Date().toISOString() });
-    }
   }
 
   private onInner(fp: string, m: InnerMessageLoose): void {

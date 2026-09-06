@@ -1,5 +1,6 @@
 import {
   authMessage,
+  bytesEqual,
   type CtrlMessageLoose,
   decodeCbor,
   decodeEnvelope,
@@ -104,8 +105,9 @@ export class ComputerConnection {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private keepalive: ReturnType<typeof setInterval> | null = null;
   private helloTimer: ReturnType<typeof setTimeout> | null = null;
-  private agentOnline = false;
   private nPhone: Uint8Array | null = null;
+  /** The agent nonce accepted into the current K_conn; guards against a replayed conn.hello reply. */
+  private nAgent: Uint8Array | null = null;
   private kConn: Uint8Array | null = null;
   private connTag = "";
   private seqOut = 0;
@@ -137,6 +139,8 @@ export class ComputerConnection {
   }
 
   connect(): void {
+    // Mirrors relay-client.ts's `start()`: a no-op while a socket already exists / is dialling.
+    if (!this.stopped) return;
     this.stopped = false;
     this.attempt = 0;
     this.open();
@@ -145,9 +149,13 @@ export class ComputerConnection {
   close(reason: "background" | "user" = "user"): void {
     this.stopped = true;
     this.clearTimers();
-    if (this.ws && this.ws.readyState === 1) {
+    if (this.ws) {
       // Spec 10.4/11.3: the relay must treat this phone as push-eligible immediately.
-      if (reason === "background") this.sendCtrl({ type: "lease", ttlMs: 0 });
+      if (reason === "background" && this.ws.readyState === 1) {
+        this.sendCtrl({ type: "lease", ttlMs: 0 });
+      }
+      // Close regardless of readyState (including CONNECTING) so a still-dialling socket never
+      // lingers; the socket-identity guard below stops its late onopen/onclose from acting on us.
       this.ws.close(1000, reason);
     }
     this.ws = null;
@@ -202,11 +210,18 @@ export class ComputerConnection {
     const Ws =
       this.o.WebSocketImpl ?? (globalThis.WebSocket as unknown as new (url: string) => WsLike);
     const ws = new Ws(relayWsUrl(this.o.relayUrl, this.o.computerFp));
+    // Captured so every handler below can tell a stale (superseded/closed) socket's late events
+    // apart from the live one — mirrors relay-client.ts's `const sock = ws` + `this.ws !== sock`.
+    const sock = ws;
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     this.setStatus("connecting");
-    ws.onopen = () => this.setStatus("auth");
+    ws.onopen = () => {
+      if (this.ws !== sock) return;
+      this.setStatus("auth");
+    };
     ws.onmessage = (ev) => {
+      if (this.ws !== sock) return;
       const data = ev.data;
       if (typeof data === "string") return;
       const bytes = data instanceof Uint8Array ? data : new Uint8Array(data as ArrayBuffer);
@@ -228,8 +243,12 @@ export class ComputerConnection {
         this.onE2E(env);
       }
     };
-    ws.onclose = (ev) => this.onDown(ev.code);
+    ws.onclose = (ev) => {
+      if (this.ws !== sock) return;
+      this.onDown(ev.code);
+    };
     ws.onerror = () => {
+      if (this.ws !== sock) return;
       /* onclose always follows */
     };
   }
@@ -260,7 +279,6 @@ export class ComputerConnection {
       }
       case "auth-ok": {
         this.attempt = 0;
-        this.agentOnline = m.agentOnline;
         this.minFrameMs = m.minFrameMs;
         this.sendCtrl({ type: "lease", ttlMs: LEASE_MS });
         void this.o.pushToken?.().then((t) => {
@@ -291,12 +309,14 @@ export class ComputerConnection {
         return;
       }
       case "presence": {
-        this.agentOnline = m.agentOnline;
         if (m.agentOnline && !this.kConn) {
           this.startHandshake();
           return;
         }
         if (!m.agentOnline) {
+          // Spec 10.4: presence.agentOnline=false keeps the socket — only the handshake/session
+          // state is torn down, so `resetSession()` (which also disarms `helloTimer`) is right,
+          // but the socket itself must stay open for the next presence flip.
           const lost = this.pendingReqIds();
           this.resetSession();
           this.failPending();
@@ -340,6 +360,11 @@ export class ComputerConnection {
         const ad = helloAd(this.o.computerFp, this.o.phoneFp);
         const inner = parseInnerLoose(decodeCbor(open(this.o.kPair, body.data, ad)));
         if (inner.type !== "conn.hello") return;
+        // A hello carrying the same agent nonce as the one already accepted for this handshake is
+        // a replay of the captured conn.hello reply (the relay cannot forge a fresh one under
+        // K_pair): ignore it rather than re-deriving K_conn and rewinding seq on a live connection.
+        // Mirrors apps/agent/src/phone-link.ts:86-92's symmetric guard on the phone's nonce.
+        if (this.nAgent && bytesEqual(inner.n, this.nAgent)) return;
         const d = deriveConnKey(
           this.o.kPair,
           this.nPhone,
@@ -349,6 +374,7 @@ export class ComputerConnection {
         );
         this.kConn = d.kConn;
         this.connTag = d.connTag;
+        this.nAgent = inner.n;
         this.seqOut = 0;
         this.seqIn = 0;
         this.failures = 0;
@@ -356,8 +382,14 @@ export class ComputerConnection {
         this.helloTimer = null;
         this.setStatus("online", { agentOnline: true });
       } catch {
-        this.stopWith("re-pair");
-        this.ws?.close(1000, "kpair mismatch");
+        // Spec 6.7: a single malformed/undecryptable hello is tolerated via the shared failure
+        // counter, not an immediate permanent re-pair — only MAX_DECRYPT_FAILURES in a row means
+        // K_pair itself no longer matches.
+        this.failures += 1;
+        if (this.failures >= MAX_DECRYPT_FAILURES) {
+          this.stopWith("re-pair");
+          this.ws?.close(1000, "kpair mismatch");
+        }
       }
       return;
     }
@@ -410,8 +442,11 @@ export class ComputerConnection {
   }
 
   private resetSession(): void {
+    if (this.helloTimer) clearTimeout(this.helloTimer);
+    this.helloTimer = null;
     this.kConn = null;
     this.nPhone = null;
+    this.nAgent = null;
     this.connTag = "";
     this.seqOut = 0;
     this.seqIn = 0;
