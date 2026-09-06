@@ -22,9 +22,9 @@ else `$XDG_CONFIG_HOME/herdr/herdr.sock`, else `~/.config/herdr/herdr.sock`) and
 automatically, ringing you when an agent is blocked. Nothing to configure, and no Herdr code is
 bundled — Shellbell just speaks its local socket API.
 
-The relay never sees terminal content: everything between phone and Mac is end-to-end encrypted.
-It stores: computer name, paired phone public keys and names, Expo push tokens, leases, and
-rate-limit counters. Storage for a computer is deleted 90 days after its agent last connected.
+See [`PRIVACY.md`](../PRIVACY.md) for exactly what the relay stores and sees — self-hosting your
+own relay doesn't change any of it, since the guarantee is end-to-end encryption between phone
+and Mac, not who runs the relay in between.
 
 ## Multiple Cloudflare accounts
 

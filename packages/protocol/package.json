@@ -12,7 +12,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
-    "gen:vectors": "tsx scripts/gen-vectors.ts"
+    "gen:vectors": "tsx scripts/gen-vectors.ts",
+    "gen:protocol-doc": "tsx scripts/gen-protocol-doc.ts"
   },
   "dependencies": {
     "@noble/ciphers": "2.4.0",
