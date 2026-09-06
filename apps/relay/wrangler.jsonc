@@ -9,6 +9,8 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ComputerDO"] }],
   "observability": { "enabled": true },
   "vars": { "MIN_FRAME_MS": "125" }
-  // Hosted deployment adds:  "routes": [{ "pattern": "relay.shellbell.app", "custom_domain": true }]
-  // Self-hosters keep the *.workers.dev URL and run `shellbell config set relay wss://...`.
+  // Self-hosted default: no `routes`, so `wrangler deploy` publishes to
+  // https://shellbell-relay.<account>.workers.dev. The hosted relay (relay.shellbell.app) is
+  // deployed from wrangler.hosted.jsonc by .github/workflows/deploy-relay.yml — keep the two in
+  // sync when either changes.
 }
