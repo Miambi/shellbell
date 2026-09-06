@@ -10,7 +10,6 @@ import { useConnectionsStore } from "../../../../src/store/connections";
 import { tokens } from "../../../../src/theme/tokens";
 import { EmptyState } from "../../../../src/ui/EmptyState";
 import { StatusOverlay } from "../../../../src/ui/StatusOverlay";
-import { Toast } from "../../../../src/ui/Toast";
 import { backendLabel, cursorIsInferred } from "../../../../src/util/backends";
 import { sidFromRoute } from "../../../../src/util/routes";
 import {
@@ -121,14 +120,6 @@ export default function Session() {
             )}
           />
         )}
-        {conn?.toast ? (
-          <Toast
-            text={conn.toast}
-            onDone={() =>
-              useConnectionsStore.getState().patch(fp ?? "", () => ({ toast: undefined }))
-            }
-          />
-        ) : null}
       </View>
     </KeyboardAvoidingView>
   );

@@ -1,7 +1,8 @@
 import "../src/bootstrap/crypto";
 import Constants from "expo-constants";
 import * as Device from "expo-device";
-import { Stack } from "expo-router";
+import * as Linking from "expo-linking";
+import { router, Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
@@ -10,14 +11,60 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { loadOrCreateIdentity } from "../src/identity/keys";
 import { connectionManager } from "../src/net/manager";
+import {
+  ensureChannel,
+  getPushToken,
+  installNotificationHandler,
+  installTapHandler,
+  showForegroundEvent,
+} from "../src/notifications";
+import { createTapHandler, type NavTarget, parseDeepLink } from "../src/notifications/routing";
 import { useComputersStore, useUiStore } from "../src/store/computers";
+import { useConnectionsStore } from "../src/store/connections";
 import { tokens } from "../src/theme/tokens";
+import { ToastHost } from "../src/ui/ToastHost";
+import { sidFromRoute } from "../src/util/routes";
 
 void SplashScreen.preventAutoHideAsync();
 
 // M1: the manifest version, not a hardcoded literal that would silently drift from the real
 // build (the relay records `appVersion` on every phone socket).
 const APP_VERSION = Constants.expoConfig?.version ?? "0.1.0";
+
+const pairedFps = (): string[] => useComputersStore.getState().computers.map((c) => c.fp);
+
+/** Cancellable so a second tap (or an unmount) cannot leave a chain of timers running (C8). */
+let sessionOpenTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelPendingOpen(): void {
+  if (sessionOpenTimer !== null) clearTimeout(sessionOpenTimer);
+  sessionOpenTimer = null;
+}
+
+/**
+ * Spec 10.8: open the computer immediately, then the session once `sessions` has actually arrived
+ * and contains it. If it never arrives (a session that ended while the phone was away), stay on
+ * the sessions list — a push is a hint, never an instruction.
+ */
+function openTarget(t: NavTarget): void {
+  cancelPendingOpen();
+  router.push(`/c/${t.computerFp}`);
+  const route = t.sessionRoute;
+  if (route === null) return;
+  const sessionId = sidFromRoute(route);
+  let attempts = 0;
+  const tryOpen = () => {
+    sessionOpenTimer = null;
+    const conn = useConnectionsStore.getState().byComputer[t.computerFp];
+    if (conn?.sessions.some((s) => s.id === sessionId) === true) {
+      router.push(`/c/${t.computerFp}/s/${route}`);
+      return;
+    }
+    attempts += 1;
+    if (attempts < 20) sessionOpenTimer = setTimeout(tryOpen, 500);
+  };
+  tryOpen();
+}
 
 export default function RootLayout() {
   // I6: a corrupt/unreadable keychain (or a locked one on Android) must not leave the app
@@ -35,18 +82,50 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    // Spec 10.8: the handler and the Android `rings` channel must exist before any push can
+    // arrive, so both are installed at startup rather than at permission time.
+    installNotificationHandler();
+    void ensureChannel();
+    const handle = createTapHandler(openTarget, pairedFps);
+    const offTap = installTapHandler(handle);
+    const onUrl = (url: string) => {
+      const t = parseDeepLink(url, pairedFps());
+      if (t !== null) openTarget(t);
+    };
+    const urlSub = Linking.addEventListener("url", (e) => onUrl(e.url));
+    void Linking.getInitialURL()
+      .then((u) => {
+        if (u !== null) onUrl(u);
+      })
+      .catch(() => undefined);
+    return () => {
+      offTap();
+      urlSub.remove();
+      cancelPendingOpen();
+    };
+  }, []);
+
+  useEffect(() => {
     // Covers this cold start's paired computers' `K_pair`s in the same one-time keychain
     // migration pass as the identity key (review C1) -- safe because the hydrate effect above
     // runs first (declaration order within one commit).
-    const pairedFps = useComputersStore.getState().computers.map((c) => c.fp);
-    loadOrCreateIdentity(pairedFps)
+    const startFps = useComputersStore.getState().computers.map((c) => c.fp);
+    loadOrCreateIdentity(startFps)
       .then(({ identity, fp }) => {
         connectionManager.start({
           identity,
           phoneFp: fp,
           phoneName: Device.deviceName ?? "My phone",
           appVersion: APP_VERSION,
-          pushToken: async () => null,
+          // Spec 10.8: sent as `push-token` on every `auth-ok` by `ComputerConnection`.
+          pushToken: async (computerFp) => {
+            const t = await getPushToken();
+            if (t === null) return null;
+            const c = useComputersStore.getState().computers.find((x) => x.fp === computerFp);
+            if (c === undefined) return null;
+            return { ...t, enabled: c.pushEnabled };
+          },
+          onForegroundEvent: showForegroundEvent,
         });
       })
       .catch(() => setIdentityError(true));
@@ -92,6 +171,7 @@ export default function RootLayout() {
           <Stack.Screen name="c/[fp]" options={{ headerShown: false }} />
           <Stack.Screen name="dev/render-spike" options={{ title: "Render spike" }} />
         </Stack>
+        <ToastHost />
       </GestureHandlerRootView>
     </SafeAreaProvider>
   );

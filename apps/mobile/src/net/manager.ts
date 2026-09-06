@@ -17,6 +17,9 @@ export interface ManagerDeps {
   phoneName: string;
   appVersion: string;
   pushToken: (computerFp: string) => Promise<PushTokenInfo | null>;
+  /** Spec 10.8 foreground path. Injected by `_layout.tsx` so this module stays native-free:
+   *  importing `src/notifications` here would pull `expo-notifications` into `manager.test.ts`. */
+  onForegroundEvent?: (computerFp: string, sessionTitle: string, kind: string) => void;
 }
 
 class Manager {
@@ -226,7 +229,8 @@ class Manager {
               : c.view,
         }));
         return;
-      case "event":
+      case "event": {
+        const title = store.read(fp).sessions.find((s) => s.id === m.sessionId)?.title ?? "Session";
         store.patch(fp, (c) => ({
           events: {
             ...c.events,
@@ -234,7 +238,9 @@ class Manager {
           },
           unread: { ...c.unread, [m.sessionId]: (c.unread[m.sessionId] ?? 0) + 1 },
         }));
+        this.deps?.onForegroundEvent?.(fp, title, m.kind);
         return;
+      }
       case "ack":
         store.patch(fp, (c) => {
           const rest = { ...c.pendingInputs };

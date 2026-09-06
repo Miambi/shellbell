@@ -8,6 +8,7 @@ import { Alert, Platform, Pressable, Text, View } from "react-native";
 import { loadOrCreateIdentity, savePairSecret } from "../src/identity/keys";
 import { type PairingCode, PairingError, parsePairingQr, runPairing } from "../src/net/pairing";
 import { ScanGuard } from "../src/net/scan-guard";
+import { registerPushTokenWhenConnected, requestPermissionOnce } from "../src/notifications";
 import { useComputersStore } from "../src/store/computers";
 import { tokens } from "../src/theme/tokens";
 
@@ -91,6 +92,7 @@ export default function PairScreen() {
         platform: Platform.OS === "ios" ? "ios" : "android",
         appVersion: APP_VERSION,
       });
+      const isFirstComputer = useComputersStore.getState().computers.length === 0;
       await savePairSecret(r.computerFp, r.secret);
       add({
         fp: r.computerFp,
@@ -103,6 +105,21 @@ export default function PairScreen() {
       });
       guard.current.end("success");
       await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      if (isFirstComputer) {
+        // Spec 10.8: one line of context before the system dialog, which is otherwise unexplained.
+        await new Promise<void>((resolve) => {
+          Alert.alert(
+            "Let Shellbell ring you?",
+            "Shellbell rings you when a command finishes or a program is waiting.",
+            [{ text: "Continue", onPress: () => resolve() }],
+          );
+        });
+        if (await requestPermissionOnce()) {
+          // The socket already authenticated without a token (permission came later), so register
+          // now rather than waiting for the next foreground (review row C7/P2).
+          void registerPushTokenWhenConnected(r.computerFp);
+        }
+      }
       router.replace(`/c/${r.computerFp}`);
     } catch (e) {
       setError(e instanceof PairingError ? COPY[e.code] : COPY.relay);
