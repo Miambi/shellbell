@@ -19,7 +19,7 @@ import { startHerdrBackend } from "./backends/herdr/start.js";
 import { ITerm2Backend } from "./backends/iterm2/backend.js";
 import { ITerm2Client } from "./backends/iterm2/client.js";
 import { BackendRegistry } from "./backends/registry.js";
-import { startTmuxBackend } from "./backends/tmux/start.js";
+import { type StartTmuxOptions, startTmuxBackend } from "./backends/tmux/start.js";
 import { BackendUnavailable } from "./backends/types.js";
 import {
   ACCENTS,
@@ -231,7 +231,19 @@ export function resolveRelayOverride(
   };
 }
 
-async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
+/** Test seam (M-6): lets `cli.test.ts` drive the tmux banner lines with a fake `execImpl`/
+ * `controlFactory` -- same shape `tmux-start.test.ts` already injects -- without a real tmux
+ * server. Defaults to nothing, so production behaviour (the real binary) is unchanged. */
+export interface BuildAgentDeps {
+  tmuxBackendOptions?: StartTmuxOptions["backendOptions"];
+}
+
+export async function buildAgent(
+  log: Logger,
+  relayOverride?: string,
+  yes = false,
+  deps: BuildAgentDeps = {},
+) {
   const p = paths();
   let cfg = loadConfig(p);
   if (relayOverride !== undefined) {
@@ -304,6 +316,7 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
     log,
     onConnected: (n) => print(`  tmux       connected · ${n} pane${n === 1 ? "" : "s"}`),
     onUnavailable: () => print("  tmux       not running"),
+    backendOptions: deps.tmuxBackendOptions,
   });
   const herdr = startHerdrBackend({
     registry,

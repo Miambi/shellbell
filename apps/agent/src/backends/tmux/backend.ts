@@ -40,7 +40,11 @@ const MIN_VERSION = 3.02;
 export const TMUX_INSTALL_HINT = "brew install tmux (3.2+), then start a tmux session";
 /** Review fix 3: a wedged tmux server must not hang `exec()` (and `syncBusy`) forever. */
 const EXEC_TIMEOUT_MS = 5000;
-/** Sane ceiling for `list-sessions`/`list-panes -a` stdout; matches `TmuxControl`'s bound. */
+// M-3: `TmuxControl` accumulates a reply block's lines with no size cap of its own -- harmless
+// today (`list-panes -a` is one row per pane, `getScreen` captures only the visible pane, and
+// `getHistory` is bounded to <=200 rows by the wire schema), but this constant does NOT mirror a
+// bound `TmuxControl` enforces. It is only a sane ceiling for THIS process's own `execFile` calls.
+/** Sane ceiling for `list-sessions`/`list-panes -a` stdout. */
 const EXEC_MAX_BUFFER = 10 * 1024 * 1024;
 
 function errName(err: unknown): string {
@@ -173,6 +177,10 @@ export class TmuxBackend implements TerminalBackend {
     this.closed = false;
     await this.syncControls();
     await this.refreshPanes();
+    // M-4: a close()/stop() that lands here (during either await above) already set `closed = true`
+    // and cleared any watcher. Installing a new one unconditionally would leak it past the close --
+    // it would be inert (unref'd, and both callees bail on `closed`), but still armed forever.
+    if (this.closed) return;
     this.watcher = setInterval(() => {
       void this.syncControls()
         .then(() => this.refreshPanes())
@@ -256,8 +264,17 @@ export class TmuxBackend implements TerminalBackend {
         ids = (await this.exec(["list-sessions", "-F", "#{session_id}"]))
           .split("\n")
           .filter(Boolean);
-      } catch {
-        ids = [];
+      } catch (err) {
+        // I-1: a FAILED probe (timeout, EAGAIN/ENOMEM on fork, a momentarily busy server) is not
+        // "no sessions" -- treating it as such tore down every alive control client and flushed
+        // the phone's whole tmux session list on a single hiccup. Real server death arrives via
+        // `%exit` on each control client, which removes it and reaches `runRefresh`'s empty branch
+        // on its own; leave every client, `sessionIndex` and pane untouched here and try again on
+        // the next tick.
+        this.log.debug("tmux list-sessions failed; keeping the existing clients", {
+          error: errName(err),
+        });
+        return;
       }
       // spec 8.11: `windowNumber` is the session's index in `list-sessions`, captured here.
       this.sessionIndex = new Map(ids.map((id, i) => [id, i]));
@@ -481,11 +498,18 @@ export class TmuxBackend implements TerminalBackend {
     count: number,
   ): Promise<{ lines: Line[]; oldestAvailable: number }> {
     this.pane(paneId);
+    const reported = this.reported.get(paneId);
+    if (reported === undefined) {
+      // M-7: `reported` is set on every screen frame the tracker actually processes, so this
+      // only happens for a pane the phone has never viewed. The -S/-E arithmetic below has no
+      // honest baseline without it -- falling back to `d.historySize` (the old behaviour) silently
+      // returned the WRONG lines rather than an empty result. Refuse instead of guessing.
+      return { lines: [], oldestAvailable: 0 };
+    }
     const ch = this.channel(paneId);
     const d = parseDisplay(
       (await ch.command(`display-message -p -t ${paneId} ${Q_DISPLAY}`))[0] ?? "",
     );
-    const reported = this.reported.get(paneId) ?? d.historySize;
     const oldestAvailable = Math.max(0, reported - d.historySize);
     const e = before - 1 - reported;
     const s = Math.max(before - count - reported, -d.historySize);

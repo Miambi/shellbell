@@ -129,26 +129,18 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
         }
         return;
       }
-      // NB: tmux never interleaves notifications inside a %begin/%end block, so collecting every
-      // non-terminator line into the open block is safe and is what keeps replies correlated.
+      // M-2: dispatch a KNOWN notification even if it arrives inside an open %begin/%end block.
+      // The recorded spike transcript never interleaves one (0 notifications inside 29 balanced
+      // blocks), but tmux's man page does not guarantee it, and swallowing one into a reply would
+      // both drop the notification (a missed screen change) and corrupt that reply's line count.
+      // `dispatchNotification` is anchored on tmux's actual notification names, never a bare `%`,
+      // so a genuine reply-block data line that happens to start with a pane id (e.g. `%3\tmain`)
+      // is never misclassified.
+      if (this.dispatchNotification(line)) return;
       if (this.current) {
         this.current.lines.push(line);
         return;
       }
-      if (line.startsWith("%output ")) {
-        const pane = line.slice(8).split(" ")[0];
-        if (pane) this.emit("output", pane);
-        return;
-      }
-      if (
-        /^%(layout-change|window-add|window-close|window-renamed|unlinked-window-|session-changed|session-renamed|sessions-changed)/.test(
-          line,
-        )
-      ) {
-        this.emit("layout");
-        return;
-      }
-      if (line.startsWith("%exit")) this.onExit();
     });
     rl.on("close", () => this.onExit());
     child.on("exit", () => this.onExit());
@@ -169,6 +161,37 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
     return ready;
   }
 
+  /**
+   * True and dispatched if `line` is one of the notification lines tmux can send us
+   * (`%output`, a layout change, `%exit`) -- false and untouched otherwise. Shared between the
+   * open-block guard (M-2) and the normal outside-any-block path so both classify a line
+   * identically.
+   */
+  private dispatchNotification(line: string): boolean {
+    if (line.startsWith("%output ")) {
+      const pane = line.slice(8).split(" ")[0];
+      if (pane) this.emit("output", pane);
+      return true;
+    }
+    if (
+      // M-5 (spec errata E-3): `session-changed` fires on our OWN attach and is not in spec
+      // §8.11's notification list, but tmux does send it, and dropping it into a reply would be
+      // just as wrong as dropping any other layout notification -- kept deliberately, one debounced
+      // refresh per new control client is the cost.
+      /^%(layout-change|window-add|window-close|window-renamed|unlinked-window-|session-changed|session-renamed|sessions-changed)/.test(
+        line,
+      )
+    ) {
+      this.emit("layout");
+      return true;
+    }
+    if (line.startsWith("%exit")) {
+      this.onExit();
+      return true;
+    }
+    return false;
+  }
+
   command(line: string): Promise<string[]> {
     const verb = verbOf(line);
     if (!this.alive || !this.child?.stdin) {
@@ -179,6 +202,9 @@ export class TmuxControl extends EventEmitter<{ output: [string]; layout: []; ex
         this.queue = this.queue.filter((p) => p !== pending);
         reject(new Error(`tmux command timeout: ${verb}`));
       }, this.opts.commandTimeoutMs ?? 5000);
+      // M-1: every other timer on this branch is `unref`'d; without this, a `capture-pane` in
+      // flight when the process is Ctrl-C'd keeps the event loop alive for up to 5 s.
+      timer.unref?.();
       const pending: Pending = { resolve, reject, timer, verb };
       this.queue.push(pending);
       try {

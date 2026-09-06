@@ -104,6 +104,58 @@ describe("TmuxControl", () => {
     c.stop();
   });
 
+  it("M-2: dispatches a notification that arrives inside an open %begin/%end block, without corrupting the reply", async () => {
+    const { spawnImpl, stdout } = fakeSpawn();
+    const c = new TmuxControl({ sessionId: "$0", log, spawnImpl });
+    const outputs: string[] = [];
+    let layouts = 0;
+    c.on("output", (p) => outputs.push(p));
+    c.on("layout", () => layouts++);
+    const started = c.start();
+    stdout.write("%begin 1 0 0\n%end 1 0 0\n");
+    await started;
+
+    const p = c.command("list-panes -a");
+    await flush();
+    // A genuine reply-block data row can itself start with a pane id (`%3\tmain`) -- interleaving
+    // a REAL notification inside the SAME open block must still be recognised as a notification
+    // (not swallowed as a third data row), and must not appear in the resolved reply.
+    stdout.write("%begin 2 1 0\n%3\tmain\n%output %3 hello\n%layout-change @1 xyz\n%end 2 1 0\n");
+    expect(await p).toEqual(["%3\tmain"]);
+    expect(outputs).toEqual(["%3"]);
+    expect(layouts).toBe(1);
+    c.stop();
+  });
+
+  it("M-1: the per-command timeout timer is unref'd (never keeps the event loop alive)", async () => {
+    const { spawnImpl, stdout } = fakeSpawn();
+    const c = new TmuxControl({ sessionId: "$0", log, spawnImpl, commandTimeoutMs: 50 });
+    const started = c.start();
+    stdout.write("%begin 1 0 0\n%end 1 0 0\n");
+    await started;
+
+    const realSetTimeout = global.setTimeout;
+    let unrefCalled = false;
+    global.setTimeout = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+      const t = realSetTimeout(fn, ms, ...rest);
+      const originalUnref = t.unref.bind(t);
+      t.unref = () => {
+        unrefCalled = true;
+        return originalUnref();
+      };
+      return t;
+    }) as typeof setTimeout;
+    let p: Promise<string[]>;
+    try {
+      p = c.command("list-panes -a");
+    } finally {
+      global.setTimeout = realSetTimeout;
+    }
+    p.catch(() => undefined);
+    expect(unrefCalled).toBe(true);
+    c.stop();
+  });
+
   it("never puts a command's arguments into a rejection message (spec 8.10)", async () => {
     const { spawnImpl, stdout } = fakeSpawn();
     const c = new TmuxControl({ sessionId: "$0", log, spawnImpl, commandTimeoutMs: 20 });

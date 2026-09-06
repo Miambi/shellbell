@@ -4,6 +4,7 @@ import { TmuxBackend } from "../src/backends/tmux/backend.js";
 import type { TmuxControl } from "../src/backends/tmux/control.js";
 import { SessionGone } from "../src/backends/types.js";
 import { createLogger } from "../src/log.js";
+import { waitFor } from "./fakes/wait.js";
 
 class FakeControl extends EventEmitter<{ output: [string]; layout: []; exit: [] }> {
   alive = true;
@@ -170,6 +171,26 @@ describe("TmuxBackend", () => {
     const h = await b.getHistory("%1", 3, 2);
     expect(h.lines.map((l) => l.r[0]?.t)).toEqual(["h2", "h3"]);
     expect(h.oldestAvailable).toBe(0);
+    await b.close();
+  });
+
+  it("M-7: getHistory with no setReported baseline returns empty rather than guessed lines", async () => {
+    const control = new FakeControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+    });
+    await b.connect();
+    // setReported("%1", ...) never ran for this pane -- the tracker only calls it after actually
+    // processing a screen frame for it (e.g. the phone requested history for a session it has
+    // never viewed).
+    const before = control.commands.length;
+    const h = await b.getHistory("%1", 3, 2);
+    expect(h).toEqual({ lines: [], oldestAvailable: 0 });
+    // No `display-message`/`capture-pane` round trip either -- there is nothing honest to compute.
+    expect(control.commands.length).toBe(before);
     await b.close();
   });
 
@@ -509,8 +530,9 @@ describe("TmuxBackend", () => {
       // the hung call's timeout fire.
       await vi.advanceTimersByTimeAsync(5000);
       await connectPromise;
-      // The hung call rejected (timed out) rather than wedging connect(); syncControls treats a
-      // failed list-sessions as "no sessions", so no control got created this round.
+      // The hung call rejected (timed out) rather than wedging connect(); I-1: a FAILED probe is
+      // treated as transient, not "no sessions", so it leaves the (here, still-empty, since this
+      // is the very first sync) client set untouched rather than actively tearing anything down.
       expect(controls.length).toBe(0);
 
       // Proof `syncBusy` was released: the NEXT syncControls, via the 5 s watcher, still runs.
@@ -522,6 +544,123 @@ describe("TmuxBackend", () => {
       vi.useRealTimers();
     }
   }, 15_000);
+
+  it("I-1: a transient list-sessions failure on a LATER tick leaves existing clients and panes intact", async () => {
+    let fail = false;
+    const controls: FakeControl[] = [];
+    const flakyExec = async (args: string[]) => {
+      if (args[0] === "-V") return "tmux 3.4\n";
+      if (args[0] === "list-sessions") {
+        if (fail) throw new Error("ETIMEDOUT");
+        return "$0\n";
+      }
+      return "$0\n";
+    };
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: flakyExec,
+      controlFactory: factory(controls),
+      watchIntervalMs: 20,
+    });
+    await b.connect();
+    expect(controls).toHaveLength(1);
+    expect(b.isConnected).toBe(true);
+    expect((await b.listSessions()).length).toBeGreaterThan(0);
+
+    // A later watcher tick's list-sessions probe fails transiently (timeout/EAGAIN/a momentarily
+    // busy server) -- this must NOT be treated as "no sessions": the already-alive control client
+    // and its panes must survive untouched, and `isConnected` must not flip.
+    fail = true;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(controls).toHaveLength(1);
+    expect(controls[0]?.alive).toBe(true);
+    expect(b.isConnected).toBe(true);
+    expect((await b.listSessions()).length).toBeGreaterThan(0);
+
+    await b.close();
+  });
+
+  it("a genuinely empty list-sessions (real tmux server with no sessions left) still tears everything down", async () => {
+    let empty = false;
+    const controls: FakeControl[] = [];
+    const varExec = async (args: string[]) => {
+      if (args[0] === "-V") return "tmux 3.4\n";
+      if (args[0] === "list-sessions") return empty ? "" : "$0\n";
+      return "$0\n";
+    };
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: varExec,
+      controlFactory: factory(controls),
+      watchIntervalMs: 20,
+    });
+    await b.connect();
+    expect(controls).toHaveLength(1);
+    const events: string[] = [];
+    b.on((e) => events.push(e.type));
+
+    // A genuinely SUCCESSFUL probe that returns no sessions is the real "no sessions" case (spec
+    // 8.11's own %exit path arrives the same way in production) -- this one still tears down.
+    empty = true;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(controls.every((c) => !c.alive)).toBe(true);
+    expect(await b.listSessions()).toEqual([]);
+    expect(events).toContain("session-removed");
+    expect(events).toContain("layout-changed");
+    expect(b.isConnected).toBe(false);
+
+    await b.close();
+  });
+
+  it("M-4: close() landing during connect() must not arm a watcher afterwards", async () => {
+    const resolver: { resolve: ((v: string) => void) | null } = { resolve: null };
+    const gate = new Promise<string>((r) => {
+      resolver.resolve = r;
+    });
+    let listCalls = 0;
+    const controls: FakeControl[] = [];
+    const slowExec = async (args: string[]) => {
+      if (args[0] === "-V") return "tmux 3.4\n";
+      if (args[0] === "list-sessions") {
+        listCalls++;
+        // The FIRST call is `detect()`'s own server-check; let it resolve immediately so
+        // `connect()` reaches `syncControls()`. The SECOND is `syncControls()`'s own probe inside
+        // `connect()` -- stall it so `close()` can land while `connect()` is still in flight.
+        if (listCalls === 1) return "$0\n";
+        return gate;
+      }
+      return "$0\n";
+    };
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: slowExec,
+      controlFactory: factory(controls),
+    });
+    const connectPromise = b.connect();
+    await waitFor(() => listCalls >= 2, 2000);
+    await b.close();
+
+    const realSetInterval = global.setInterval;
+    let intervalCalls = 0;
+    global.setInterval = ((fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+      intervalCalls++;
+      return realSetInterval(fn, ms, ...rest);
+    }) as typeof setInterval;
+    try {
+      resolver.resolve?.("$0\n");
+      await connectPromise;
+    } finally {
+      global.setInterval = realSetInterval;
+    }
+    // The `if (this.closed) return;` guard (M-4) must stop `connect()` from ever reaching the
+    // `setInterval(...)` line once a close() has landed during its awaits.
+    expect(intervalCalls).toBe(0);
+    expect(b.isConnected).toBe(false);
+    expect(controls).toHaveLength(0);
+  });
 
   it("getScreen queries display-message before capture-pane (review fix 4)", async () => {
     const control = new FakeControl("$0");

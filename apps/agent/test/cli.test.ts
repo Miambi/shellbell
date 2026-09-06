@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fingerprint, generateIdentity, parseQr } from "@shellbell/protocol";
 import { describe, expect, it, vi } from "vitest";
+import type { TmuxControl } from "../src/backends/tmux/control.js";
 import {
+  type BuildAgentDeps,
+  buildAgent,
   chooseConfirm,
   resolveConfigSet,
   resolveRelayOverride,
@@ -17,6 +21,7 @@ import { loadConfig, paths } from "../src/config.js";
 import { ControlServer, controlPairSession } from "../src/control.js";
 import { createLogger } from "../src/log.js";
 import { PairingManager } from "../src/pairing.js";
+import { waitFor } from "./fakes/wait.js";
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "sb-cli-"));
@@ -323,5 +328,107 @@ describe("shutdown", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/** Minimal fake control client, same shape as `tmux-backend.test.ts`'s `FakeControl`: one pane,
+ * no real tmux anywhere in this file. */
+class FakeControl extends EventEmitter<{ output: [string]; layout: []; exit: [] }> {
+  alive = true;
+  constructor(readonly sessionId: string) {
+    super();
+  }
+  async start(): Promise<void> {}
+  stop(): void {
+    this.alive = false;
+  }
+  async command(line: string): Promise<string[]> {
+    if (line.startsWith("list-panes")) {
+      return [
+        [
+          "%1",
+          "$0",
+          "main",
+          "@0",
+          "0",
+          "zsh",
+          "0",
+          "host",
+          "/tmp",
+          "10",
+          "3",
+          "1",
+          "1",
+          "3",
+          "0",
+          "2",
+          "0",
+          "zsh",
+        ].join("\t"),
+      ];
+    }
+    if (line.startsWith("list-clients")) return ["$0\t1"];
+    if (line.startsWith("display-message")) return ["4\t1\t3\t10\t3"];
+    if (line.startsWith("capture-pane")) return ["hello", ""];
+    throw new Error(`unexpected ${line.split(" ")[0]}`);
+  }
+}
+
+/** M-6: `buildAgent`'s tmux banner wiring (`onConnected`/`onUnavailable` -> `print()`) had zero
+ * coverage anywhere in the suite -- neither for tmux nor for herdr's identical pattern. Drives it
+ * with the `tmuxBackendOptions` test seam (same fake `execImpl`/`controlFactory` shape
+ * `tmux-start.test.ts` already injects into `startTmuxBackend` directly), isolated from the real
+ * filesystem via `SHELLBELL_DIR`. The static `"  tmux       detecting…"` line the `start` command
+ * prints unconditionally (no logic to exercise) is left to the Task 4 anchor verification; only
+ * the two DYNAMIC lines that depend on the supervisor's async callbacks are asserted here. */
+describe("buildAgent's tmux banner wiring (M-6)", () => {
+  async function withCapturedPrints(
+    tmuxBackendOptions: BuildAgentDeps["tmuxBackendOptions"],
+    assert: (lines: string[]) => Promise<void> | void,
+  ): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "sb-cli-tmux-"));
+    const prevDir = process.env.SHELLBELL_DIR;
+    process.env.SHELLBELL_DIR = dir;
+    const log = createLogger({ stdout: false });
+    const lines: string[] = [];
+    const origLog = console.log;
+    console.log = (line: string) => lines.push(String(line));
+    let built: Awaited<ReturnType<typeof buildAgent>> | null = null;
+    try {
+      built = await buildAgent(log, undefined, true, { tmuxBackendOptions });
+      built.releaseOutput();
+      await waitFor(() => lines.some((l) => l.includes("tmux")), 3000);
+      await assert(lines);
+    } finally {
+      console.log = origLog;
+      built?.stopBackendDetectors();
+      built?.agent.stop();
+      if (prevDir === undefined) delete process.env.SHELLBELL_DIR;
+      else process.env.SHELLBELL_DIR = prevDir;
+    }
+  }
+
+  it('prints "tmux       not running" via onUnavailable, buffered through print() like iTerm2/herdr', async () => {
+    await withCapturedPrints(
+      {
+        execImpl: async () => {
+          throw new Error("no tmux in this test");
+        },
+      },
+      (lines) => {
+        expect(lines).toContain("  tmux       not running");
+      },
+    );
+  });
+
+  it('prints "tmux       connected · N panes" via onConnected once a fake tmux answers', async () => {
+    const exec = async (args: string[]) => (args[0] === "-V" ? "tmux 3.4\n" : "$0\n");
+    const control = new FakeControl("$0");
+    await withCapturedPrints(
+      { execImpl: exec, controlFactory: () => control as unknown as TmuxControl },
+      (lines) => {
+        expect(lines).toContain("  tmux       connected · 1 pane");
+      },
+    );
   });
 });
