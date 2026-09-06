@@ -44,6 +44,8 @@ export class FakeRelay {
   pairing = new Map<string, Peer>();
   received: { from: Peer; env: Envelope }[] = [];
   ctrlFromAgent: CtrlMessage[] = [];
+  /** Ctrl messages received from `role: "phone"` sockets, in arrival order. */
+  ctrlFromPhones: { fp: string; msg: CtrlMessage }[] = [];
   /** Mirrors the shipped relay's `pairing_window` row (computer-do.ts onAuth's pairing branch):
    * set by the agent's `pairing-open`, cleared by `pairing-close`. A `role:"pairing"` auth is
    * gated on this exactly like the real relay -- this is what catches a `pairing-open` that never
@@ -175,6 +177,8 @@ export class FakeRelay {
               const target = this.pairing.get(msg.phoneFp);
               if (target) this.sendCtrl(target.ws, msg);
             }
+          } else if (peer.role === "phone") {
+            this.ctrlFromPhones.push({ fp: peer.fp, msg });
           } else if (peer.role === "pairing" && msg.type === "pairing-request" && this.agent) {
             this.sendCtrl(this.agent.ws, msg);
           }
