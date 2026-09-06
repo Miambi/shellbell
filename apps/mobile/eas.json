@@ -3,7 +3,22 @@
   "build": {
     "development": { "developmentClient": true, "distribution": "internal" },
     "preview": { "distribution": "internal" },
-    "production": {}
+    "production": {
+      "autoIncrement": true,
+      "env": {}
+    }
   },
-  "submit": { "production": {} }
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "REPLACE_APPLE_ID_EMAIL",
+        "ascAppId": "REPLACE_ASC_APP_ID",
+        "appleTeamId": "REPLACE_APPLE_TEAM_ID"
+      },
+      "android": {
+        "serviceAccountKeyPath": "REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH",
+        "track": "internal"
+      }
+    }
+  }
 }
