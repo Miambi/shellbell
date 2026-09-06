@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TmuxBackend } from "../src/backends/tmux/backend.js";
 import type { TmuxControl } from "../src/backends/tmux/control.js";
 import { SessionGone } from "../src/backends/types.js";
@@ -309,4 +309,441 @@ describe("TmuxBackend", () => {
     expect(seen).toEqual(["screen-changed"]);
     await b.close();
   });
+
+  it("refreshPanes emits layout-changed only when the pane SET changes (review fix 1)", async () => {
+    let panes = 2;
+    class VariablePanesControl extends FakeControl {
+      override async command(line: string): Promise<string[]> {
+        this.commands.push(line);
+        if (line.startsWith("list-panes")) {
+          const rows = [
+            [
+              "%1",
+              "$0",
+              "main",
+              "@0",
+              "0",
+              "zsh",
+              "0",
+              "host",
+              "/tmp",
+              "10",
+              "3",
+              "1",
+              "1",
+              "3",
+              "0",
+              "2",
+              "0",
+              "zsh",
+            ].join("\t"),
+            [
+              "%2",
+              "$0",
+              "main",
+              "@1",
+              "1",
+              "build",
+              "0",
+              "host",
+              "/tmp",
+              "10",
+              "3",
+              "1",
+              "0",
+              "0",
+              "0",
+              "0",
+              "0",
+              "make",
+            ].join("\t"),
+          ];
+          return rows.slice(0, panes);
+        }
+        if (line.startsWith("display-message")) return [`4\t1\t${this.historySize}\t10\t3`];
+        if (line.startsWith("capture-pane")) return this.screen;
+        throw new Error(`unexpected ${line.split(" ")[0]}`);
+      }
+    }
+    panes = 1;
+    const control = new VariablePanesControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+      refreshDebounceMs: 10,
+    });
+    await b.connect();
+    const events: string[] = [];
+    b.on((e) => events.push(e.type));
+
+    // Two consecutive refreshes with an IDENTICAL pane set: nothing to say, nothing emitted.
+    control.emit("layout");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual([]);
+
+    // A new pane appears: session-added for it, then exactly one layout-changed.
+    panes = 2;
+    control.emit("layout");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual(["session-added", "layout-changed"]);
+    expect((await b.listSessions()).map((s) => s.id)).toEqual(["%1", "%2"]);
+
+    await b.close();
+  });
+
+  it("createSession validates the target against known ids before touching a command line (review fix 2)", async () => {
+    const control = new FakeControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+    });
+    await b.connect();
+
+    // A phone-supplied id that is not a known pane must reject with SessionGone and never reach
+    // the command line unvalidated -- an unsanitised interpolation would let `;` inject a second
+    // tmux command.
+    control.commands.length = 0;
+    await expect(
+      b.createSession({ kind: "split", sessionId: "%1 ; kill-server", direction: "vertical" }),
+    ).rejects.toBeInstanceOf(SessionGone);
+    expect(control.commands).toEqual([]);
+
+    // Same for a `windowId` that is not a known tmux session id.
+    await expect(
+      b.createSession({ kind: "tab", backend: "tmux", windowId: "$99 ; kill-server" }),
+    ).rejects.toBeInstanceOf(SessionGone);
+    expect(control.commands).toEqual([]);
+
+    // The legitimate paths still work.
+    expect(await b.createSession({ kind: "split", sessionId: "%1", direction: "vertical" })).toBe(
+      "%9",
+    );
+    await b.close();
+  });
+
+  it("a hung exec() times out; syncBusy releases and the next syncControls still runs (review fix 3)", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const controls: FakeControl[] = [];
+      const hangingExec = (args: string[]): Promise<string> => {
+        calls++;
+        if (args[0] === "-V") return Promise.resolve("tmux 3.4\n");
+        // The THIRD call is `syncControls()`'s own `list-sessions` inside `connect()` (the first
+        // two are `detect()`'s `-V` and its own server-check `list-sessions`) -- simulate a
+        // wedged tmux server that never answers it.
+        if (calls === 3) return new Promise<string>(() => {});
+        return Promise.resolve("$0\n");
+      };
+      const b = new TmuxBackend({
+        log,
+        hostname: "host",
+        execImpl: hangingExec,
+        controlFactory: factory(controls),
+        watchIntervalMs: 5000,
+      });
+      const connectPromise = b.connect();
+      // Matches the backend's internal `EXEC_TIMEOUT_MS` (not exported); advancing past it lets
+      // the hung call's timeout fire.
+      await vi.advanceTimersByTimeAsync(5000);
+      await connectPromise;
+      // The hung call rejected (timed out) rather than wedging connect(); syncControls treats a
+      // failed list-sessions as "no sessions", so no control got created this round.
+      expect(controls.length).toBe(0);
+
+      // Proof `syncBusy` was released: the NEXT syncControls, via the 5 s watcher, still runs.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(controls.length).toBe(1);
+      expect(b.isConnected).toBe(true);
+      await b.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("getScreen queries display-message before capture-pane (review fix 4)", async () => {
+    const control = new FakeControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+    });
+    await b.connect();
+    control.commands.length = 0;
+    await b.getScreen("%1");
+    const order = control.commands.filter(
+      (c) => c.startsWith("display-message") || c.startsWith("capture-pane"),
+    );
+    expect(order[0]?.startsWith("display-message")).toBe(true);
+    expect(order[1]?.startsWith("capture-pane")).toBe(true);
+    await b.close();
+  });
+
+  it("channel() prefers the pane's own tmux session client over an unrelated alive one (review fix 5)", async () => {
+    const sessionIds = ["$0", "$1"];
+    class TwoSessionControl extends FakeControl {
+      override async command(line: string): Promise<string[]> {
+        this.commands.push(line);
+        if (line.startsWith("list-panes")) {
+          return [
+            [
+              "%1",
+              "$0",
+              "main",
+              "@0",
+              "0",
+              "zsh",
+              "0",
+              "host",
+              "/tmp",
+              "10",
+              "3",
+              "1",
+              "1",
+              "3",
+              "0",
+              "2",
+              "0",
+              "zsh",
+            ].join("\t"),
+            [
+              "%2",
+              "$1",
+              "side",
+              "@1",
+              "0",
+              "zsh",
+              "0",
+              "host",
+              "/tmp",
+              "10",
+              "3",
+              "1",
+              "1",
+              "0",
+              "0",
+              "0",
+              "0",
+              "zsh",
+            ].join("\t"),
+          ];
+        }
+        if (line.startsWith("display-message")) return [`4\t1\t${this.historySize}\t10\t3`];
+        if (line.startsWith("capture-pane")) return this.screen;
+        throw new Error(`unexpected ${line.split(" ")[0]}`);
+      }
+    }
+    const controls = new Map<string, TwoSessionControl>();
+    const execImpl = async (args: string[]) =>
+      args[0] === "-V" ? "tmux 3.4\n" : `${sessionIds.join("\n")}\n`;
+    const controlFactory = (sid: string) => {
+      const c = new TwoSessionControl(sid);
+      controls.set(sid, c);
+      return c as unknown as TmuxControl;
+    };
+    const b = new TmuxBackend({ log, hostname: "host", execImpl, controlFactory });
+    await b.connect();
+
+    await b.getScreen("%2");
+    expect(controls.get("$1")?.commands.some((c) => c.startsWith("capture-pane"))).toBe(true);
+    expect(controls.get("$0")?.commands.some((c) => c.startsWith("capture-pane"))).toBe(false);
+
+    await b.close();
+  });
+
+  it("a layout event during an in-flight refresh triggers exactly one follow-up refresh (review fix 6)", async () => {
+    let listPanesCalls = 0;
+    const release: { fn: (() => void) | null } = { fn: null };
+    class GatedControl extends FakeControl {
+      override async command(line: string): Promise<string[]> {
+        if (line.startsWith("list-panes")) {
+          listPanesCalls++;
+          if (listPanesCalls === 2) {
+            await new Promise<void>((resolve) => {
+              release.fn = () => resolve();
+            });
+          }
+        }
+        return super.command(line);
+      }
+    }
+    const control = new GatedControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+      refreshDebounceMs: 100,
+    });
+    vi.useFakeTimers();
+    try {
+      const connectPromise = b.connect();
+      await vi.advanceTimersByTimeAsync(0);
+      await connectPromise;
+      expect(listPanesCalls).toBe(1);
+
+      // Trigger a debounced refresh (call #2, gated open).
+      control.emit("layout");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(listPanesCalls).toBe(2);
+
+      // A SECOND layout event arrives while that refresh is still in flight: with the fix, this
+      // sets the dirty flag directly instead of arming a separate 100 ms timer.
+      control.emit("layout");
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Release the gated call: the dirty-loop's own catch-up runs immediately (call #3).
+      release.fn?.();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(listPanesCalls).toBe(3);
+
+      // No separate timer should fire later and cause a 4th call.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(listPanesCalls).toBe(3);
+      await b.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("connect() is idempotent and does not leak the watcher interval (review fix 7)", async () => {
+    vi.useFakeTimers();
+    try {
+      const b = new TmuxBackend({
+        log,
+        hostname: "host",
+        execImpl: exec,
+        controlFactory: factory(),
+      });
+      await b.connect();
+      const afterFirst = vi.getTimerCount();
+      await b.connect();
+      expect(vi.getTimerCount()).toBe(afterFirst);
+      await b.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("multi-session lifecycle: sessions appear/vanish between watcher ticks; %exit fails over to a surviving client (coverage gap)", async () => {
+    vi.useFakeTimers();
+    try {
+      let sessionIds = ["$0"];
+      class DynamicControl extends FakeControl {
+        override async command(line: string): Promise<string[]> {
+          this.commands.push(line);
+          if (line.startsWith("list-panes")) {
+            const rows: string[] = [];
+            if (sessionIds.includes("$0"))
+              rows.push(
+                [
+                  "%1",
+                  "$0",
+                  "main",
+                  "@0",
+                  "0",
+                  "zsh",
+                  "0",
+                  "host",
+                  "/tmp",
+                  "10",
+                  "3",
+                  "1",
+                  "1",
+                  "3",
+                  "0",
+                  "2",
+                  "0",
+                  "zsh",
+                ].join("\t"),
+              );
+            if (sessionIds.includes("$1"))
+              rows.push(
+                [
+                  "%2",
+                  "$1",
+                  "side",
+                  "@1",
+                  "0",
+                  "zsh",
+                  "0",
+                  "host",
+                  "/tmp",
+                  "10",
+                  "3",
+                  "1",
+                  "1",
+                  "0",
+                  "0",
+                  "0",
+                  "0",
+                  "zsh",
+                ].join("\t"),
+              );
+            return rows;
+          }
+          if (line.startsWith("display-message")) return [`4\t1\t${this.historySize}\t10\t3`];
+          if (line.startsWith("capture-pane")) return this.screen;
+          throw new Error(`unexpected ${line.split(" ")[0]}`);
+        }
+      }
+      const controls = new Map<string, DynamicControl>();
+      const execImpl = async (args: string[]) =>
+        args[0] === "-V" ? "tmux 3.4\n" : `${sessionIds.join("\n")}\n`;
+      const controlFactory = (sid: string) => {
+        const c = new DynamicControl(sid);
+        controls.set(sid, c);
+        return c as unknown as TmuxControl;
+      };
+      const b = new TmuxBackend({
+        log,
+        hostname: "host",
+        execImpl,
+        controlFactory,
+        watchIntervalMs: 5000,
+      });
+      const events: string[] = [];
+      b.on((e) => events.push(e.type));
+
+      await b.connect();
+      expect([...controls.keys()]).toEqual(["$0"]);
+
+      // A second tmux session appears between two watcher ticks: its control client starts,
+      // and its pane joins the pane map.
+      sessionIds = ["$0", "$1"];
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect([...controls.keys()]).toEqual(["$0", "$1"]);
+      expect(controls.get("$1")?.alive).toBe(true);
+      expect(events).toContain("session-added");
+      expect((await b.listSessions()).map((s) => s.id)).toEqual(["%1", "%2"]);
+
+      // "$0"'s control client dies (%exit): "$1"'s client survives and serves as the command
+      // channel for a "$0"-owned pane -- review fix 5's fallback keeps the backend working
+      // through a single client's outage instead of every command failing.
+      const zero = controls.get("$0") as DynamicControl;
+      zero.alive = false;
+      zero.emit("exit");
+      const screen = await b.getScreen("%1");
+      expect(screen.rows).toBeGreaterThan(0);
+
+      // The "$1" tmux session itself vanishes (only "$0" remains): its pane is removed and its
+      // control client is stopped by the next watcher tick's `syncControls`.
+      sessionIds = ["$0"];
+      events.length = 0;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(controls.get("$1")?.alive).toBe(false);
+      expect(events).toContain("session-removed");
+      expect((await b.listSessions()).map((s) => s.id)).toEqual(["%1"]);
+
+      await b.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
 });

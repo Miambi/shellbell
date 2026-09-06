@@ -38,9 +38,40 @@ const run = promisify(execFile);
 /** tmux 3.2, in `parseTmuxVersion`'s major + minor/100 space. */
 const MIN_VERSION = 3.02;
 export const TMUX_INSTALL_HINT = "brew install tmux (3.2+), then start a tmux session";
+/** Review fix 3: a wedged tmux server must not hang `exec()` (and `syncBusy`) forever. */
+const EXEC_TIMEOUT_MS = 5000;
+/** Sane ceiling for `list-sessions`/`list-panes -a` stdout; matches `TmuxControl`'s bound. */
+const EXEC_MAX_BUFFER = 10 * 1024 * 1024;
 
 function errName(err: unknown): string {
   return err instanceof Error ? err.name : "unknown";
+}
+
+/**
+ * Bounds any `exec` implementation -- the real `execFile` path below already gets a `timeout`
+ * option, but that only helps the real child-process path; an INJECTED `execImpl` (tests, or a
+ * future caller) can still hang forever. Without this, a wedged call leaves `syncBusy` stuck
+ * `true` permanently (review fix 3), after which no new tmux session ever gets a control client
+ * for the life of the process.
+ */
+function withExecTimeout(p: Promise<string>, label: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`tmux exec timeout: ${label}`)),
+      EXEC_TIMEOUT_MS,
+    );
+    timer.unref?.();
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
 }
 
 export interface TmuxBackendOptions {
@@ -80,10 +111,16 @@ export class TmuxBackend implements TerminalBackend {
 
   constructor(private readonly opts: TmuxBackendOptions) {
     this.log = opts.log.child({ backend: "tmux" });
-    this.exec =
+    const rawExec: (args: string[]) => Promise<string> =
       opts.execImpl ??
       (async (args) =>
-        (await run("tmux", [...(opts.socketName ? ["-L", opts.socketName] : []), ...args])).stdout);
+        (
+          await run("tmux", [...(opts.socketName ? ["-L", opts.socketName] : []), ...args], {
+            timeout: EXEC_TIMEOUT_MS,
+            maxBuffer: EXEC_MAX_BUFFER,
+          })
+        ).stdout);
+    this.exec = (args) => withExecTimeout(rawExec(args), args[0] ?? "tmux");
   }
 
   /** Spec 8.12: false once every control client is gone, so the registry drops us from `hello`. */
@@ -94,7 +131,14 @@ export class TmuxBackend implements TerminalBackend {
   static async detect(
     execImpl?: (args: string[]) => Promise<string>,
   ): Promise<{ ok: boolean; version: string; reason?: string }> {
-    const exec = execImpl ?? (async (args) => (await run("tmux", args)).stdout);
+    const rawExec: (args: string[]) => Promise<string> =
+      execImpl ??
+      (async (args) =>
+        (await run("tmux", args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER })).stdout);
+    // Bounded the same way as the instance's `this.exec` (review fix 3): `detect()` is called
+    // both standalone (doctor.ts, Task 4) and via `connect()`, and either caller's `execImpl` can
+    // hang.
+    const exec = (args: string[]) => withExecTimeout(rawExec(args), args[0] ?? "tmux");
     let raw: string;
     try {
       raw = await exec(["-V"]);
@@ -123,6 +167,9 @@ export class TmuxBackend implements TerminalBackend {
   async connect(): Promise<void> {
     const d = await TmuxBackend.detect(this.exec);
     if (!d.ok) throw new BackendUnavailable(d.reason ?? "tmux unavailable", TMUX_INSTALL_HINT);
+    // Review fix 7: idempotent -- a second `connect()` on an already-connected instance must not
+    // leak the previous watcher interval.
+    if (this.watcher) clearInterval(this.watcher);
     this.closed = false;
     await this.syncControls();
     await this.refreshPanes();
@@ -142,6 +189,10 @@ export class TmuxBackend implements TerminalBackend {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.refreshDirty = false;
+    // Review fix 3: never leave either single-flight lock held past `close()` -- a future
+    // `connect()` on the SAME instance must start with both locks free.
+    this.syncBusy = false;
+    this.refreshBusy = false;
     for (const c of this.controls.values()) c.stop();
     this.controls.clear();
     this.panes.clear();
@@ -175,10 +226,25 @@ export class TmuxBackend implements TerminalBackend {
    * NOT `SessionGone`: no channel is a TRANSIENT fault (the watcher re-attaches within 5 s), and
    * `ScreenTracker.tick` deletes a session from every viewer when it sees `SessionGone`.
    */
-  private channel(): TmuxControl {
+  private channelForSession(sessionId?: string): TmuxControl {
+    if (sessionId) {
+      const own = this.controls.get(sessionId);
+      if (own?.alive) return own;
+    }
     const c = [...this.controls.values()].find((x) => x.alive);
     if (!c) throw new Error("tmux command channel unavailable");
     return c;
+  }
+
+  /**
+   * Review fix 5: prefer the pane's OWN tmux session's control client over an unrelated alive
+   * one, so traffic for a given pane doesn't all funnel through one session's client (a shared
+   * FIFO with a 5 s per-command timeout) and one client stalling can't starve every other pane.
+   * Falls back to any alive client -- including for calls with no specific pane (`list-panes -a`,
+   * `list-clients`) -- which is what keeps a `%exit`'d session's panes servable via a survivor.
+   */
+  private channel(paneId?: string): TmuxControl {
+    return this.channelForSession(paneId ? this.panes.get(paneId)?.sessionId : undefined);
   }
 
   private async syncControls(): Promise<void> {
@@ -236,7 +302,16 @@ export class TmuxBackend implements TerminalBackend {
 
   /** Spec 8.11: layout notifications are debounced 100 ms into one refresh. */
   private scheduleRefresh(): void {
-    if (this.closed || this.refreshTimer) return;
+    if (this.closed) return;
+    // Review fix 6: a refresh already in flight will pick up this change on its own via
+    // `refreshPanes`'s dirty-loop -- arming a SEPARATE 100 ms timer here would let it fire
+    // independently afterwards and run a second, redundant `runRefresh()` back to back with the
+    // dirty-loop's own catch-up. Feed the same flag directly instead.
+    if (this.refreshBusy) {
+      this.refreshDirty = true;
+      return;
+    }
+    if (this.refreshTimer) return;
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
       void this.refreshPanes().catch((err) =>
@@ -283,14 +358,21 @@ export class TmuxBackend implements TerminalBackend {
       this.log.warn("list-panes failed", { error: errName(err) });
       return;
     }
+    const prev = this.panes;
     const next = new Map(rows.filter((r) => !r.dead).map((r) => [r.paneId, r]));
-    const removed = [...this.panes.keys()].filter((id) => !next.has(id));
+    const removed = [...prev.keys()].filter((id) => !next.has(id));
+    const added = [...next.keys()].filter((id) => !prev.has(id));
     this.panes = next;
     for (const id of removed) {
       this.reported.delete(id);
       this.emit({ type: "session-removed", sessionId: id });
     }
-    this.emit({ type: "layout-changed" });
+    for (const id of added) this.emit({ type: "session-added", sessionId: id });
+    // Review fix 1: only wake `Agent.onBackendEvent` -> `broadcast({type:"sessions"})` when the
+    // pane SET actually changed (herdr's precedent, `herdr/backend.ts:855`) -- title/cwd/size
+    // churn on an unchanged set must not cost every phone a `sessions` frame on every 5 s watcher
+    // tick (spec 14's idle budget is 0 frames/day).
+    if (removed.length > 0 || added.length > 0) this.emit({ type: "layout-changed" });
   }
 
   private pane(paneId: string): PaneRow {
@@ -353,11 +435,13 @@ export class TmuxBackend implements TerminalBackend {
 
   async getScreen(paneId: string): Promise<Screen> {
     this.pane(paneId);
-    const ch = this.channel();
-    const [rows, disp] = await Promise.all([
-      ch.command(`capture-pane -p -e -N -t ${paneId}`),
-      ch.command(`display-message -p -t ${paneId} ${Q_DISPLAY}`),
-    ]);
+    const ch = this.channel(paneId);
+    // Review fix 4: query size/cursor/history_size BEFORE capturing the screen. Output arriving
+    // between the two commands would otherwise leave `history_size` one ahead of the captured
+    // rows, producing a phantom `backendDelta` for the tracker (self-corrects next frame, but the
+    // skew is avoidable by ordering these correctly).
+    const disp = await ch.command(`display-message -p -t ${paneId} ${Q_DISPLAY}`);
+    const rows = await ch.command(`capture-pane -p -e -N -t ${paneId}`);
     const d = parseDisplay(disp[0] ?? "");
     const height = Math.max(1, d.height);
     const lines: Line[] = rows.map(parseSgrLine);
@@ -384,7 +468,7 @@ export class TmuxBackend implements TerminalBackend {
     count: number,
   ): Promise<{ lines: Line[]; oldestAvailable: number }> {
     this.pane(paneId);
-    const ch = this.channel();
+    const ch = this.channel(paneId);
     const d = parseDisplay(
       (await ch.command(`display-message -p -t ${paneId} ${Q_DISPLAY}`))[0] ?? "",
     );
@@ -406,7 +490,7 @@ export class TmuxBackend implements TerminalBackend {
    */
   async sendText(paneId: string, text: string): Promise<void> {
     this.pane(paneId);
-    const ch = this.channel();
+    const ch = this.channel(paneId);
     const key = tmuxKeyForBytes(text);
     if (key) {
       // spec 8.10: NEVER log which key. Record only that one was sent.
@@ -427,15 +511,30 @@ export class TmuxBackend implements TerminalBackend {
   // ---- create / focus ----
 
   async createSession(where: CreateWhere): Promise<string> {
-    const ch = this.channel();
-    const line =
-      where.kind === "split"
-        ? `split-window -P -F '#{pane_id}' -t ${where.sessionId} ${
-            where.direction === "vertical" ? "-h" : "-v"
-          }`
-        : where.windowId
-          ? `new-window -P -F '#{pane_id}' -t ${where.windowId}`
-          : "new-session -d -P -F '#{pane_id}'";
+    let ch: TmuxControl;
+    let line: string;
+    if (where.kind === "split") {
+      // Review fix 2: resolve the target through the pane map BEFORE it ever reaches a command
+      // line. The registry only strips the `"tmux:"` prefix (`registry.ts` `target`/`splitId`) --
+      // it does not validate the remainder -- so an unvalidated, unquoted phone-supplied string
+      // interpolated straight into `-t <id>` would let e.g. `"%1 ; kill-server"` inject a second
+      // tmux command. `this.pane()` throws the correct `SessionGone` for anything not a known id.
+      this.pane(where.sessionId);
+      ch = this.channel(where.sessionId);
+      line = `split-window -P -F '#{pane_id}' -t ${where.sessionId} ${
+        where.direction === "vertical" ? "-h" : "-v"
+      }`;
+    } else if (where.windowId) {
+      // Same validation for the "new tab in an existing tmux session" path: `windowId` must be a
+      // tmux session id we actually know about (keys of `this.sessionIndex`), never interpolated
+      // unchecked.
+      if (!this.sessionIndex.has(where.windowId)) throw new SessionGone(where.windowId);
+      ch = this.channelForSession(where.windowId);
+      line = `new-window -P -F '#{pane_id}' -t ${where.windowId}`;
+    } else {
+      ch = this.channel();
+      line = "new-session -d -P -F '#{pane_id}'";
+    }
     const out = await ch.command(line);
     const id = out[0]?.trim();
     // Never resolve "" -- the registry would prefix it to `"tmux:"` and ack it as a real session.
