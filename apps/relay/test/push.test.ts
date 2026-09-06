@@ -146,6 +146,8 @@ describe("notify → push", () => {
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s", kind: "idle" });
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s", kind: "idle" });
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "t", kind: "idle" });
+    // Wait for both permitted pushes, then give a (wrongly) permitted third one time to appear.
+    await waitFor(() => calls() >= 2, 5000);
     await settle();
     expect(calls()).toBe(2);
     agent.ws.close();
@@ -160,6 +162,8 @@ describe("notify → push", () => {
       data: [{ status: "error", message: "gone", details: { error: "DeviceNotRegistered" } }],
     });
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s1", kind: "idle" });
+    // The DO clears the token only after Expo answers; wait for that round-trip before ringing again.
+    await waitFor(() => calls() >= 1, 5000);
     await settle();
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s2", kind: "idle" });
     await settle();
