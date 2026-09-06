@@ -6,6 +6,7 @@ import {
   fstatSync,
   openSync,
   readSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -646,8 +647,34 @@ program
   });
 
 // Only run the CLI when this file is the process entry point -- e.g. `node dist/cli.js` or
-// `tsx src/cli.ts` -- never when a test imports the pure/exported helpers above.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// `tsx src/cli.ts` -- never when a test imports the pure/exported helpers above. Compare
+// realpaths, not raw strings: npm's bin is a symlink (`bin/shellbell -> ../lib/...`), and
+// pnpm's store can put a symlink on either side, so both `argv1` and `selfUrl` are resolved
+// before comparing (`resolvePath` is injectable so tests can fake symlink resolution without
+// spawning the built bundle).
+export function isEntryPoint(
+  argv1: string | undefined,
+  selfUrl: string,
+  resolvePath: (path: string) => string = realpathSync,
+): boolean {
+  if (!argv1) return false;
+  let entry: string;
+  try {
+    entry = resolvePath(argv1);
+  } catch {
+    entry = argv1;
+  }
+  const selfPath = fileURLToPath(selfUrl);
+  let self: string;
+  try {
+    self = resolvePath(selfPath);
+  } catch {
+    self = selfPath;
+  }
+  return self === entry;
+}
+
+if (isEntryPoint(process.argv[1], import.meta.url)) {
   program.parseAsync().catch((err) => {
     console.error(err);
     process.exit(1);

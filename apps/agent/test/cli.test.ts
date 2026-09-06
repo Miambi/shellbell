@@ -10,6 +10,7 @@ import {
   type BuildAgentDeps,
   buildAgent,
   chooseConfirm,
+  isEntryPoint,
   resolveConfigSet,
   resolveRelayOverride,
   shutdown,
@@ -430,5 +431,49 @@ describe("buildAgent's tmux banner wiring (M-6)", () => {
         expect(lines).toContain("  tmux       connected · 1 pane");
       },
     );
+  });
+});
+
+describe("isEntryPoint (npm's bin symlink and pnpm's store can put a symlink on either side)", () => {
+  it("matches when argv1 and self already resolve identically (plain `node dist/cli.js`)", () => {
+    const resolvePath = (p: string) => p;
+    expect(isEntryPoint("/app/dist/cli.js", "file:///app/dist/cli.js", resolvePath)).toBe(true);
+  });
+
+  it("matches when argv1 is a symlink that resolves to self's real path (npm global bin)", () => {
+    const resolvePath = (p: string) =>
+      p === "/prefix/bin/shellbell" ? "/prefix/lib/node_modules/shellbell/dist/cli.js" : p;
+    expect(
+      isEntryPoint(
+        "/prefix/bin/shellbell",
+        "file:///prefix/lib/node_modules/shellbell/dist/cli.js",
+        resolvePath,
+      ),
+    ).toBe(true);
+  });
+
+  it("matches when self's URL is the symlinked side (pnpm's content-addressed store)", () => {
+    const resolvePath = (p: string) =>
+      p === "/repo/apps/agent/dist/cli.js" ? "/store/pkg/dist/cli.js" : p;
+    expect(
+      isEntryPoint("/store/pkg/dist/cli.js", "file:///repo/apps/agent/dist/cli.js", resolvePath),
+    ).toBe(true);
+  });
+
+  it("does not match a different file", () => {
+    const resolvePath = (p: string) => p;
+    expect(isEntryPoint("/app/dist/other.js", "file:///app/dist/cli.js", resolvePath)).toBe(false);
+  });
+
+  it("falls back to the raw path when realpath throws (e.g. ENOENT)", () => {
+    const resolvePath = (p: string) => {
+      if (p === "/app/dist/cli.js") throw new Error("ENOENT");
+      return p;
+    };
+    expect(isEntryPoint("/app/dist/cli.js", "file:///app/dist/cli.js", resolvePath)).toBe(true);
+  });
+
+  it("is false when argv1 is undefined (e.g. a test importing the pure helpers above)", () => {
+    expect(isEntryPoint(undefined, "file:///app/dist/cli.js")).toBe(false);
   });
 });
