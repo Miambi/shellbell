@@ -1412,7 +1412,7 @@ push to the official app without the author's token.
 {
   "name": "shellbell-relay",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-01",
+  "compatibility_date": "2026-08-22",
   "durable_objects": { "bindings": [{ "name": "COMPUTER", "class_name": "ComputerDO" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ComputerDO"] }],
   "observability": { "enabled": true },
@@ -2072,7 +2072,7 @@ packages: use whatever `npx expo install <pkg>` selects for SDK 57 (values shown
 | react-native-screens | ~4.26.0 | | commander | 15.0.0 |
 | expo-secure-store | ~57.0.3 | | qrcode-terminal | 0.12.0 |
 | expo-camera | ~57.0.4 | | wrangler | 4.129.0 |
-| expo-notifications | ~57.0.16 | | @cloudflare/workers-types | 5.20260903.1 |
+| expo-notifications | ~57.0.17 | | @cloudflare/workers-types | 5.20260903.1 |
 | expo-haptics | ~57.0.2 | | @cloudflare/vitest-pool-workers | 0.22.0 |
 | expo-glass-effect | ~57.0.1 | | vitest | 5.0.0 |
 | expo-crypto | ~57.0.2 | | @biomejs/biome | 2.5.12 |
