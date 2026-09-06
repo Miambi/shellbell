@@ -43,6 +43,9 @@ export interface RunDoctorDeps {
   /** Test seam: the real implementation runs AppleScript against iTerm2 and, on a machine where
    * iTerm2 is actually running, can pop a real consent dialog -- never call it from a test. */
   requestCookieAndKey?: (appName: string) => Promise<{ cookie: string; key: string }>;
+  /** Test seam: `tmux -V`'s stdout. Defaults to the real binary; inject a string so the version
+   * rows (absent / too old / ok) can be asserted on a machine with any tmux, or none. */
+  tmuxVersion?: () => Promise<string>;
 }
 
 export async function runDoctor(
@@ -52,6 +55,7 @@ export async function runDoctor(
 ): Promise<Check[]> {
   const checkHerdrImpl = deps.checkHerdr ?? (() => checkHerdr());
   const requestCookieAndKeyImpl = deps.requestCookieAndKey ?? requestCookieAndKey;
+  const tmuxVersionImpl = deps.tmuxVersion ?? (async () => (await run("tmux", ["-V"])).stdout);
   const out: Check[] = [];
   out.push({
     name: "identity",
@@ -81,7 +85,7 @@ export async function runDoctor(
     });
   }
   try {
-    const { stdout } = await run("tmux", ["-V"]);
+    const stdout = await tmuxVersionImpl();
     const v = parseTmuxVersion(stdout);
     out.push({
       name: "tmux",

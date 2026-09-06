@@ -393,6 +393,64 @@ describe("TmuxBackend", () => {
     await b.close();
   });
 
+  it("emits exactly one title-changed (and no layout-changed) when a retained pane is renamed (R52)", async () => {
+    let windowName = "zsh";
+    class RenameableControl extends FakeControl {
+      override async command(line: string): Promise<string[]> {
+        this.commands.push(line);
+        if (line.startsWith("list-panes")) {
+          return [
+            [
+              "%1",
+              "$0",
+              "main",
+              "@0",
+              "0",
+              windowName,
+              "0",
+              "host",
+              "/tmp",
+              "10",
+              "3",
+              "1",
+              "1",
+              "3",
+              "0",
+              "2",
+              "0",
+              "zsh",
+            ].join("\t"),
+          ];
+        }
+        if (line.startsWith("list-clients")) return ["$0\t1", "$0\t0"];
+        if (line.startsWith("display-message")) return [`4\t1\t${this.historySize}\t10\t3`];
+        if (line.startsWith("capture-pane")) return this.screen;
+        throw new Error(`unexpected ${line.split(" ")[0]}`);
+      }
+    }
+    const control = new RenameableControl("$0");
+    const b = new TmuxBackend({
+      log,
+      hostname: "host",
+      execImpl: exec,
+      controlFactory: () => control as unknown as TmuxControl,
+      refreshDebounceMs: 10,
+    });
+    await b.connect();
+    const events: string[] = [];
+    b.on((e) => events.push(e.type));
+
+    // The pane SET is unchanged -- only its window name (and therefore displayed title) moves.
+    windowName = "renamed";
+    control.emit("layout");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toEqual(["title-changed"]);
+    expect(events).not.toContain("layout-changed");
+    expect((await b.listSessions())[0]?.title).toBe("renamed");
+
+    await b.close();
+  });
+
   it("createSession validates the target against known ids before touching a command line (review fix 2)", async () => {
     const control = new FakeControl("$0");
     const b = new TmuxBackend({

@@ -19,6 +19,7 @@ import { startHerdrBackend } from "./backends/herdr/start.js";
 import { ITerm2Backend } from "./backends/iterm2/backend.js";
 import { ITerm2Client } from "./backends/iterm2/client.js";
 import { BackendRegistry } from "./backends/registry.js";
+import { startTmuxBackend } from "./backends/tmux/start.js";
 import { BackendUnavailable } from "./backends/types.js";
 import {
   ACCENTS,
@@ -295,6 +296,15 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
   // spec 8.12/8.13: herdr is optional and usually absent, so this never blocks startup and never
   // prints an error -- it registers the backend, retries every 10 s, and announces itself if and
   // when it connects. Buffered through `print` like the iTerm2 line, for the same reason.
+  // spec 8.11/8.12: tmux is optional and often absent, so this never blocks startup. It registers
+  // the backend, retries every 10 s while the server is down, and announces itself if and when it
+  // connects. Buffered through `print` like the iTerm2 and herdr lines, for the same reason.
+  const tmux = startTmuxBackend({
+    registry,
+    log,
+    onConnected: (n) => print(`  tmux       connected · ${n} pane${n === 1 ? "" : "s"}`),
+    onUnavailable: () => print("  tmux       not running"),
+  });
   const herdr = startHerdrBackend({
     registry,
     log,
@@ -314,6 +324,7 @@ async function buildAgent(log: Logger, relayOverride?: string, yes = false) {
   // detector. Passed wherever `stopFirstConnect` used to be passed, so no exit path leaks either.
   const stopBackendDetectors = () => {
     stopFirstConnect();
+    tmux.stop();
     herdr.stop();
   };
   const control: { server: ControlServer | null } = { server: null };
@@ -386,7 +397,7 @@ program
     );
     agent.relay.on("auth-ok", () => console.log(`  Relay      ${cfg.relayUrl}   connected`));
     agent.relay.on("down", () => console.log(`  Relay      ${cfg.relayUrl}   connecting…`));
-    console.log("  tmux       not running"); // Plan 04 adds the tmux backend.
+    console.log("  tmux       detecting…"); // followed up by startTmuxBackend's onConnected line
     console.log("  herdr      detecting…"); // followed up by startHerdrBackend's onConnected line
     // The header above is up: any iTerm2 line `buildAgent`'s firstConnect() queued while it was
     // still connecting can now be printed without interleaving spec 8.1's exact-text block.

@@ -362,16 +362,29 @@ export class TmuxBackend implements TerminalBackend {
     const next = new Map(rows.filter((r) => !r.dead).map((r) => [r.paneId, r]));
     const removed = [...prev.keys()].filter((id) => !next.has(id));
     const added = [...next.keys()].filter((id) => !prev.has(id));
+    // R52 (Task 3 re-review): a RETAINED pane (present before and after) whose displayed title or
+    // cwd moved gets the same event Herdr emits for a renamed pane (`herdr/backend.ts:854`), so
+    // `Agent.onBackendEvent` re-broadcasts `sessions` for it too -- without this, a `cd` or a
+    // window rename inside an already-known pane would never reach the phone.
+    const host = this.opts.hostname ?? osHostname();
+    const titleChanged = [...next.keys()].filter((id) => {
+      const was = prev.get(id);
+      if (!was) return false;
+      const now = next.get(id) as PaneRow;
+      return titleFor(was, host) !== titleFor(now, host) || was.cwd !== now.cwd;
+    });
     this.panes = next;
     for (const id of removed) {
       this.reported.delete(id);
       this.emit({ type: "session-removed", sessionId: id });
     }
     for (const id of added) this.emit({ type: "session-added", sessionId: id });
-    // Review fix 1: only wake `Agent.onBackendEvent` -> `broadcast({type:"sessions"})` when the
-    // pane SET actually changed (herdr's precedent, `herdr/backend.ts:855`) -- title/cwd/size
-    // churn on an unchanged set must not cost every phone a `sessions` frame on every 5 s watcher
-    // tick (spec 14's idle budget is 0 frames/day).
+    for (const id of titleChanged) this.emit({ type: "title-changed", sessionId: id });
+    // Review fix 1: only wake `Agent.onBackendEvent` -> `broadcast({type:"sessions"})` for the
+    // WHOLE-list `sessions` frame when the pane SET actually changed (herdr's precedent,
+    // `herdr/backend.ts:855`) -- a lone title/cwd rename on an unchanged set is carried by the
+    // `title-changed` event above instead, not by a full `layout-changed` (spec 14's idle budget
+    // is 0 frames/day).
     if (removed.length > 0 || added.length > 0) this.emit({ type: "layout-changed" });
   }
 

@@ -153,3 +153,26 @@ describe("runDoctor's herdr check (Minor, Task 6 review: injectable via RunDocto
     });
   });
 });
+
+describe("runDoctor's tmux check (Task 4: injectable via RunDoctorDeps.tmuxVersion)", () => {
+  it("tmux rows: ok at 3.2 and 3.10, fail below 3.2, fail when absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "sb-doctor-"));
+    const rowFor = async (tmuxVersion: () => Promise<string>) =>
+      (
+        await runDoctor(fakePaths(dir), fakeConfig(), {
+          requestCookieAndKey: noRealITerm2Cookie,
+          checkHerdr: () => checkHerdr({ log, socketPath: join(dir, "herdr.sock") }),
+          tmuxVersion,
+        })
+      ).find((c) => c.name === "tmux");
+    expect((await rowFor(async () => "tmux 3.2\n"))?.ok).toBe(true);
+    // Regression against a parseFloat comparison: 3.10 is NEWER than 3.2.
+    expect((await rowFor(async () => "tmux 3.10\n"))?.ok).toBe(true);
+    expect((await rowFor(async () => "tmux 3.1a\n"))?.ok).toBe(false);
+    const missing = await rowFor(async () => {
+      throw new Error("ENOENT");
+    });
+    expect(missing?.ok).toBe(false);
+    expect(missing?.detail).toBe("not found (optional)");
+  });
+});
