@@ -726,7 +726,7 @@ Global flags: `--relay <url>`, `--json` (for `status`/`devices`), `--verbose`.
   Computer   Bilal's MBP  (k7q3-m2xw)
   Relay      wss://relay.shellbell.app   connected
   iTerm2     connected · 7 sessions
-  tmux       not running
+  tmux       detecting…            → becomes "connected · N panes" or "not running"
   herdr      detecting…            → becomes "connected · N panes" or "not running (optional)"
 
   No phones paired yet. Scan this with the Shellbell app:
@@ -1065,8 +1065,10 @@ session index in `list-sessions`, `tabId` = window id (`@N`), `tabIndex` = `#{wi
 long-lived `tmux -C attach-session -t $N -f ignore-size` (stdio pipes). Not
 `read-only`: the M0b spike showed that a `read-only` client blocks `send-keys` for the
 **whole session** while attached, so the write-safety comes from protocol discipline
-(every command line is built from typed messages and `tmuxQuote`), not from the flag. The
-**first** such client is also the **command channel**: every tmux command the backend runs
+(every command line is built from typed messages and `tmuxQuote`), not from the flag. Any
+**alive** control client serves as the **command channel** (the backend prefers the client of the
+pane's own tmux session and falls back to any other — revised 2026-09-05 from "the first client";
+Plan 04 errata): every tmux command the backend runs
 (`list-panes`, `capture-pane`, `display-message`, `send-keys`, `new-window`,
 `split-window`, `list-clients`) is written to its stdin and its reply is read between
 `%begin` / `%end` (or `%error`) lines, correlated in order. No child process is spawned
@@ -1077,9 +1079,13 @@ uses `%output` as a "screen changed" signal). Parsing stdout:
 - `%output %N <data>` → emit `screen-changed` for `%N` (data ignored).
 - `%layout-change`, `%window-add`, `%window-close`, `%window-renamed`, `%unlinked-window-*`,
   `%session-renamed`, `%sessions-changed` → emit `layout-changed` (debounced 100 ms).
-- `%exit` → that client is gone; if it was the command channel, promote another.
+- `%exit` → that client is gone; commands route to any remaining alive client (see above).
+- `%session-changed` → also treated as `layout-changed` (added by Plan 04).
 A watcher every **5 s** (`list-sessions -F '#{session_id}'`) starts clients for new
-sessions and kills clients of vanished ones. If the tmux server dies, the backend reports
+sessions and kills clients of vanished ones. A **failed** probe (timeout, `EAGAIN`) changes
+nothing — only a successful empty listing or `%exit` tears sessions down (Plan 04 errata).
+Formats are TAB-separated; a TAB inside `window_name`/`pane_title`/`pane_current_path` would
+mis-split that row (known limitation, unaddressed in v1). If the tmux server dies, the backend reports
 no sessions and retries detection every 10 s.
 
 **Listing:**

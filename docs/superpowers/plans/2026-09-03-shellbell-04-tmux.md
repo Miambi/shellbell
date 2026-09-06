@@ -35,6 +35,33 @@
 
 ---
 
+## Post-execution errata (2026-09-05)
+
+Executed on branch `sdd/plan-04-tmux` (4 tasks, 2 fix rounds, 1 final fix wave; rulings R49–R53 in the
+SDD ledger). Where this text still differs from the shipped code, the code is the authority:
+
+- **Control mode (Task 1/2):** reply blocks correlate by the **command number** (field 2 of
+  `%begin <time> <number> <flags>`), warn on mismatch, still resolve FIFO; notification lines inside an
+  open block are dispatched (guarded by known prefixes, since reply lines can start with pane ids);
+  the per-command timer is `unref`'d.
+- **Backend (Task 3):** `refreshPanes` diffs the pane set — `session-added`/`session-removed`, and
+  `layout-changed` only when the set changed; retained panes with a new title/cwd emit
+  `title-changed`; `createSession` resolves targets through `pane()`/`sessionIndex` (never
+  interpolates unvalidated ids); `execFile` is bounded (5 s) and `syncBusy`/`refreshBusy` are
+  released/reset; `display-message` runs before `capture-pane`; `channel()` prefers the pane's own
+  session client (any alive client otherwise — spec §8.11 wording updated); `connect()` is
+  idempotent and `close()` during `connect()` leaves no watcher; a **failed** `list-sessions` probe
+  changes nothing (only a successful empty listing or `%exit` tears down); `getHistory` returns an
+  empty page until `setReported` has run for the pane.
+- **Supervisor/CLI (Task 4):** `backends/tmux/start.ts` mirrors the Herdr supervisor; the banner
+  prints `tmux detecting…` then `connected · N panes` / `not running` via `print()`; doctor's tmux
+  check is injectable (`RunDoctorDeps.tmuxVersion`) and uses `parseTmuxVersion` (3.10 ≥ 3.2).
+- **Live test:** the brief's `live-tmux.test.ts` had two bugs (`Screen` vs `Line[]`; an unbalanced
+  quote that hung a real shell) — fixed; it runs only with `SHELLBELL_TMUX_E2E=1` on
+  `tmux -L shellbell-test` and cleans up in `afterAll`. Task 4 Step 6 (real server) is human-run.
+- **Spec drift recorded:** §8.1 banner wording; §8.11 command-channel rule, `%session-changed`,
+  failed-probe rule, TAB-in-title limitation (all edited in the spec on 2026-09-05).
+
 ## Global Constraints
 
 - All Plan 01/03 constraints apply.
