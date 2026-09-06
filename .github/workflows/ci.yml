@@ -22,3 +22,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - run: pnpm -F @shellbell/protocol gen:protocol-doc && git diff --exit-code docs/protocol.md
+      - run: pnpm -F shellbell check:bundle
+      - run: bash apps/agent/scripts/pack-smoke.sh
+        env:
+          TMPDIR: ${{ runner.temp }}
