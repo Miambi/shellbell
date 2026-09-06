@@ -26,11 +26,13 @@
     "dev": "tsx src/cli.ts",
     "spike:iterm2": "pnpm proto:gen && tsx scripts/spike-iterm2.ts",
     "spike:tmux": "tsx scripts/spike-tmux.ts",
-    "spike:herdr": "tsx scripts/spike-herdr.ts"
+    "spike:herdr": "tsx scripts/spike-herdr.ts",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "prepublishOnly": "pnpm build && pnpm check:bundle && node dist/cli.js --version",
+    "pack:smoke": "bash scripts/pack-smoke.sh"
   },
   "dependencies": {
     "@bufbuild/protobuf": "2.14.1",
-    "@shellbell/protocol": "workspace:*",
     "commander": "15.0.0",
     "qrcode-terminal": "0.12.0",
     "ws": "8.21.3",
@@ -39,6 +41,7 @@
   "devDependencies": {
     "@bufbuild/buf": "1.72.0",
     "@bufbuild/protoc-gen-es": "2.14.1",
+    "@shellbell/protocol": "workspace:*",
     "@types/node": "26.4.1",
     "@types/qrcode-terminal": "0.12.2",
     "@types/ws": "8.18.1",

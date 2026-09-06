@@ -5,4 +5,5 @@ dist/
 *.log
 .DS_Store
 apps/agent/src/backends/iterm2/gen/
+apps/agent/shellbell-*.tgz
 .superpowers/

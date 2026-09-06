@@ -26,4 +26,10 @@ export default defineConfig({
   // (matching this repo's other packages), so force the extension tsdown would otherwise pick
   // for an ESM package with fixedExtension off.
   fixedExtension: false,
+  // Bundled deps (cborg, @noble/*) ship JSDoc `@example`s like `import { decode } from 'cborg'`
+  // in their own source. Unminified, those comments survive into dist/cli.js verbatim and trip
+  // `scripts/check-bundle.mjs`'s bare-import scan (it has no comment awareness, by design — it
+  // must also catch a real leaked import inside a string). Minifying strips comments, which is
+  // what actually resolves the false positive; it also shrinks the published tarball.
+  minify: true,
 });
