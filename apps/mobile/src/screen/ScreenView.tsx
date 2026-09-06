@@ -1,11 +1,10 @@
 import { FlashList, type FlashListRef } from "@shopify/flash-list";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { useUiStore } from "../store/computers";
 import type { KeyedLine, ViewState } from "../store/screen";
 import { tokens } from "../theme/tokens";
-import { buildCursor, type RowCursor } from "./cursorMemo";
 import { ScreenRow } from "./ScreenRow";
 
 export function ScreenView({
@@ -25,6 +24,7 @@ export function ScreenView({
   const fontSizeSetting = useUiStore((s) => s.fontSize);
   const fitWidth = useUiStore((s) => s.fitWidth);
   const setFontSize = useUiStore((s) => s.setFontSize);
+  const commitFontSize = useUiStore((s) => s.commitFontSize);
   const fontSize = fitWidth ? Math.max(5, (width - 16) / view.state.cols / 0.6) : fontSizeSetting;
   const charWidth = fontSize * 0.6;
   const lineHeight = fontSize * 1.25;
@@ -32,35 +32,47 @@ export function ScreenView({
   const list = useRef<FlashListRef<KeyedLine>>(null);
   const [following, setFollowing] = useState(true);
   const startScale = useRef(fontSizeSetting);
-  const cursorRef = useRef<RowCursor | null>(null);
+  // Read fresh inside the gesture's worklet-adjacent JS callbacks without forcing the gesture
+  // object itself to be rebuilt (M4) every time the setting changes.
+  const fontSizeRef = useRef(fontSizeSetting);
+  fontSizeRef.current = fontSizeSetting;
   const histLen = view.state.history.length;
 
-  const pinch = Gesture.Pinch()
-    .onStart(() => {
-      startScale.current = fontSizeSetting;
-    })
-    .onUpdate((e) => setFontSize(Math.round(startScale.current * e.scale)))
-    .runOnJS(true);
+  // Review I5: pinching used to call `setFontSize` (a synchronous SQLite write) on every gesture
+  // frame -- ~60 blocking writes/sec on the same JS thread re-laying out every visible row.
+  // `onUpdate` now only updates in-memory state; the SQLite write happens once, on `onEnd`.
+  const pinch = useMemo(
+    () =>
+      Gesture.Pinch()
+        .onStart(() => {
+          startScale.current = fontSizeRef.current;
+        })
+        .onUpdate((e) => setFontSize(Math.round(startScale.current * e.scale), { persist: false }))
+        .onEnd(() => commitFontSize())
+        .runOnJS(true),
+    [setFontSize, commitFontSize],
+  );
 
   useEffect(() => {
     if (following) list.current?.scrollToEnd({ animated: false });
   }, [following]);
 
-  // Memoized on primitives (never a fresh literal) so `ScreenRow`'s `memo` bails for every row
-  // that doesn't own the cursor.
-  cursorRef.current = buildCursor(
-    cursorRef.current,
-    view.state.cursor.y >= 0
-      ? {
-          x: view.state.cursor.x,
-          y: view.state.cursor.y,
-          accent,
-          blinking,
-          inferred: inferredCursor,
-        }
-      : null,
+  // M3: was a ref mutated during render (works, but impure and against React's guidance); a plain
+  // `useMemo` keyed on the cursor's primitive fields gives the same stable-identity-while-
+  // unchanged property for `ScreenRow`'s `memo` to bail on, with no side effect.
+  const cursor = useMemo(
+    () =>
+      view.state.cursor.y >= 0
+        ? {
+            x: view.state.cursor.x,
+            y: view.state.cursor.y,
+            accent,
+            blinking,
+            inferred: inferredCursor,
+          }
+        : null,
+    [view.state.cursor.x, view.state.cursor.y, accent, blinking, inferredCursor],
   );
-  const cursor = cursorRef.current;
 
   const renderItem = useCallback(
     ({ item, index }: { item: KeyedLine; index: number }) => (

@@ -8,9 +8,14 @@ import { useUiStore } from "../store/computers";
 import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
 import { Bar } from "../ui/Bar";
-import { diffTyped } from "./differ";
+import { fireInput } from "./fireInput";
+import { lineExceedsLimit } from "./limits";
+import { preparePaste } from "./paste";
 import { QuickKeys } from "./QuickKeys";
 import { ReplyChips } from "./ReplyChips";
+import { type RawStep, rawBackspaceOnEmptySteps, rawChangeSteps } from "./rawSequence";
+
+const LINE_TOO_LONG_TOAST = "Line too long — shorten it before sending.";
 
 export function InputBar({
   fp,
@@ -31,18 +36,32 @@ export function InputBar({
   const rawPrev = useRef("");
 
   const conn = () => connectionManager.get(fp);
-  const track = (reqId: string) =>
-    useConnectionsStore.getState().patch(fp, (c) => ({
-      pendingInputs: { ...c.pendingInputs, [reqId]: { at: Date.now(), sessionId } },
-    }));
 
   type Req = Parameters<NonNullable<ReturnType<typeof conn>>["request"]>[0];
   const fire = (msg: Req) => {
     const c = conn();
     if (!c) return;
-    track(msg.reqId);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    void c.request(msg).catch(() => undefined);
+    fireInput(c, msg, {
+      track: (reqId) =>
+        useConnectionsStore.getState().patch(fp, (x) => ({
+          pendingInputs: { ...x.pendingInputs, [reqId]: { at: Date.now(), sessionId } },
+        })),
+      untrack: (reqId, toast) =>
+        useConnectionsStore.getState().patch(fp, (x) => {
+          const rest = { ...x.pendingInputs };
+          delete rest[reqId];
+          return toast ? { pendingInputs: rest, toast } : { pendingInputs: rest };
+        }),
+    });
+  };
+
+  const fireStep = (step: RawStep) => {
+    const c = conn();
+    if (!c) return;
+    if (step.kind === "text")
+      fire({ type: "input.text", reqId: c.newReqId(), sessionId, text: step.text });
+    else fire({ type: "input.key", reqId: c.newReqId(), sessionId, key: step.key });
   };
 
   const sendLine = (line: string) => {
@@ -61,7 +80,11 @@ export function InputBar({
     const c = conn();
     if (c && t) fire({ type: "input.text", reqId: c.newReqId(), sessionId, text: t });
   };
-  const paste = async () => sendText(await Clipboard.getStringAsync());
+  const paste = async () => {
+    const { text: pasted, sendEnter } = preparePaste(await Clipboard.getStringAsync());
+    sendText(pasted);
+    if (sendEnter) sendKey("enter");
+  };
 
   const browseHistory = () => {
     const h = useConnectionsStore.getState().read(fp).history;
@@ -73,12 +96,16 @@ export function InputBar({
 
   /** Raw mode: diff against the previous value, then keep it as the new baseline. */
   const onRawChange = (next: string) => {
-    for (const a of diffTyped(rawPrev.current, next)) {
-      if (a.kind === "text") sendText(a.text);
-      else for (let i = 0; i < a.count; i++) sendKey("backspace");
-    }
+    for (const step of rawChangeSteps(rawPrev.current, next)) fireStep(step);
     rawPrev.current = next;
     setRawText(next);
+  };
+
+  /** Review I1: once the field is empty, `onChangeText` never fires for a Backspace press -- the
+   *  differ above has nothing left to shorten. `onKeyPress` is the only remaining signal. */
+  const onRawKeyPress = (key: string) => {
+    if (key !== "Backspace") return;
+    for (const step of rawBackspaceOnEmptySteps(rawText)) fireStep(step);
   };
 
   const submitRaw = () => {
@@ -89,6 +116,10 @@ export function InputBar({
 
   const submitLine = () => {
     if (!text.trim()) return;
+    if (lineExceedsLimit(text)) {
+      useConnectionsStore.getState().patch(fp, () => ({ toast: LINE_TOO_LONG_TOAST }));
+      return;
+    }
     sendLine(text);
     setText("");
     setHistIdx(-1);
@@ -137,6 +168,7 @@ export function InputBar({
                     setHistIdx(-1);
                   }
             }
+            onKeyPress={raw ? (e) => onRawKeyPress(e.nativeEvent.key) : undefined}
             onSubmitEditing={raw ? submitRaw : submitLine}
             blurOnSubmit={false}
             placeholder={raw ? "raw keystrokes (no CJK IME)" : "command…"}

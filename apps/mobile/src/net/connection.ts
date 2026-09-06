@@ -191,6 +191,23 @@ export class ComputerConnection {
     });
   }
 
+  /** Best-effort: tells the relay/agent this phone is unpairing itself (spec 10.8 / review R60).
+   *  A no-op wire-wise if the socket isn't open -- the caller wipes local state regardless. */
+  unpairSelf(): void {
+    this.sendCtrl({ type: "unpair", phoneFp: this.o.phoneFp });
+  }
+
+  /** Best-effort push-token update, e.g. on a notifications-toggle change (review R60). Token
+   *  acquisition itself is Plan 06; this just forwards whatever the caller already has. */
+  sendPushToken(info: PushTokenInfo): void {
+    this.sendCtrl({
+      type: "push-token",
+      token: info.token,
+      platform: info.platform,
+      enabled: info.enabled,
+    });
+  }
+
   // ---- internals ----
 
   private setStatus(s: Status, extra?: StatusExtra): void {
@@ -281,15 +298,18 @@ export class ComputerConnection {
         this.attempt = 0;
         this.minFrameMs = m.minFrameMs;
         this.sendCtrl({ type: "lease", ttlMs: LEASE_MS });
-        void this.o.pushToken?.().then((t) => {
-          if (!t) return;
-          this.sendCtrl({
-            type: "push-token",
-            token: t.token,
-            platform: t.platform,
-            enabled: t.enabled,
-          });
-        });
+        this.o
+          .pushToken?.()
+          .then((t) => {
+            if (!t) return;
+            this.sendCtrl({
+              type: "push-token",
+              token: t.token,
+              platform: t.platform,
+              enabled: t.enabled,
+            });
+          })
+          .catch(() => undefined);
         this.keepalive = setInterval(() => {
           this.ws?.send("ping");
           this.sendCtrl({ type: "lease", ttlMs: LEASE_MS });

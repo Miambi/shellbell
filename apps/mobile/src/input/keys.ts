@@ -4,6 +4,7 @@ import type { NamedKey } from "@shellbell/protocol";
 export const QUICK_KEYS: { label: string; key: NamedKey }[] = [
   { label: "Esc", key: "esc" },
   { label: "Tab", key: "tab" },
+  { label: "⌫", key: "backspace" },
   { label: "^C", key: "ctrl-c" },
   { label: "^D", key: "ctrl-d" },
   { label: "^Z", key: "ctrl-z" },

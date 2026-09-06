@@ -21,7 +21,9 @@ export default function SettingsScreen() {
   const setFitWidth = useUiStore((s) => s.setFitWidth);
 
   useEffect(() => {
-    void loadOrCreateIdentity().then((r) => setFp(r.fp));
+    loadOrCreateIdentity()
+      .then((r) => setFp(r.fp))
+      .catch(() => setFp(null));
   }, []);
 
   const runSelfTest = () => {

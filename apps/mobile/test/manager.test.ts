@@ -43,20 +43,38 @@ vi.mock("../src/identity/keys", () => ({
   loadPairSecret: vi.fn(),
 }));
 
+interface ConnOpts {
+  onInner: (m: { type: string; [k: string]: unknown }) => void;
+  onStatus: (s: string, extra?: unknown) => void;
+  pushToken?: () => Promise<{
+    token: string;
+    platform: "ios" | "android";
+    enabled: boolean;
+  } | null>;
+}
+
 interface RecordedConnection {
-  opts: unknown;
+  opts: ConnOpts;
   connect: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
+  send: ReturnType<typeof vi.fn>;
+  newReqId: ReturnType<typeof vi.fn>;
+  sendPushToken: ReturnType<typeof vi.fn>;
+  unpairSelf: ReturnType<typeof vi.fn>;
   pendingReqIds: () => string[];
 }
 
 const created: RecordedConnection[] = [];
 vi.mock("../src/net/connection", () => ({
-  ComputerConnection: vi.fn().mockImplementation(function (this: unknown, opts: unknown) {
+  ComputerConnection: vi.fn().mockImplementation(function (this: unknown, opts: ConnOpts) {
     const inst: RecordedConnection = {
       opts,
       connect: vi.fn(),
       close: vi.fn(),
+      send: vi.fn(),
+      newReqId: vi.fn(() => "req1"),
+      sendPushToken: vi.fn(),
+      unpairSelf: vi.fn(),
       pendingReqIds: () => [],
     };
     created.push(inst);
@@ -186,6 +204,97 @@ describe("ConnectionManager", () => {
     await Promise.resolve();
     expect(created).toHaveLength(1);
     expect(created[0]?.connect).toHaveBeenCalledTimes(1);
+    connectionManager.stop();
+  });
+
+  it("onInner: a generation gap on screen.diff sends snapshot.get, not a bad local patch (spec 15)", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    });
+    const { connectionManager } = await import("../src/net/manager");
+    const { useConnectionsStore } = await import("../src/store/connections");
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      pushToken: async () => null,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const conn = created[0];
+    if (!conn) throw new Error("test setup: no connection created");
+
+    const sessionId = "iterm2:s1";
+    const state = {
+      cols: 80,
+      rows: 24,
+      cursor: { x: 0, y: 0 },
+      lines: [],
+      scrollbackTotal: 0,
+      gen: 1,
+      history: [],
+      historyFrom: 0,
+    };
+    useConnectionsStore
+      .getState()
+      .patch("f1", () => ({ view: { sessionId, view: { state, keyed: [] } } }));
+
+    // gen 5 with a current gen of 1 is a gap (expects gen 2): must ask for a fresh snapshot, and
+    // must not silently apply/patch the stale-relative diff.
+    conn.opts.onInner({
+      type: "screen.diff",
+      sessionId,
+      scroll: 0,
+      changed: [],
+      cursor: { x: 0, y: 0 },
+      scrollbackTotal: 0,
+      gen: 5,
+    });
+    expect(conn.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "snapshot.get", sessionId }),
+    );
+    // The view's generation is untouched -- no side effect from the gap itself.
+    expect(useConnectionsStore.getState().read("f1").view?.view.state.gen).toBe(1);
+    connectionManager.stop();
+  });
+
+  it("notifyPushToggle sends push-token when a token exists, and is a no-op otherwise", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    });
+    const { connectionManager } = await import("../src/net/manager");
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      pushToken: async (fp: string) => ({ token: `tok-${fp}`, platform: "ios", enabled: false }),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const conn = created[0];
+    if (!conn) throw new Error("test setup: no connection created");
+
+    connectionManager.notifyPushToggle("f1", true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(conn.sendPushToken).toHaveBeenCalledWith({
+      token: "tok-f1",
+      platform: "ios",
+      enabled: true,
+    });
+
+    // An unknown fp (no live connection) must not throw.
+    expect(() => connectionManager.notifyPushToggle("unknown", true)).not.toThrow();
     connectionManager.stop();
   });
 });

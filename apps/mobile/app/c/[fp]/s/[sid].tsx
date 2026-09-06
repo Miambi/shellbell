@@ -16,6 +16,7 @@ import { sidFromRoute } from "../../../../src/util/routes";
 import {
   cursorBlinks,
   sessionEnded,
+  shouldLoadOlder,
   statePill,
   wantsReply,
 } from "../../../../src/util/session-state";
@@ -51,9 +52,7 @@ export default function Session() {
     const c = connectionManager.get(fp ?? "");
     if (!c || !view || inFlight.current) return;
     const from = view.state.historyFrom;
-    // Spec 10.5: stop at the top, and stop once the agent says there is nothing older.
-    if (from <= 0) return;
-    if (oldest !== undefined && from <= oldest) return;
+    if (!shouldLoadOlder(from, oldest)) return;
     inFlight.current = true;
     void c
       .request({
@@ -70,8 +69,13 @@ export default function Session() {
   }, [fp, sessionId, view, oldest]);
 
   // The session left the computer's `sessions` list but a cached `view` remains: it ended, and
-  // the app must stop offering input for it (R59 ruling 1).
-  const ended = sessionEnded(conn?.sessions ?? [], sessionId, view) || (!session && !view);
+  // the app must stop offering input for it (R59 ruling 1). The second disjunct only applies
+  // while genuinely online (M7): otherwise a cold deep-link/notification tap into a session the
+  // app has never fetched (`sessions` not loaded yet, or mid-reconnect) would render "Session
+  // ended." for a session that may well still be running.
+  const ended =
+    sessionEnded(conn?.sessions ?? [], sessionId, view) ||
+    (conn?.status === "online" && !session && !view);
   const pill = session ? statePill(session.state) : null;
   const title = session ? `${session.title}${pill ? ` · ${pill.label}` : ""}` : "Session";
   const dimmed = conn?.status !== "online";

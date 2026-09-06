@@ -3,7 +3,7 @@
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "types": []
+    "types": ["node"]
   },
-  "include": ["app", "src", ".expo/types/**/*.ts", "expo-env.d.ts"]
+  "include": ["app", "src", "test", ".expo/types/**/*.ts", "expo-env.d.ts"]
 }

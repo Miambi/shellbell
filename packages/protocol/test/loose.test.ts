@@ -77,6 +77,42 @@ describe("loose parsing (spec 10.6)", () => {
     expect(parseInnerLoose(msg)).toEqual(parseInner(msg));
   });
 
+  // M9: LOOSE_INNER re-declares hello/sessions/event's field sets by hand rather than deriving
+  // them from InnerMessageSchema, so nothing guards against the two drifting apart (a field added
+  // to strict `hello` would have zod silently strip it on the phone). These two close the gap the
+  // "sessions" case above already covers, exercising every non-enum field on both message types.
+  it("hello's non-enum fields match the strict parser for a known backend", () => {
+    const caps = {
+      subscribe: true,
+      prompts: true,
+      createSession: true,
+      focus: true,
+      history: true,
+      absoluteLines: true,
+    };
+    const msg = {
+      type: "hello",
+      agentVersion: "9",
+      backends: [{ name: "tmux", capabilities: caps }],
+      computerName: "MBP",
+      accent: "emerald",
+    };
+    expect(parseInnerLoose(msg)).toEqual(parseInner(msg));
+  });
+
+  it("event's non-enum fields (including the optional ones) match the strict parser", () => {
+    const msg = {
+      type: "event",
+      sessionId: "tmux:%1",
+      kind: "exit",
+      exitCode: 0,
+      durationMs: 1234,
+      command: "npm test",
+      at: 1700000000000,
+    };
+    expect(parseInnerLoose(msg)).toEqual(parseInner(msg));
+  });
+
   it("loosens notify.kind only, on the ctrl side", () => {
     const n = { type: "notify", sessionId: "tmux:%1", kind: "bell" };
     expect(parseCtrlLoose(n)).toMatchObject({ kind: "bell" });

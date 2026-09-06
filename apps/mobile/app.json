@@ -20,18 +20,63 @@
     },
     "plugins": [
       "expo-router",
-      ["expo-camera", { "cameraPermission": "Scan the pairing QR shown by your computer." }],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Scan the pairing QR shown by your computer.",
+          "recordAudioAndroid": false,
+          "microphonePermission": false
+        }
+      ],
       "expo-secure-store",
       ["expo-notifications", { "color": "#10B981" }],
       [
         "expo-font",
         {
-          "fonts": [
-            "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
-            "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf",
-            "./assets/fonts/JetBrainsMonoNerdFont-Italic.ttf",
-            "./assets/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf"
-          ]
+          "ios": {
+            "fonts": [
+              "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+              "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf",
+              "./assets/fonts/JetBrainsMonoNerdFont-Italic.ttf",
+              "./assets/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf"
+            ]
+          },
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "JetBrainsMonoNF-Regular",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf", "weight": 400 }
+                ]
+              },
+              {
+                "fontFamily": "JetBrainsMonoNF-Bold",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf", "weight": 700 }
+                ]
+              },
+              {
+                "fontFamily": "JetBrainsMonoNF-Italic",
+                "fontDefinitions": [
+                  {
+                    "path": "./assets/fonts/JetBrainsMonoNerdFont-Italic.ttf",
+                    "weight": 400,
+                    "style": "italic"
+                  }
+                ]
+              },
+              {
+                "fontFamily": "JetBrainsMonoNF-BoldItalic",
+                "fontDefinitions": [
+                  {
+                    "path": "./assets/fonts/JetBrainsMonoNerdFont-BoldItalic.ttf",
+                    "weight": 700,
+                    "style": "italic"
+                  }
+                ]
+              }
+            ]
+          }
         }
       ]
     ],

@@ -45,7 +45,7 @@
   "scripts": {
     "start": "expo start --dev-client",
     "test": "pnpm run sync:vectors && vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "doctor": "expo-doctor",
     "sync:vectors": "node scripts/sync-vectors.mjs",
     "check:vectors": "node scripts/sync-vectors.mjs --check",

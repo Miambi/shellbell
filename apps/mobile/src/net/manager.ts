@@ -7,8 +7,9 @@ import { useConnectionsStore } from "../store/connections";
 import { applyDiffKeyed, applySnapshotKeyed, prependHistoryKeyed } from "../store/screen";
 import type { StatusExtra } from "./connection";
 import { ComputerConnection, type PushTokenInfo } from "./connection";
+import { LOST_INPUT_TOAST } from "./toasts";
 
-const LOST_INPUT_TOAST = "Some input may not have been delivered";
+export { LOST_INPUT_TOAST };
 
 export interface ManagerDeps {
   identity: Identity;
@@ -53,6 +54,21 @@ class Manager {
 
   get(fp: string): ComputerConnection | undefined {
     return this.conns.get(fp);
+  }
+
+  /** Review R60: forward a notifications-toggle change over the wire when a push token exists.
+   *  Token acquisition itself is a Plan 06 stub (`async () => null` today) -- the store's
+   *  `pushEnabled` flag is always the source of truth regardless of whether this send succeeds. */
+  notifyPushToggle(fp: string, enabled: boolean): void {
+    const conn = this.conns.get(fp);
+    const deps = this.deps;
+    if (!conn || !deps) return;
+    deps
+      .pushToken(fp)
+      .then((t) => {
+        if (t) conn.sendPushToken({ ...t, enabled });
+      })
+      .catch(() => undefined);
   }
 
   private onAppState(s: AppStateStatus): void {

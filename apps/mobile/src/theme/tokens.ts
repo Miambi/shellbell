@@ -38,9 +38,15 @@ export const tokens = {
   space: [0, 4, 8, 12, 16, 24, 32],
 } as const;
 
+// Review I2: these must match the *embedded* font's real names, not the TTF filenames. iOS
+// resolves a natively embedded font by its PostScript name (confirmed via `fc-scan
+// --format '%{postscriptname}'`: this file's is `JetBrainsMonoNF-Regular`, not
+// `JetBrainsMonoNerdFont-Regular`); the Android family names are `app.json`'s own choice (the
+// `expo-font` plugin's `android.fonts` entries), picked to match 1:1 so one map serves both
+// platforms.
 export const FONT = {
-  regular: "JetBrainsMonoNerdFont-Regular",
-  bold: "JetBrainsMonoNerdFont-Bold",
-  italic: "JetBrainsMonoNerdFont-Italic",
-  boldItalic: "JetBrainsMonoNerdFont-BoldItalic",
+  regular: "JetBrainsMonoNF-Regular",
+  bold: "JetBrainsMonoNF-Bold",
+  italic: "JetBrainsMonoNF-Italic",
+  boldItalic: "JetBrainsMonoNF-BoldItalic",
 } as const;

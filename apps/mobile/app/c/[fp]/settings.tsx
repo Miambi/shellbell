@@ -30,6 +30,10 @@ export default function ComputerSettings() {
           text: "Unpair",
           style: "destructive",
           onPress: () => {
+            // Best-effort (spec 10.8 / review R60): tell the relay/agent before wiping local
+            // state, so the Mac forgets this phone too when it's reachable. Local state is wiped
+            // either way -- this phone is unpaired here regardless of whether the send lands.
+            connectionManager.get(fp)?.unpairSelf();
             connectionManager.get(fp)?.close("user");
             void deletePairSecret(fp);
             remove(fp);
@@ -99,7 +103,10 @@ export default function ComputerSettings() {
         <Switch
           accessibilityLabel="Notifications for this computer"
           value={computer.pushEnabled}
-          onValueChange={(v) => update(fp, { pushEnabled: v })}
+          onValueChange={(v) => {
+            update(fp, { pushEnabled: v });
+            connectionManager.notifyPushToggle(fp, v);
+          }}
         />
       </View>
 

@@ -402,4 +402,42 @@ describe("ComputerConnection", () => {
     await waitFor(() => c.status === "error");
     expect(statuses.at(-1)).toBe("error");
   });
+
+  it("unpairSelf() sends an unpair ctrl the relay accepts for this phone's own fp (review R60)", async () => {
+    const { c } = makeConn();
+    c.connect();
+    // No agent needed: ctrl auth completes (and the relay attaches `att.fp`) independent of
+    // whether an agent is present -- mirrored by the identity-rejection test above, which also
+    // reaches a terminal status without ever starting a fake agent.
+    await waitFor(
+      () => c.status === "offline" || c.status === "handshake" || c.status === "online",
+    );
+    c.unpairSelf();
+    await waitFor(() =>
+      relay.ctrlFromPhones.some((r) => r.fp === phoneFp && r.msg.type === "unpair"),
+    );
+    const sent = relay.ctrlFromPhones.find((r) => r.msg.type === "unpair");
+    expect(sent?.msg).toMatchObject({ type: "unpair", phoneFp });
+    c.close("user");
+  });
+
+  it("sendPushToken() forwards token/platform/enabled over ctrl (review R60)", async () => {
+    const { c } = makeConn();
+    c.connect();
+    await waitFor(
+      () => c.status === "offline" || c.status === "handshake" || c.status === "online",
+    );
+    c.sendPushToken({ token: "expo-token-abc", platform: "ios", enabled: false });
+    await waitFor(() =>
+      relay.ctrlFromPhones.some((r) => r.fp === phoneFp && r.msg.type === "push-token"),
+    );
+    const sent = relay.ctrlFromPhones.find((r) => r.msg.type === "push-token");
+    expect(sent?.msg).toMatchObject({
+      type: "push-token",
+      token: "expo-token-abc",
+      platform: "ios",
+      enabled: false,
+    });
+    c.close("user");
+  });
 });
