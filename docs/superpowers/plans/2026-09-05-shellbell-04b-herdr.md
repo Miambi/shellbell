@@ -5874,3 +5874,37 @@ double rings. Spec §8.12 "Host-session de-duplication" is the authority; this t
 - [ ] **Step 4: gates + commit.** `pnpm lint:fix && pnpm lint`, `pnpm typecheck`,
   `perl -e 'alarm 600; exec @ARGV' pnpm -F shellbell test`; commit
   `feat(agent): hide the iTerm2 session hosting a herdr or tmux client`.
+
+## Task 11 (added 2026-09-06) — survive the subscription replay (spec 8.13, ruling R71)
+
+Third spike run (`docs/spike-herdr.md`, "Third run"): `events.subscribe` replays ~25 recent events
+before going live. Today `pane_updated` applies any revision that *differs* (so a replayed 1…7 after
+a stored 8 emits seven spurious `screen-changed` and rewinds the revision) and
+`pane.agent_status_changed` is applied directly (a replayed stale status flips the pane and can ring).
+
+**Files:** `apps/agent/src/backends/herdr/backend.ts`, `apps/agent/test/herdr-backend.test.ts`,
+`apps/agent/test/herdr-agent.test.ts` (if it asserts direct agent-status application),
+`apps/agent/test/fakes/fake-herdr.ts` (a `replay(events)` helper that pushes a burst right after the
+`subscription_started` ack).
+
+- [ ] **Step 1: monotonic revisions.** In the `pane_updated` case: if `typeof info.revision ===
+  "number"` and `pane.revision` is a number and `info.revision <= pane.revision`, return without
+  touching anything (no scroll, no status, no title/cwd sync, no `screen-changed`). Only a strictly
+  newer revision applies the payload and emits. `applySnapshot` keeps its own rule (a snapshot is
+  authoritative; it may move the revision either way but emits `screen-changed` only when it moved).
+- [ ] **Step 2: agent_status_changed becomes a hint.** Replace the direct application with
+  `scheduleSync("snapshot")`; drop the `statusSeq` stamping from that path (keep it for
+  `pane_updated`, which is revision-ordered). `applySnapshot` already emits `agent-state` on a
+  transition and `title-changed` on a title change — verify, and make it so if not. The comment block
+  that calls the event "the one event whose whole payload is the new value" is rewritten.
+- [ ] **Step 3: tests.** (a) bootstrap with a fake replay burst of stale `pane_updated` (revisions
+  below the snapshot's) → zero `screen-changed`, revision unchanged; (b) a replayed
+  `pane.agent_status_changed` with a stale status → no `agent-state` emitted before the snapshot,
+  and the snapshot (which still says the current status) emits nothing either; (c) a live
+  `pane.agent_status_changed` whose snapshot answers `blocked` → exactly one `agent-state blocked`
+  within the debounce; (d) a `pane_updated` with a newer revision and new `agent_status` still applies
+  directly (Task 8 test retained); (e) equal revision → ignored. Update any test that asserted direct
+  application (`applies agent status directly …`).
+- [ ] **Step 4: errata + gates + commit.** Append to "Post-spike errata"; `pnpm lint:fix && pnpm lint`,
+  `pnpm typecheck`, `perl -e 'alarm 600; exec @ARGV' pnpm -F shellbell test` (twice); commit
+  `fix(agent): herdr ignores replayed events — monotonic revisions, agent status via snapshot`.

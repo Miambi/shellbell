@@ -1208,8 +1208,12 @@ set — `<config>/herdr/sessions/<name>/herdr.sock`, else `<config>/herdr/herdr.
 Linux). Newline-delimited JSON, **one request per connection**: open, write one line
 `{"id","method","params"}`, read one response line, close. Long-lived methods (`events.subscribe`,
 `events.wait`, `agent.wait`) keep their connection open and push bare `{"event","data"}` lines after
-a `subscription_started` ack (server polls state every 100 ms; **no replay**, and events carry no
-revision or sequence number of any kind). `ping` returns `{version, protocol, capabilities}`.
+a `subscription_started` ack. **Replay (measured 2026-09-06):** right after the ack the server
+replays a bounded backlog of recent events — two back-to-back spikes received the identical ~25
+events (`pane_created`, old `pane_updated` revisions 1…8, historic `cwd` changes, a stale
+`pane.agent_status_changed`) at a 100 ms cadence before any live event. Lifecycle and
+`pane.agent_status_changed` events carry no revision or sequence number; `pane_updated` carries the
+pane's `revision`, which is the only ordering signal. `ping` returns `{version, protocol, capabilities}`.
 **Version gate:** parse `version` as semver and require **≥ 0.7.2**, then feature-probe
 `session.snapshot` (it landed in 0.7.2); `protocol` is Herdr's *binary* client/server generation and
 must never be used as the JSON floor. Anything older, or a snapshot that answers
@@ -1239,9 +1243,17 @@ as a bare hint.
   and the round ends with `layout-changed`. This is also why the subscription set never has to be
   rebuilt for a new pane (see below), so there is no self-triggering resubscribe loop. `pane.updated`
   for a `pane_id` not yet in the map is one such hint (a new pane).
-- **`pane.updated` for an already-known pane is applied directly, latest-wins** — its `scroll`,
-  `agent_status` and `revision` update that pane in place with no `session.snapshot` round trip (see
-  Change detection). It carries no `agent`/`display_agent` name, so it never rewrites the title on its
+- **`pane.updated` for an already-known pane is applied directly when its `revision` is newer**
+  than the stored one — then its `scroll`, `agent_status` and `revision` update that pane in place
+  with no `session.snapshot` round trip (see Change detection). A `revision` equal to or older than
+  the stored one is a replayed or reordered event and is ignored entirely; the stored revision never
+  moves backwards.
+- **`pane.agent_status_changed` is a hint, not a mutation (revised 2026-09-06):** it carries no
+  revision, and the subscription replay re-delivers stale ones, so applying it directly can flip a
+  pane to a state it left seconds ago. It schedules the same debounced snapshot refresh (≤ ~350 ms
+  to the authoritative `agent_status`), and the live `pane_updated` that Herdr emits for the same
+  transition (measured ~0.6 s later) applies it directly when it arrives first. `blocked` rings thus
+  trail the transition by at most a few hundred milliseconds. It carries no `agent`/`display_agent` name, so it never rewrites the title on its
   own; a title or `cwd` that moved still schedules the same debounced snapshot refresh above so
   `title-changed` fires for it.
 - **`pane.agent_status_changed` is applied directly, latest-wins** — it is the other event whose

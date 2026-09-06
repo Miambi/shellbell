@@ -42,3 +42,14 @@ Second-run note: the spike rewrites every fixture, and a run from a pane whose `
 
 Consequence: spec §8.13 "Change detection" was rewritten; the copy_motion poller is removed in favour
 of `pane_updated.revision` (Plan 04b Task 8, revised).
+
+## Third run (2026-09-06 19:24) — subscription replay
+
+Two spikes started ~40 s apart received the **same first ~25 events** with identical relative
+timestamps (+106 ms … +2407 ms): `pane_created w1:p2` (revision 0), `pane_updated w1:p1` revisions
+1→8 (including the `agent: claude` idle→unknown transitions from an earlier claude session), the
+historic `cwd` walk of `w2:p1`, and a `pane.agent_status_changed working` that had happened minutes
+before. Conclusion: `events.subscribe` replays a bounded recent-event backlog at 100 ms cadence after
+the ack, then goes live. Only `pane_updated` carries an ordering signal (`revision`). Live events
+followed: `pane.agent_status_changed idle` at +6.9 s when claude finished. `ping` p50 was 0.9 ms this
+time (max 106 ms): latency depends on where in the server's 100 ms tick a request lands.
