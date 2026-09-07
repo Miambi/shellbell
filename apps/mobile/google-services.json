@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1008691304189",
+    "project_id": "shellbell-1c407",
+    "storage_bucket": "shellbell-1c407.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1008691304189:android:27909c6d3619fff9da1094",
+        "android_client_info": {
+          "package_name": "dev.bilalahmad.shellbell"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB-XXsNNPTYoBfcCGDb8sgSDrjA-WWxlw4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
