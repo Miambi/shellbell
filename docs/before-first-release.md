@@ -28,6 +28,8 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 - **Store accounts: Miambi** (registered entity). Apple Developer Program as an *Organization*
   membership and a Google Play *organization* account, both under `bilal@miambi.ai`; both need
   Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
+- **Status:** Apple Developer Program organization enrollment submitted 2026-09-06 (awaiting Apple's
+  authority verification); Google Play organization account in progress.
 - **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
 - **Expo:** project `@miambi/shellbell` (`4a002a82-…`) under the `miambi` organization; `owner:
   "miambi"` in `apps/mobile/app.json`. (A first project under the personal account was deleted.)
