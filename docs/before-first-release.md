@@ -23,6 +23,18 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 | every blank (`____-__-__ __:__` / `__`) | `docs/e2e-ring.md` | device ring test | 11 |
 | every blank (`__`) | `docs/feedback-0.1.md` | two testers | 13 |
 
+## Decisions (2026-09-06)
+
+- **Store accounts: Miambi** (registered entity). Apple Developer Program as an *Organization*
+  membership and a Google Play *organization* account, both under `bilal@miambi.ai`; both need
+  Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
+- **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
+- **Expo:** project `de15465f-…` was created under the personal account `bilal-miambi`; transfer it
+  to the `miambi` organization before uploading push credentials, then set `owner: "miambi"` in
+  `apps/mobile/app.json`.
+- **Builds:** EAS project is required for Expo push; EAS Build/Submit are optional (`eas build
+  --local` works). EAS Update is not used (`expo-updates` is not installed).
+
 ## `[HUMAN]` tasks (plan Tasks 9–13)
 
 Summarized here; the plan (`docs/superpowers/plans/2026-09-03-shellbell-06-rings-release.md`) has
