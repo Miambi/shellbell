@@ -42,7 +42,7 @@ Summarized here; the plan (`docs/superpowers/plans/2026-09-03-shellbell-06-rings
 the exact steps. An agent must never run, simulate, or report the outcome of any of these.
 
 - **Task 9 — EAS project, credentials, development builds.** `eas init` (**done**); iOS distribution cert + provisioning profile + APNs push key;
-  Android Firebase project `shellbell-1c407` and `apps/mobile/google-services.json` (**done 2026-09-06**, committed — it is client config that ships inside the APK; restrict its API key to the Android app in Google Cloud) and the FCM V1 service-account key (never committed; upload via `eas credentials`);
+  Android Firebase project `shellbell-1c407` and `apps/mobile/google-services.json` (**done 2026-09-06**, committed — it is client config that ships inside the APK; restrict its API key to the Android app in Google Cloud) and the FCM V1 service-account key (never committed; uploaded to EAS via `eas credentials` on 2026-09-06 — **Android push credentials done**; the Google Cloud org policy `iam.disableServiceAccountKeyCreation` had to be overridden for project `shellbell-1c407` to create the key);
   confirm "enhanced push security" is off; build and install development builds on both test
   devices.
 - **Task 10 — Domain, hosted relay deploy, secrets, WAF.** Buy `shellbell.app` on the `miambi`
