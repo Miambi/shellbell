@@ -5,7 +5,7 @@ builds cannot be taken back. Re-run this grep (Task 8 Step 7's search, copied ve
 every row below is resolved it should return nothing but this file itself:
 
 ```
-grep -rn "REPLACE_AFTER_eas_init\|REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|REPLACE_APPLE_TEAM_ID\|REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH\|before-first-release\|YYYY-MM-DD" \
+grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|REPLACE_APPLE_TEAM_ID\|REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH\|before-first-release\|YYYY-MM-DD" \
   --include='*.json' --include='*.jsonc' --include='*.md' --include='*.ts' --include='*.tsx' . \
   | grep -v node_modules
 ```
@@ -14,7 +14,7 @@ grep -rn "REPLACE_AFTER_eas_init\|REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMA
 
 | Placeholder | File | Filled by | Task |
 |---|---|---|---|
-| `REPLACE_AFTER_eas_init` | `apps/mobile/app.json` | `eas init` output | 9 |
+| ~~`REPLACE_AFTER_eas_init`~~ | `apps/mobile/app.json` | **done 2026-09-06** — `eas init` linked project `de15465f-…` (owner `bilal-miambi`) | 9 |
 | `REPLACE_SECURITY_CONTACT` | `SECURITY.md` | Bilal's chosen address | 13 |
 | `REPLACE_APPLE_ID_EMAIL` / `REPLACE_ASC_APP_ID` / `REPLACE_APPLE_TEAM_ID` | `apps/mobile/eas.json` | App Store Connect | 13 |
 | `REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH` | `apps/mobile/eas.json` | Play Console service account | 13 |
@@ -28,8 +28,7 @@ grep -rn "REPLACE_AFTER_eas_init\|REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMA
 Summarized here; the plan (`docs/superpowers/plans/2026-09-03-shellbell-06-rings-release.md`) has
 the exact steps. An agent must never run, simulate, or report the outcome of any of these.
 
-- **Task 9 — EAS project, credentials, development builds.** `eas init` (resolves
-  `REPLACE_AFTER_eas_init`); iOS distribution cert + provisioning profile + APNs push key;
+- **Task 9 — EAS project, credentials, development builds.** `eas init` (**done**); iOS distribution cert + provisioning profile + APNs push key;
   Android Firebase project, `google-services.json` (kept out of git) and FCM V1 service account;
   confirm "enhanced push security" is off; build and install development builds on both test
   devices.

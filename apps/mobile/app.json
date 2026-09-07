@@ -37,7 +37,12 @@
         }
       ],
       "expo-secure-store",
-      ["expo-notifications", { "color": "#10B981" }],
+      [
+        "expo-notifications",
+        {
+          "color": "#10B981"
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -62,13 +67,19 @@
               {
                 "fontFamily": "JetBrainsMonoNF-Regular",
                 "fontDefinitions": [
-                  { "path": "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf", "weight": 400 }
+                  {
+                    "path": "./assets/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+                    "weight": 400
+                  }
                 ]
               },
               {
                 "fontFamily": "JetBrainsMonoNF-Bold",
                 "fontDefinitions": [
-                  { "path": "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf", "weight": 700 }
+                  {
+                    "path": "./assets/fonts/JetBrainsMonoNerdFont-Bold.ttf",
+                    "weight": 700
+                  }
                 ]
               },
               {
@@ -96,6 +107,11 @@
         }
       ]
     ],
-    "extra": { "eas": { "projectId": "REPLACE_AFTER_eas_init" } }
+    "extra": {
+      "eas": {
+        "projectId": "de15465f-7d12-4750-9c2f-7c339fb1c42b"
+      }
+    },
+    "owner": "bilal-miambi"
   }
 }
