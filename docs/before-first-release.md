@@ -14,7 +14,7 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 
 | Placeholder | File | Filled by | Task |
 |---|---|---|---|
-| ~~`REPLACE_AFTER_eas_init`~~ | `apps/mobile/app.json` | **done 2026-09-06** — `eas init` linked project `de15465f-…` (owner `bilal-miambi`) | 9 |
+| ~~`REPLACE_AFTER_eas_init`~~ | `apps/mobile/app.json` | **done 2026-09-06** — `eas init` linked project `4a002a82-…` (`@miambi/shellbell`) | 9 |
 | `REPLACE_SECURITY_CONTACT` | `SECURITY.md` | Bilal's chosen address | 13 |
 | `REPLACE_APPLE_ID_EMAIL` / `REPLACE_ASC_APP_ID` / `REPLACE_APPLE_TEAM_ID` | `apps/mobile/eas.json` | App Store Connect | 13 |
 | `REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH` | `apps/mobile/eas.json` | Play Console service account | 13 |
@@ -29,9 +29,8 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   membership and a Google Play *organization* account, both under `bilal@miambi.ai`; both need
   Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
 - **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
-- **Expo:** project `de15465f-…` was created under the personal account `bilal-miambi`; transfer it
-  to the `miambi` organization before uploading push credentials, then set `owner: "miambi"` in
-  `apps/mobile/app.json`.
+- **Expo:** project `@miambi/shellbell` (`4a002a82-…`) under the `miambi` organization; `owner:
+  "miambi"` in `apps/mobile/app.json`. (A first project under the personal account was deleted.)
 - **Builds:** EAS project is required for Expo push; EAS Build/Submit are optional (`eas build
   --local` works). EAS Update is not used (`expo-updates` is not installed).
 
