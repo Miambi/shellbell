@@ -41,9 +41,14 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   `play.google.com/console/u/0/developers/9220450949259514576/api-access` **redirects to
   `app-list`**. A redirect rather than a 404 means the route exists but the account is not
   provisioned for it.
-  Best remaining lead is the **"Android developer verification"** nav entry, which nobody has
-  opened and which Google increasingly uses to gate account capabilities; otherwise this is a Play
-  Console support question. Do not spend more time guessing at menus.
+  **Android developer verification is complete and is not the gate** (checked 2026-09-15):
+  `dev.bilalahmad.shellbell` is Registered with 3 signing-key fingerprints all Verified since
+  2026-09-07, which also satisfies Google's 30 September 2026 deadline for removing unregistered
+  apps from Play. Four hypotheses have now been eliminated — missing app record, relocated menu,
+  permissions (Bilal is Account Owner), developer verification. **The cause is unknown; take it to
+  Play Console support rather than guessing again.** It is not worth chasing before release #2.
+  (Aside: those fingerprints are SHA-256. The separate Firebase API-key restriction follow-up needs
+  the SHA-1, which is under Play Console → App integrity, not here.)
   None of this blocks anything today: Google requires the first AAB of a new app to be uploaded
   through the Console by hand, so the Play service-account key only matters from the second release
   onward.
