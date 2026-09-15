@@ -7,3 +7,7 @@ dist/
 apps/agent/src/backends/iterm2/gen/
 apps/agent/shellbell-*.tgz
 .superpowers/
+
+# Play Console service-account key for `eas submit` (eas.json points at this path).
+# Never commit it -- unlike google-services.json it is a real credential.
+apps/mobile/play-service-account.json

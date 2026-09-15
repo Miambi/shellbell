@@ -15,9 +15,9 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 | Placeholder | File | Filled by | Task |
 |---|---|---|---|
 | ~~`REPLACE_AFTER_eas_init`~~ | `apps/mobile/app.json` | **done 2026-09-06** — `eas init` linked project `4a002a82-…` (`@miambi/shellbell`) | 9 |
-| `REPLACE_SECURITY_CONTACT` | `SECURITY.md` | Bilal's chosen address | 13 |
+| ~~`REPLACE_SECURITY_CONTACT`~~ | `SECURITY.md` | **done 2026-09-14** — `security@shellbell.dev`, a Cloudflare Email Routing catch-all on `shellbell.dev` forwarding to `bilal@miambi.ai` | 13 |
 | `REPLACE_APPLE_ID_EMAIL` / `REPLACE_ASC_APP_ID` / `REPLACE_APPLE_TEAM_ID` | `apps/mobile/eas.json` | App Store Connect | 13 |
-| `REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH` | `apps/mobile/eas.json` | Play Console service account | 13 |
+| ~~`REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH`~~ | `apps/mobile/eas.json` | **done 2026-09-14** — points at `./play-service-account.json`, gitignored. The key itself is not generated yet; only needed when `eas submit` automates the Android upload, not for a hand-uploaded first build | 13 |
 | `docs/demo.gif` | `README.md` | screen recording | 13 |
 | every blank (`__`) | `docs/spike-render.md` | on-device render spike (carried from Plan 05) | 12 |
 | every blank (`____-__-__ __:__` / `__`) | `docs/e2e-ring.md` | device ring test | 11 |

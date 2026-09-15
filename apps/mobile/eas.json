@@ -16,7 +16,7 @@
         "appleTeamId": "REPLACE_APPLE_TEAM_ID"
       },
       "android": {
-        "serviceAccountKeyPath": "REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH",
+        "serviceAccountKeyPath": "./play-service-account.json",
         "track": "internal"
       }
     }

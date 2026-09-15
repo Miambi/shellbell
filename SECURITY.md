@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **REPLACE_SECURITY_CONTACT** with details. Please do not open a public GitHub issue for a
+Email **security@shellbell.dev** with details. Please do not open a public GitHub issue for a
 suspected vulnerability.
 
 We aim to acknowledge reports within a few days and follow **90-day coordinated disclosure**: we
