@@ -151,7 +151,12 @@ describe("startHerdrBackend", () => {
     server = new FakeHerdr(socketPath);
     server.reply("session.snapshot", emptySnapshot);
     await server.start();
-    await waitFor(() => registry.connected().some((b) => b.name === "herdr"), 3000);
+    // Wait on the callback, not the registry: the registry flips to connected the moment
+    // `backend.connect()` resolves, while `onConnected` fires a `listSessions()` round-trip later,
+    // so waiting on the registry races the thing this test is actually asserting (it failed that
+    // way on CI 2026-09-07 -- "expected null to be +0").
+    await waitFor(() => connectedPanes !== null, 3000);
+    expect(registry.connected().some((b) => b.name === "herdr")).toBe(true);
     expect(connectedPanes).toBe(0);
     expect(unavailableCalls).toBe(1); // still exactly once -- success does not retroactively fire it
   });
