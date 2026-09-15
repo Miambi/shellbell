@@ -1566,8 +1566,11 @@ git commit -m "ci: changesets release pipeline for the shellbell agent"
 5. How notifications work and exactly what the relay sees, in three bullets, linking `PRIVACY.md`.
 6. Self-hosting → `docs/self-hosting.md`. Protocol → `docs/protocol.md`.
 7. Costs: free for users; the author pays Apple ($99/yr), Google ($25 once) and the domain.
-8. License (MIT, `LICENSE`), trademark (`TRADEMARK.md`), and the Buy Me a Coffee badge pointing at
-   `https://buymeacoffee.com/bilaldev` (the URL already in `.github/FUNDING.yml`).
+8. License (MIT, `LICENSE`) and trademark (`TRADEMARK.md`), at the top of the README.
+   *Errata 2026-09-14: no funding link on the repo surface. Bilal's call when the repo went
+   public — the README badge is gone and `.github/FUNDING.yml` was deleted, which also removes
+   GitHub's Sponsor button. The in-app link in `apps/mobile/app/settings.tsx` stays, so spec §3
+   row 6 ("free, open source, coffee link") still holds. Do not re-add either one.*
 
 - [ ] **Step 2: `PRIVACY.md`.** Make this the single source of truth and have `docs/self-hosting.md`
   link to it instead of restating. Contents: the relay stores computer name, paired phone public

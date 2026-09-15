@@ -229,8 +229,8 @@ shellbell/
 ├── PRIVACY.md  SECURITY.md  CONTRIBUTING.md
 ├── README.md
 ├── .github/
-│   ├── FUNDING.yml               # buy_me_a_coffee: <handle>
-│   └── workflows/
+│   └── workflows/                # Plan 06 errata: no FUNDING.yml -- no funding link on the repo
+│       │                         # surface; the in-app one in settings.tsx stays
 │       ├── ci.yml                # lint, typecheck, test, expo-doctor on push/PR
 │       ├── release-agent.yml     # changesets → npm publish
 │       └── deploy-relay.yml      # wrangler deploy on tag relay-v*
