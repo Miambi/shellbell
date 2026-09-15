@@ -46,12 +46,19 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   Android Firebase project `shellbell-1c407` and `apps/mobile/google-services.json` (**done 2026-09-06**, committed — it is client config that ships inside the APK; restrict its API key to the Android app in Google Cloud) and the FCM V1 service-account key (never committed; uploaded to EAS via `eas credentials` on 2026-09-06 — **Android push credentials done**; the Google Cloud org policy `iam.disableServiceAccountKeyCreation` had to be overridden for project `shellbell-1c407` to create the key);
   confirm "enhanced push security" is off; build and install development builds on both test
   devices.
-- **Task 10 — Domain, hosted relay deploy, secrets, WAF.** Domain **done 2026-09-14** —
-  `shellbell.dev` bought on the `miambi` Cloudflare account (`shellbell.app` was the planned domain
-  but was priced well above budget); code, config and docs now say `relay.shellbell.dev`.
-  Remaining: first `wrangler deploy --config wrangler.hosted.jsonc`; the
-  `EXPO_ACCESS_TOKEN` Worker secret; a Cloudflare rate-limiting rule on `/ws/*`; the
-  `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` GitHub Actions secrets; tag `relay-v0.1.0`.
+- **Task 10 — Domain, hosted relay deploy, secrets, WAF.** Domain and first deploy **done
+  2026-09-14**: `shellbell.dev` bought on the `miambi` Cloudflare account (`shellbell.app` was the
+  planned domain but was priced well above budget); code, config and docs now say
+  `relay.shellbell.dev`. `wrangler deploy --config wrangler.hosted.jsonc` ran (version
+  `2cf0919f-…`), the `relay.shellbell.dev` custom domain is bound and enabled, and
+  `https://relay.shellbell.dev/healthz` returns `ok`. `CLOUDFLARE_ACCOUNT_ID` is set as an Actions
+  secret. Remaining, all needing credentials only Bilal can mint:
+  - the `EXPO_ACCESS_TOKEN` Worker secret (`wrangler secret put`, from expo.dev);
+  - a Cloudflare rate-limiting rule on `/ws/*` (30 req/min per IP) — dashboard work; the local
+    wrangler OAuth token is `zone (read)` only and cannot write rulesets;
+  - a scoped **Workers Scripts: Edit** API token → the `CLOUDFLARE_API_TOKEN` Actions secret;
+  - **then** tag `relay-v0.1.0`. Tagging before that secret exists makes `deploy-relay.yml` fail —
+    the first deploy was done by hand, so the tag is only needed to prove CI can redeploy.
 - **Task 11 — Device end-to-end ring test.** On real hardware, with Tasks 1/9/10 done: prompt,
   idle, blocked and attentive-suppression scenarios, recorded in `docs/e2e-ring.md`; update
   `apps/mobile/QA.md`'s ring line to point at it.
