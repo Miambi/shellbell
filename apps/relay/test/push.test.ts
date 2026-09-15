@@ -99,6 +99,9 @@ describe("notify → push", () => {
     p.ws.close();
     await agent.nextCtrl();
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s2", kind: "idle", durationMs: 5000 });
+    // Assert on the push only once it has actually arrived -- see the next test for what a late
+    // one does to the following test's fetch stub.
+    await waitFor(() => sent.length >= 1, 5000);
     await settle();
     expect(sent).toEqual([
       {
@@ -121,6 +124,11 @@ describe("notify → push", () => {
     p.sendCtrl(phone.fp, { type: "lease", ttlMs: 1 });
     await settle();
     agent.sendCtrl(mac.fp, { type: "notify", sessionId: "s", kind: "idle" });
+    // Wait for the round-trip instead of assuming `settle()`'s 120 ms covers it. When it does not,
+    // the push lands after `afterEach` has swapped the fetch stub, so it is counted by the NEXT
+    // test: CI 2026-09-14 failed with this test reading 0 and "push disabled ... → never pushed"
+    // reading 1, the same push counted once in the wrong place.
+    await waitFor(() => calls() >= 1, 5000);
     await settle();
     expect(calls()).toBe(1);
     agent.ws.close();
