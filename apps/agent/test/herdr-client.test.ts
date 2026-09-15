@@ -101,7 +101,10 @@ describe("HerdrClient.request", () => {
   it("accepts a 2 MiB response line (responses get their own, larger byte cap)", async () => {
     const big = "x".repeat(2 * 1024 * 1024);
     herdr.reply("pane.read", () => ({ type: "pane_read", read: { text: big } }));
-    const result = await client().request<{ read: { text: string } }>("pane.read", {});
+    // The subject here is the byte cap, not the deadline, so do not let `client()`'s 500 ms test
+    // default be the binding constraint: moving 2 MiB through the socket and parsing it overruns
+    // that on a loaded runner, which failed as a spurious `herdr timeout` (2026-09-15).
+    const result = await client(10_000).request<{ read: { text: string } }>("pane.read", {});
     expect(result.read.text).toHaveLength(big.length);
   });
 });

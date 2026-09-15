@@ -37,10 +37,16 @@ describe("abuse controls", () => {
     expect(closed.code).toBe(4429);
   }, 20_000);
 
+  // Inherently slow: it waits out the DO's real `UNAUTH_TIMEOUT_MS` (10 s), so it runs in ~10.01 s
+  // and the old 20 s budget left only 10 s of slack. Under a loaded machine the whole relay suite
+  // stretches badly (measured at 968 s for one run), the alarm slips past the budget and this fails
+  // as `Test timed out in 20000ms` — seen once in 11 unloaded runs and again under load
+  // (2026-09-15). The assertion is that the sweep fires at all, not that it fires promptly, so the
+  // budget is deliberately generous; do not trim it back towards 10 s.
   it("unauthenticated socket is closed by the alarm sweep with 4408", async () => {
     const mac = new TestDevice("MBP");
     const c = await connect(mac.fp);
     await c.nextCtrl();
     expect((await c.closed).code).toBe(4408);
-  }, 20_000);
+  }, 60_000);
 });
