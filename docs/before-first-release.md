@@ -33,12 +33,17 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   2026-09-14. **Google Play is further along than Apple:** the Miambi organization account
   (Account ID `9220450949259514576`) is live and the `shellbell` app record already exists as a
   **Draft** for `dev.bilalahmad.shellbell`, created 2026-09-07.
-  *Correction 2026-09-15:* an earlier note here claimed the app record did not exist and that a
-  missing API access page meant Play's org verification was still pending. Both were wrong — the
-  account works fine; the menu had simply moved. **API access lives under the left nav's
-  "Developer account"**, not the old "Setup" section. The nav also carries an "Android developer
-  verification" entry that looks like it wants attention; check it separately, it can gate
-  distribution.
+  **API access is not available on this account** (as of 2026-09-15), so the Play service-account
+  key cannot be created yet. Established by elimination, after two wrong guesses recorded here
+  first — it is *not* that the app record is missing (it exists), and *not* that the page moved to
+  another menu. The nav has no "Setup" section, "Developer account" holds only About you / Contact
+  details, and the deep link
+  `play.google.com/console/u/0/developers/9220450949259514576/api-access` **redirects to
+  `app-list`**. A redirect rather than a 404 means the route exists but the account is not
+  provisioned for it.
+  Best remaining lead is the **"Android developer verification"** nav entry, which nobody has
+  opened and which Google increasingly uses to gate account capabilities; otherwise this is a Play
+  Console support question. Do not spend more time guessing at menus.
   None of this blocks anything today: Google requires the first AAB of a new app to be uploaded
   through the Console by hand, so the Play service-account key only matters from the second release
   onward.
