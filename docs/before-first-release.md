@@ -102,3 +102,6 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   **Merging it runs `changeset publish` — an npm publish that cannot be taken back.** Merge only
   once the placeholders above are resolved and `NPM_TOKEN` exists. Until then the PR just sits
   there and rebases itself on each push to `main`.
+  Asked on 2026-09-14 whether to publish early purely to reserve the unclaimed npm name
+  `shellbell`: **Bilal's call is no** — ship when it is ready, accepting the squatting risk. Do not
+  re-raise.
