@@ -87,10 +87,11 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   "recent account payments have failed or spending limit needs to be increased" before any step
   started. The repo went public the same day and Actions runs again — public repos get the minutes
   free.
-- **`[HUMAN]` — the Miambi org forbids Actions from opening PRs.** `release-agent` now reaches the
-  changesets step and fails on `GitHub Actions is not permitted to create or approve pull
-  requests`, so the "Version Packages" PR never appears and Task 13's publish path is blocked. The
-  repo-level toggle cannot override it (the API answers 409, "the organization does not allow…").
-  Fix in **Miambi org settings → Actions → General → Workflow permissions → allow GitHub Actions to
-  create and approve pull requests**. The workflow already force-pushed the `changeset-release/main`
-  branch, so the PR should appear on the next push to `main` once the policy allows it.
+- **⚠️ Do not merge PR #9 "Version Packages" until Task 13 is ready.** The org policy that blocked
+  Actions from opening PRs was lifted on 2026-09-14 (Miambi org → Actions → General → Workflow
+  permissions → "allow GitHub Actions to create and approve pull requests"; the repo keeps
+  `default_workflow_permissions: read`, since `release-agent.yml` requests what it needs per job).
+  `release-agent` is green and PR #9 is open, bumping `shellbell` 0.0.1 → 0.1.0.
+  **Merging it runs `changeset publish` — an npm publish that cannot be taken back.** Merge only
+  once the placeholders above are resolved and `NPM_TOKEN` exists. Until then the PR just sits
+  there and rebases itself on each push to `main`.
