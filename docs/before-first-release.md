@@ -51,14 +51,14 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   planned domain but was priced well above budget); code, config and docs now say
   `relay.shellbell.dev`. `wrangler deploy --config wrangler.hosted.jsonc` ran (version
   `2cf0919f-…`), the `relay.shellbell.dev` custom domain is bound and enabled, and
-  `https://relay.shellbell.dev/healthz` returns `ok`. `CLOUDFLARE_ACCOUNT_ID` is set as an Actions
-  secret. Remaining, all needing credentials only Bilal can mint:
-  - the `EXPO_ACCESS_TOKEN` Worker secret (`wrangler secret put`, from expo.dev);
-  - a Cloudflare rate-limiting rule on `/ws/*` (30 req/min per IP) — dashboard work; the local
-    wrangler OAuth token is `zone (read)` only and cannot write rulesets;
-  - a scoped **Workers Scripts: Edit** API token → the `CLOUDFLARE_API_TOKEN` Actions secret;
-  - **then** tag `relay-v0.1.0`. Tagging before that secret exists makes `deploy-relay.yml` fail —
-    the first deploy was done by hand, so the tag is only needed to prove CI can redeploy.
+  `https://relay.shellbell.dev/healthz` returns `ok`. Secrets are all in place:
+  `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and `NPM_TOKEN` as Actions secrets, and
+  `EXPO_ACCESS_TOKEN` as a Worker secret (optional in practice — `push.ts` only sends the
+  `Authorization` header when it is set, and enhanced push security is off).
+  Tagged `relay-v0.1.0`; `deploy-relay.yml` redeployed from CI (version `6783d329-…`) and
+  re-asserted the custom domain, so the release path is proven end to end.
+  **Only one item left:** a Cloudflare rate-limiting rule on `/ws/*` (30 req/min per IP). Dashboard
+  work — the local wrangler OAuth token is `zone (read)` only and cannot write rulesets.
 - **Task 11 — Device end-to-end ring test.** On real hardware, with Tasks 1/9/10 done: prompt,
   idle, blocked and attentive-suppression scenarios, recorded in `docs/e2e-ring.md`; update
   `apps/mobile/QA.md`'s ring line to point at it.
