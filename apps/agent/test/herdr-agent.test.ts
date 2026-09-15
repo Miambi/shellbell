@@ -99,7 +99,14 @@ describe("herdr through the agent's units", () => {
     });
     await waitFor(() => h.registry.connected().some((b) => b.name === "herdr"), 3000);
 
-    const list = await h.sessions();
+    // `registry.connected()` flips as soon as `connect()` resolves, which is before the bootstrap
+    // snapshot has populated the panes -- so asserting on the first tick races the list and reads
+    // `[]` on a slow runner (CI 2026-09-14). Same reason line ~157 waits for the re-adopted state.
+    let list: SessionInfo[] = [];
+    await waitForAsync(async () => {
+      list = await h.sessions();
+      return list.length === 3;
+    }, 3000);
     expect(list.map((s) => [s.id, s.state])).toEqual([
       ["herdr:term_a", "unknown"],
       ["herdr:term_b", "unknown"],
