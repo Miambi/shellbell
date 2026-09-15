@@ -85,5 +85,12 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   Google Cloud to the `dev.bilalahmad.shellbell` Android app so it cannot be used from elsewhere.
 - **GitHub Actions was billing-blocked while the repo was private.** Runs on 2026-09-14 failed with
   "recent account payments have failed or spending limit needs to be increased" before any step
-  started. Public repos get Actions minutes free, so going public is the fix; confirm the next push
-  actually runs CI before relying on the `release-agent` workflow in Task 13.
+  started. The repo went public the same day and Actions runs again — public repos get the minutes
+  free.
+- **`[HUMAN]` — the Miambi org forbids Actions from opening PRs.** `release-agent` now reaches the
+  changesets step and fails on `GitHub Actions is not permitted to create or approve pull
+  requests`, so the "Version Packages" PR never appears and Task 13's publish path is blocked. The
+  repo-level toggle cannot override it (the API answers 409, "the organization does not allow…").
+  Fix in **Miambi org settings → Actions → General → Workflow permissions → allow GitHub Actions to
+  create and approve pull requests**. The workflow already force-pushed the `changeset-release/main`
+  branch, so the PR should appear on the next push to `main` once the policy allows it.
