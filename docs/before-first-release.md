@@ -30,7 +30,14 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
 - **Status:** Apple Developer Program organization enrollment submitted 2026-09-06; Apple asked for
   further information, which Bilal supplied — still awaiting Apple's authority verification as of
-  2026-09-14. Google Play organization account created 2026-09-06 (Miambi, organization account).
+  2026-09-14. Google Play organization account created 2026-09-06 (Miambi, organization account) —
+  but on 2026-09-14 the Console showed **no API access page** at any nav path or deep link, which
+  points at Play's org verification also still being pending (D-U-N-S/authority, same as Apple).
+  Check the Console dashboard for a verification banner before hunting for that page again: without
+  it there is no way to create the Play service account, and `eas submit` cannot do an Android
+  upload. Note this blocks nothing today — Google requires the first AAB of a new app to be
+  uploaded through the Console by hand regardless, so the service account only matters from the
+  second release onward.
 - **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
 - **Expo:** project `@miambi/shellbell` (`4a002a82-…`) under the `miambi` organization; `owner:
   "miambi"` in `apps/mobile/app.json`. (A first project under the personal account was deleted.)
