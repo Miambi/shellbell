@@ -73,7 +73,17 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
 
 ## Known follow-ups (not placeholders, but not yet done)
 
-- **Herdr spike fixture swap.** `apps/agent/test/fixtures/herdr-*.json` are synthetic fixtures
-  captured without a real Herdr server. `pnpm -F shellbell spike:herdr` (Plan 04b Task 7, still
-  pending) needs to run against a real Herdr server to capture real fixtures and write
-  `docs/spike-herdr.md`, which does not exist yet.
+- **Herdr fixtures are real except for three panes.** Plan 04b Task 7 ran on 2026-09-06 against a
+  live Herdr 0.8.2 and `docs/spike-herdr.md` records it, so `apps/agent/test/fixtures/herdr-*.json`
+  are real captures now. The spike only had one workspace with one plain shell pane, so the
+  multi-workspace and `blocked`-agent shapes in `herdr-session-snapshot.json` are still
+  hand-authored — they carry `"_synthetic": true`. A spike run with a second workspace and a
+  blocked agent would let those be replaced with real ones.
+- **Restrict the Firebase Android API key.** `apps/mobile/google-services.json` is committed by
+  design (client config that ships inside the APK) and the repo is public as of 2026-09-14, so the
+  key `AIzaSyB-XXsN…` is now readable by anyone. It is not a secret, but it must be restricted in
+  Google Cloud to the `dev.bilalahmad.shellbell` Android app so it cannot be used from elsewhere.
+- **GitHub Actions was billing-blocked while the repo was private.** Runs on 2026-09-14 failed with
+  "recent account payments have failed or spending limit needs to be increased" before any step
+  started. Public repos get Actions minutes free, so going public is the fix; confirm the next push
+  actually runs CI before relying on the `release-agent` workflow in Task 13.

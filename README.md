@@ -2,6 +2,9 @@
 
 Your terminal rings. You answer.
 
+**[MIT licensed](LICENSE)** · the Shellbell name and logo are a trademark ([`TRADEMARK.md`](TRADEMARK.md)) ·
+free to use — if it's useful to you, [buy me a coffee](https://buymeacoffee.com/bilaldev) ☕
+
 Shellbell mirrors your Mac's terminal sessions to your phone, so you can see and type into
 iTerm2, tmux and Herdr panes from anywhere. It rings you the moment a command finishes, a program
 goes quiet, or a coding agent is blocked waiting on you, and lets you type straight back. There
@@ -53,5 +56,5 @@ Play Console account ($25 once), and the `shellbell.dev` domain.
 MIT — see [`LICENSE`](LICENSE). The Shellbell name and logo are a trademark; see
 [`TRADEMARK.md`](TRADEMARK.md).
 
-If Shellbell is useful to you, consider
-[buying the author a coffee](https://buymeacoffee.com/bilaldev).
+Shellbell is free and the author pays to run it, so if it saves you a trip back to your desk,
+[buy me a coffee](https://buymeacoffee.com/bilaldev).
