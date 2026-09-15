@@ -7,7 +7,7 @@ describe("qr payload", () => {
   const id = generateIdentity();
   const good = {
     v: 1 as const,
-    r: "wss://relay.shellbell.app",
+    r: "wss://relay.shellbell.dev",
     c: fingerprint(id.ed25519.pub),
     e: toBase64Url(id.ed25519.pub),
     n: "MBP",
@@ -24,18 +24,18 @@ describe("qr payload", () => {
     expect(
       parseQr(encodeQr({ ...good, r: "ws://localhost:8787" }), { allowInsecure: true }).r,
     ).toBe("ws://localhost:8787");
-    expect(() => parseQr(encodeQr({ ...good, r: "wss://relay.shellbell.app/" }))).toThrow(
+    expect(() => parseQr(encodeQr({ ...good, r: "wss://relay.shellbell.dev/" }))).toThrow(
       /malformed/,
     );
     expect(() => parseQr(JSON.stringify({ ...good, v: 2 }))).toThrow(/malformed/);
     expect(() => parseQr("not json")).toThrow(/malformed/);
-    expect(() => parseQr(encodeQr({ ...good, r: "wss://user:pass@relay.shellbell.app" }))).toThrow(
+    expect(() => parseQr(encodeQr({ ...good, r: "wss://user:pass@relay.shellbell.dev" }))).toThrow(
       /malformed/,
     );
   });
   it("builds the socket url", () => {
-    expect(relayWsUrl("wss://relay.shellbell.app", good.c)).toBe(
-      `wss://relay.shellbell.app/ws/${good.c}`,
+    expect(relayWsUrl("wss://relay.shellbell.dev", good.c)).toBe(
+      `wss://relay.shellbell.dev/ws/${good.c}`,
     );
   });
 });

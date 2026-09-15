@@ -135,7 +135,7 @@ These were decided in conversation and are not open.
 | 7 | Identity | **Device keypairs, no accounts** | Honest match for E2E; removes auth UI, deletion flows, support |
 | 8 | Agent language | **Node/TypeScript** with a `TerminalBackend` interface | One language across agent/relay/app; terminals are plugins |
 | 8b | v1 backends | **iTerm2 + tmux**, both shipped and run simultaneously | tmux covers every terminal without an API and Linux — the competitor is iTerm2-only |
-| 9 | Name | **Shellbell** (`shellbell.app` / `shellbell.dev` available as of 2026-09-02) | BEL (`\a`, Ctrl‑G) is the terminal's own "attention" signal |
+| 9 | Name | **Shellbell** (`shellbell.dev`, bought 2026-09-14; Plan 06 errata: `shellbell.app` was the planned domain but priced well above the §10 budget, so the relay is `relay.shellbell.dev`) | BEL (`\a`, Ctrl‑G) is the terminal's own "attention" signal |
 | 10 | Budget | Domain ≤ ~$15/yr, Cloudflare free tier. **Apple Developer Program $99/yr is unavoidable** for App Store/TestFlight; Google Play $25 once | Stated and accepted |
 | 11 | License | **MIT** code + `TRADEMARK.md` reserving name/logo | Forks welcome, can't ship as "Shellbell" on stores |
 | 12 | Pairing confirmation | **A human presses Enter on the Mac** for every pairing (v1) | A photographed QR must not grant shell access (review finding) |
@@ -401,7 +401,7 @@ pairings) generates `code = randomBytes(16)` and `gate = randomBytes(16)`, sends
 QR encoding the JSON:
 
 ```json
-{ "v": 1, "r": "wss://relay.shellbell.app", "c": "<fp_c>", "e": "<base64url E_pk_c>",
+{ "v": 1, "r": "wss://relay.shellbell.dev", "c": "<fp_c>", "e": "<base64url E_pk_c>",
   "n": "Bilal's MBP", "p": "<base64url code>", "g": "<base64url gate>" }
 ```
 
@@ -724,7 +724,7 @@ Global flags: `--relay <url>`, `--json` (for `status`/`devices`), `--verbose`.
 ```
   Shellbell agent v0.1.0
   Computer   Bilal's MBP  (k7q3-m2xw)
-  Relay      wss://relay.shellbell.app   connected
+  Relay      wss://relay.shellbell.dev   connected
   iTerm2     connected · 7 sessions
   tmux       detecting…            → becomes "connected · N panes" or "not running"
   herdr      detecting…            → becomes "connected · N panes" or "not running (optional)"
@@ -758,7 +758,7 @@ If iTerm2's API is disabled, `start` prints:
 | `agent.sock` | 0600 | Unix socket for `pair`/`status` when a daemon is running |
 | `agent.pid` | 0600 | PID of the running agent |
 
-Defaults: `relayUrl = "wss://relay.shellbell.app"`, `computerName = os.hostname()` with
+Defaults: `relayUrl = "wss://relay.shellbell.dev"`, `computerName = os.hostname()` with
 `.local` stripped, `accent` = first unused entry in the 8-color palette (10.9).
 
 ### 8.3 `Pairing` record
@@ -1454,7 +1454,7 @@ push to the official app without the author's token.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ComputerDO"] }],
   "observability": { "enabled": true },
   "vars": { "MIN_FRAME_MS": "125" },
-  "routes": [{ "pattern": "relay.shellbell.app", "custom_domain": true }]
+  "routes": [{ "pattern": "relay.shellbell.dev", "custom_domain": true }]
 }
 ```
 
@@ -1903,7 +1903,7 @@ runs with `--relay ws://localhost:8787`; a dev build of the app scans the printe
   `apps/mobile`. Relay tests run under the workers pool.
 - **Docs:** `README.md`, `docs/self-hosting.md`, `docs/protocol.md` (generated from the
   zod schemas), `PRIVACY.md`, `SECURITY.md`, `CONTRIBUTING.md`.
-- **Costs:** Cloudflare $0; Expo $0; domain `shellbell.app` ≈ $14/yr; Apple $99/yr;
+- **Costs:** Cloudflare $0; Expo $0; domain `shellbell.dev` ≈ $14/yr; Apple $99/yr;
   Google $25 once.
 
 ---

@@ -5,7 +5,7 @@ The relay is a single Cloudflare Worker with one Durable Object class. It fits t
 1. `git clone https://github.com/Miambi/shellbell && cd shellbell && pnpm install` (or clone your fork)
 2. `cd apps/relay && pnpm wrangler login`
 3. `pnpm wrangler deploy` → note the `https://shellbell-relay.<account>.workers.dev` URL.
-   Ignore `wrangler.hosted.jsonc`; it binds the author's `relay.shellbell.app` domain and is used only by CI.
+   Ignore `wrangler.hosted.jsonc`; it binds the author's `relay.shellbell.dev` domain and is used only by CI.
 4. (Optional) `pnpm wrangler secret put EXPO_ACCESS_TOKEN` with an Expo access token. Not required:
    the official Shellbell app's Expo project keeps "enhanced push security" off, so your relay can
    send pushes to it without a token.

@@ -28,8 +28,9 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 - **Store accounts: Miambi** (registered entity). Apple Developer Program as an *Organization*
   membership and a Google Play *organization* account, both under `bilal@miambi.ai`; both need
   Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
-- **Status:** Apple Developer Program organization enrollment submitted 2026-09-06 (awaiting Apple's
-  authority verification); Google Play organization account created 2026-09-06 (Miambi, organization account).
+- **Status:** Apple Developer Program organization enrollment submitted 2026-09-06; Apple asked for
+  further information, which Bilal supplied — still awaiting Apple's authority verification as of
+  2026-09-14. Google Play organization account created 2026-09-06 (Miambi, organization account).
 - **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
 - **Expo:** project `@miambi/shellbell` (`4a002a82-…`) under the `miambi` organization; `owner:
   "miambi"` in `apps/mobile/app.json`. (A first project under the personal account was deleted.)
@@ -45,8 +46,10 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   Android Firebase project `shellbell-1c407` and `apps/mobile/google-services.json` (**done 2026-09-06**, committed — it is client config that ships inside the APK; restrict its API key to the Android app in Google Cloud) and the FCM V1 service-account key (never committed; uploaded to EAS via `eas credentials` on 2026-09-06 — **Android push credentials done**; the Google Cloud org policy `iam.disableServiceAccountKeyCreation` had to be overridden for project `shellbell-1c407` to create the key);
   confirm "enhanced push security" is off; build and install development builds on both test
   devices.
-- **Task 10 — Domain, hosted relay deploy, secrets, WAF.** Buy `shellbell.app` on the `miambi`
-  Cloudflare account; first `wrangler deploy --config wrangler.hosted.jsonc`; the
+- **Task 10 — Domain, hosted relay deploy, secrets, WAF.** Domain **done 2026-09-14** —
+  `shellbell.dev` bought on the `miambi` Cloudflare account (`shellbell.app` was the planned domain
+  but was priced well above budget); code, config and docs now say `relay.shellbell.dev`.
+  Remaining: first `wrangler deploy --config wrangler.hosted.jsonc`; the
   `EXPO_ACCESS_TOKEN` Worker secret; a Cloudflare rate-limiting rule on `/ws/*`; the
   `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` GitHub Actions secrets; tag `relay-v0.1.0`.
 - **Task 11 — Device end-to-end ring test.** On real hardware, with Tasks 1/9/10 done: prompt,

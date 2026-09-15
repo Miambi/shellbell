@@ -46,7 +46,7 @@ See [`PRIVACY.md`](PRIVACY.md) for the full data-handling story.
 ## Costs
 
 Shellbell is free to use. The author pays for it: an Apple Developer account ($99/yr), a Google
-Play Console account ($25 once), and the `shellbell.app` domain.
+Play Console account ($25 once), and the `shellbell.dev` domain.
 
 ## License
 

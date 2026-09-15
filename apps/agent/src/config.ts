@@ -14,7 +14,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-export const DEFAULT_RELAY = "wss://relay.shellbell.app";
+export const DEFAULT_RELAY = "wss://relay.shellbell.dev";
 export const ACCENTS = [
   "emerald",
   "blue",

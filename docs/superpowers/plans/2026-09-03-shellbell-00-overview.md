@@ -28,7 +28,7 @@ Before Plan 01 Task 2: iTerm2 must be running with the Python API enabled (it is
 | Apple Developer Program | $99 / year | TestFlight + App Store, APNs |
 | Google Play Console | $25 once | internal testing + Play Store, FCM via Firebase (free) |
 | npm | free | publishing `shellbell` |
-| Domain `shellbell.app` | ~$14 / year | `relay.shellbell.app` |
+| Domain `shellbell.dev` | ~$14 / year | `relay.shellbell.dev` |
 
 ## Decisions you should not relitigate mid-execution
 

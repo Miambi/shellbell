@@ -9,7 +9,7 @@
 
 **Goal:** Push notifications ring the phone when a command finishes, a program goes quiet, or a
 coding agent is blocked; tapping one lands on the right session. The hosted relay runs at
-`relay.shellbell.app`, the agent is on npm as `shellbell`, the app ships to TestFlight and Google
+`relay.shellbell.dev`, the agent is on npm as `shellbell`, the app ships to TestFlight and Google
 Play internal testing, and the docs let a stranger set it up.
 
 **Architecture:** No new components. This plan finishes `expo-notifications` in the app (permission
@@ -46,7 +46,7 @@ rewritten under ruling **R62**. One line per change, tagged with the scan's row 
   `notify`. No agent-side ring work in this plan.
 - **[S6]** The relay already ships the `blocked` push body and `DeviceNotRegistered` handling
   (`push.ts:29-49,73-80`), with tests. No relay push work in this plan.
-- **[S13]** `DEFAULT_RELAY` is already `wss://relay.shellbell.app`. Confirm-only.
+- **[S13]** `DEFAULT_RELAY` is already `wss://relay.shellbell.dev`. Confirm-only.
 
 **Defects fixed in the plan text**
 
@@ -1233,7 +1233,7 @@ Record anything you could not verify without a device in the Task 12 checklist r
 ## Task 5 `[AGENT]`: Hosted-relay config split (spec §9.3)
 
 Spec §9.3 puts the custom-domain `routes` in `wrangler.jsonc`; the shipped file deliberately keeps
-it as a comment so a self-hoster can `wrangler deploy` a clone without owning `shellbell.app`
+it as a comment so a self-hoster can `wrangler deploy` a clone without owning `shellbell.dev`
 (`docs/self-hosting.md` step 3 depends on that). **Ruling R62.3:** keep both — a separate hosted
 config, used only by CI.
 
@@ -1246,7 +1246,7 @@ config, used only by CI.
 ```jsonc
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // The HOSTED relay only (relay.shellbell.app). Self-hosters use `wrangler.jsonc`, which is
+  // The HOSTED relay only (relay.shellbell.dev). Self-hosters use `wrangler.jsonc`, which is
   // identical minus `routes`. Keep the two files in sync by hand — a self-hoster who deploys with
   // this file would try to claim a domain they do not own.
   "name": "shellbell-relay",
@@ -1258,7 +1258,7 @@ config, used only by CI.
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ComputerDO"] }],
   "observability": { "enabled": true },
   "vars": { "MIN_FRAME_MS": "125" },
-  "routes": [{ "pattern": "relay.shellbell.app", "custom_domain": true }]
+  "routes": [{ "pattern": "relay.shellbell.dev", "custom_domain": true }]
 }
 ```
 
@@ -1274,13 +1274,13 @@ Leave the trigger (`tags: ["relay-v*"]`), the test step, and both `CLOUDFLARE_*`
 
 ```jsonc
   // Self-hosted default: no `routes`, so `wrangler deploy` publishes to
-  // https://shellbell-relay.<account>.workers.dev. The hosted relay (relay.shellbell.app) is
+  // https://shellbell-relay.<account>.workers.dev. The hosted relay (relay.shellbell.dev) is
   // deployed from wrangler.hosted.jsonc by .github/workflows/deploy-relay.yml — keep the two in
   // sync when either changes.
 ```
 
 - [ ] **Step 4: `docs/self-hosting.md`** — after step 3, add one line: "Ignore
-  `wrangler.hosted.jsonc`; it binds the author's `relay.shellbell.app` domain and is used only by
+  `wrangler.hosted.jsonc`; it binds the author's `relay.shellbell.dev` domain and is used only by
   CI."
 
 - [ ] **Step 5: verify without deploying.** `pnpm -F @shellbell/relay exec wrangler deploy --config wrangler.hosted.jsonc --dry-run --outdir .wrangler/dry`
@@ -1737,7 +1737,7 @@ resolves the `miambi` profile for this directory (`docs/self-hosting.md` § Mult
 accounts) — confirm with `pnpm -F @shellbell/relay exec wrangler whoami` before deploying, and
 check the output says `Active profile: miambi`.
 
-- [ ] **Step 1: buy `shellbell.app`** (Cloudflare Registrar if available, otherwise any registrar
+- [ ] **Step 1: buy `shellbell.dev`** (Cloudflare Registrar if available, otherwise any registrar
   with nameservers pointed at Cloudflare) and add the zone to the `miambi` account. Expected: the
   zone shows **Active** in the dashboard.
 
@@ -1747,10 +1747,10 @@ check the output says `Active profile: miambi`.
 cd apps/relay
 pnpm wrangler whoami          # must print: Active profile: miambi
 pnpm wrangler deploy --config wrangler.hosted.jsonc
-curl -s https://relay.shellbell.app/healthz
+curl -s https://relay.shellbell.dev/healthz
 ```
 
-Expected: the last command prints `ok`. Also expect `curl -s https://relay.shellbell.app/` to
+Expected: the last command prints `ok`. Also expect `curl -s https://relay.shellbell.dev/` to
 return JSON `{"name":"shellbell-relay",...}` (spec §9.1).
 
 - [ ] **Step 3: the Expo access token secret.** expo.dev → Account settings → Access tokens → create
@@ -1765,7 +1765,7 @@ Paste at the prompt. **Never** echo the token or put it in a file. Expected: "Su
 secret EXPO_ACCESS_TOKEN".
 
 - [ ] **Step 4: the rate-limiting rule** (spec §9.1/§9.4). Cloudflare dashboard → the
-  `shellbell.app` zone → Security → WAF → Rate limiting rules → Create:
+  `shellbell.dev` zone → Security → WAF → Rate limiting rules → Create:
   name `shellbell-ws`, expression `http.request.uri.path contains "/ws/"`, 30 requests per 1 minute
   per IP, action **Block** for 1 minute. (The free plan allows exactly one rule.) Expected: the rule
   shows as enabled.
@@ -1779,16 +1779,16 @@ git tag relay-v0.1.0 && git push origin relay-v0.1.0
 ```
 
 Expected: the `deploy-relay` workflow runs `wrangler deploy --config wrangler.hosted.jsonc` and goes
-green; `curl https://relay.shellbell.app/healthz` still prints `ok`.
+green; `curl https://relay.shellbell.dev/healthz` still prints `ok`.
 
 - [ ] **Step 6: confirm the agent default.** `apps/agent/src/config.ts`'s `DEFAULT_RELAY` is already
-  `wss://relay.shellbell.app` — no change. Verify end to end:
+  `wss://relay.shellbell.dev` — no change. Verify end to end:
 
 ```
 pnpm -F shellbell build && node apps/agent/dist/cli.js doctor
 ```
 
-Expected: the `relay` line reads ✓ with detail `wss://relay.shellbell.app`.
+Expected: the `relay` line reads ✓ with detail `wss://relay.shellbell.dev`.
 
 ---
 

@@ -68,7 +68,7 @@ describe("tailFile", () => {
 
 describe("validateRelayUrl", () => {
   it("accepts wss:// unconditionally", () => {
-    expect(validateRelayUrl("wss://relay.shellbell.app", false)).toBeNull();
+    expect(validateRelayUrl("wss://relay.shellbell.dev", false)).toBeNull();
   });
   it("rejects ws:// unless insecure is allowed", () => {
     expect(validateRelayUrl("ws://localhost:8787", false)).toMatch(/insecure/);
@@ -77,7 +77,7 @@ describe("validateRelayUrl", () => {
     expect(validateRelayUrl("ws://localhost:8787", true)).toBeNull();
   });
   it("rejects other schemes", () => {
-    expect(validateRelayUrl("http://relay.shellbell.app", false)).toMatch(/wss:\/\//);
+    expect(validateRelayUrl("http://relay.shellbell.dev", false)).toMatch(/wss:\/\//);
   });
   it("rejects unparseable urls", () => {
     expect(validateRelayUrl("not a url", false)).toMatch(/valid URL/);
