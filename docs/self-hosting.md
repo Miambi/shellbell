@@ -10,7 +10,9 @@ The relay is a single Cloudflare Worker with one Durable Object class. It fits t
    the official Shellbell app's Expo project keeps "enhanced push security" off, so your relay can
    send pushes to it without a token.
 5. (Recommended) In the Cloudflare dashboard, add a rate-limiting rule for your Worker:
-   path starts with `/ws/`, 30 requests per minute per IP.
+   path starts with `/ws/`, 30 requests per minute per IP. On the **free plan** the period is
+   fixed at 10 seconds, so enter **5 requests / 10 s per IP, block for 10 s** — the same
+   sustained rate. Pro and above can use the 1-minute period directly.
 6. On each Mac: `shellbell config set relay wss://shellbell-relay.<account>.workers.dev`, then
    `shellbell pair`. The QR carries the relay URL, so phones need no configuration.
 

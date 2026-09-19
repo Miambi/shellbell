@@ -1772,6 +1772,9 @@ secret EXPO_ACCESS_TOKEN".
   name `shellbell-ws`, expression `http.request.uri.path contains "/ws/"`, 30 requests per 1 minute
   per IP, action **Block** for 1 minute. (The free plan allows exactly one rule.) Expected: the rule
   shows as enabled.
+  (Errata 2026-09-19: the 1-minute period is Pro and above. On free, both the counting period and
+  the mitigation timeout are fixed at 10 s, so the rule is **5 requests / 10 s per IP, block for
+  10 s** — same sustained rate. See spec §9.1.)
 
 - [ ] **Step 5: CI deploy secrets.** GitHub → the repo → Settings → Secrets and variables →
   Actions: add `CLOUDFLARE_API_TOKEN` (Workers Scripts: Edit on the `miambi` account) and

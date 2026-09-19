@@ -1364,7 +1364,11 @@ verified messages). Say "works with Herdr"; no Herdr trademark use in the produc
 
 No CORS. No request bodies. A Cloudflare **rate-limiting rule** on `/ws/*` (free plan
 includes one rule) caps upgrades per IP at 30/minute — configured in the dashboard and
-documented in `docs/self-hosting.md`.
+documented in `docs/self-hosting.md`. (Plan 06 errata: a 1-minute period is Pro and above;
+the free plan fixes both the counting period and the mitigation timeout at **10 s**, so the
+rule is written as **5 requests / 10 s per IP, block for 10 s** — the same 30/minute
+sustained, stricter on bursts. Free also restricts counting to IP and rule expressions to
+Path and Verified Bot, which this rule already satisfies.)
 
 ### 9.2 `ComputerDO` (`src/computer-do.ts`)
 
