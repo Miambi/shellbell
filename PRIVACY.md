@@ -65,3 +65,11 @@ sessions.
 If you run your own relay, none of your data ever reaches the author's infrastructure — see
 `docs/self-hosting.md`. This document still describes exactly what your own relay stores about
 your devices.
+
+## Contact
+
+Questions about privacy, or a request to delete what the hosted relay holds for your computer:
+**support@shellbell.dev**.
+
+To report a security vulnerability, use **security@shellbell.dev** instead — see
+[`SECURITY.md`](SECURITY.md).
