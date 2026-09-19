@@ -106,14 +106,25 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   `Authorization` header when it is set, and enhanced push security is off).
   Tagged `relay-v0.1.0`; `deploy-relay.yml` redeployed from CI (version `6783d329-…`) and
   re-asserted the custom domain, so the release path is proven end to end.
-  **Only one item left:** a Cloudflare rate-limiting rule on `/ws/*` (30 req/min per IP). Dashboard
-  work — the local wrangler OAuth token is `zone (read)` only and cannot write rulesets.
+  **Task 10 is complete as of 2026-09-19.** The last item, the Cloudflare rate-limiting rule on
+  `/ws/*`, was created in the dashboard (the local wrangler OAuth token is `zone (read)` only and
+  cannot write rulesets). It is `shellbell-ws`: URI Path *starts with* `/ws/`, **5 requests / 10 s
+  per IP, block for 10 s** — not the 30/min the spec first called for, because a 1-minute period is
+  Pro and above; see the spec §9.1 errata. Same sustained rate, stricter on bursts.
 - **Task 11 — Device end-to-end ring test.** On real hardware, with Tasks 1/9/10 done: prompt,
   idle, blocked and attentive-suppression scenarios, recorded in `docs/e2e-ring.md`; update
   `apps/mobile/QA.md`'s ring line to point at it.
 - **Task 12 — Visual design and device QA pass.** Walk every screen on an OLED iPhone and an
   Android device (accent colors, motion, icon/splash, accessibility); run the full
   `apps/mobile/QA.md` checklist on both; fill in `docs/spike-render.md`.
+  **Constraint (2026-09-19): there is no iPhone.** The registered Apple device is an **iPad**
+  (`00008103-001A09103EA3001E`), and iPhone coverage is planned on the simulator. Two consequences,
+  neither yet resolved:
+  - Task 12's OLED pass cannot be done as written. An iPad is not OLED, so true-black backgrounds
+    and accent behaviour on an OLED panel go unverified until hardware is borrowed.
+  - Task 11's iOS half may not be possible on a simulator at all: Expo push tokens have
+    historically required a physical device (`Device.isDevice`). **Verify before relying on it.**
+    The Android device covers the ring test end to end, so this is not blocking.
 - **Task 13 — First release.** Resolve every placeholder above and re-run the grep; create the
   `NPM_TOKEN` secret and publish `shellbell` to npm via the `release-agent` workflow; EAS
   production builds and submission to TestFlight / Play internal testing; store metadata; tag

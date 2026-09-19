@@ -123,6 +123,21 @@ sync by hand.
 - **`apps/mobile/google-services.json` is committed on purpose** — it is client config that ships
   inside the APK. Real credentials (the FCM service-account key, the Play service-account key at
   `apps/mobile/play-service-account.json`) are gitignored and must stay that way.
+- **EAS Build does not use this repo's pnpm unless told to.** The builder image ships its own pnpm
+  (11.9.0 as of 2026-09-19) and ignores `package.json`'s `packageManager` field, so a lockfile
+  written by a newer pnpm makes `pnpm install --frozen-lockfile` die in `INSTALL_DEPENDENCIES`
+  with `Cannot use 'in' operator to search for 'integrity' in undefined` — a crash inside pnpm, not
+  a corrupt lockfile. `eas.json`'s `base` profile sets `corepack: true` so the pinned version is
+  used; every build profile must `extends` it, since `corepack` is per-profile and all of them run
+  the same install phase. **Local `pnpm test`/CI cannot catch a regression here** — both run the
+  pinned pnpm. To reproduce a builder failure, run the builder's version against a clean checkout:
+  `git archive HEAD | tar -x -C $TMP && cd $TMP && npx pnpm@<builder-version> install
+  --frozen-lockfile --store-dir $TMP/.store`.
+- **EAS build logs are Brotli-encoded** despite the `.txt` URL, so `gunzip` fails and `curl
+  --compressed` may not handle it. Decode with
+  `node -e "require('fs').writeFileSync('log.txt',require('zlib').brotliDecompressSync(require('fs').readFileSync('raw.bin')))"`,
+  then parse the JSON-per-line records. The CLI's `--json` output truncates the real error;
+  the log file has it.
 - `.superpowers/` is gitignored agent working state; `docs/superpowers/` is the committed record.
 
 ## Release state — read this before touching anything release-related
