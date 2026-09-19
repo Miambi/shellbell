@@ -2,7 +2,10 @@
 
 Everything below must be resolved before Task 13 publishes anything — npm versions and store
 builds cannot be taken back. Re-run this grep (Task 8 Step 7's search, copied verbatim); once
-every row below is resolved it should return nothing but this file itself:
+every row below is resolved it should return only **this file** and
+**`docs/superpowers/plans/2026-09-03-shellbell-06-rings-release.md`** — the plan quotes the
+`eas.json` template and its own copy of this table, both historical record rather than live
+placeholders. Any hit in a `.json`/`.jsonc` outside those two is a real one:
 
 ```
 grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|REPLACE_APPLE_TEAM_ID\|REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH\|before-first-release\|YYYY-MM-DD" \
@@ -16,7 +19,7 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
 |---|---|---|---|
 | ~~`REPLACE_AFTER_eas_init`~~ | `apps/mobile/app.json` | **done 2026-09-06** — `eas init` linked project `4a002a82-…` (`@miambi/shellbell`) | 9 |
 | ~~`REPLACE_SECURITY_CONTACT`~~ | `SECURITY.md` | **done 2026-09-14** — `security@shellbell.dev`, a Cloudflare Email Routing catch-all on `shellbell.dev` forwarding to `bilal@miambi.ai`; delivery tested end to end, not just configured | 13 |
-| `REPLACE_APPLE_ID_EMAIL` / `REPLACE_ASC_APP_ID` / `REPLACE_APPLE_TEAM_ID` | `apps/mobile/eas.json` | App Store Connect | 13 |
+| ~~`REPLACE_APPLE_ID_EMAIL`~~ / ~~`REPLACE_ASC_APP_ID`~~ / ~~`REPLACE_APPLE_TEAM_ID`~~ | `apps/mobile/eas.json` | **done 2026-09-19** — `bilal@miambi.ai`, Team ID `2CW9DK45CV`, `ascAppId` `6813929475` (listing "Shellbell Terminal", SKU `dev.bilalahmad.shellbell`) | 13 |
 | ~~`REPLACE_PLAY_SERVICE_ACCOUNT_JSON_PATH`~~ | `apps/mobile/eas.json` | **done 2026-09-14** — points at `./play-service-account.json`, gitignored. The key itself is not generated yet; only needed when `eas submit` automates the Android upload, not for a hand-uploaded first build | 13 |
 | `docs/demo.gif` | `README.md` | screen recording | 13 |
 | every blank (`__`) | `docs/spike-render.md` | on-device render spike (carried from Plan 05) | 12 |
@@ -29,8 +32,15 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   membership and a Google Play *organization* account, both under `bilal@miambi.ai`; both need
   Miambi's D-U-N-S number. Seller name shown in the stores: Miambi.
 - **Status:** Apple Developer Program organization enrollment submitted 2026-09-06; Apple asked for
-  further information, which Bilal supplied — still awaiting Apple's authority verification as of
-  2026-09-14. **Google Play is further along than Apple:** the Miambi organization account
+  further information, which Bilal supplied; verification cleared and the Organization membership
+  was **set up 2026-09-19**, the $99 fee paid and posted the same day. **Team ID `2CW9DK45CV`**,
+  Apple ID `bilal@miambi.ai`; both are now in `apps/mobile/eas.json`. The App ID for
+  `dev.bilalahmad.shellbell` was registered with **Push Notifications** as its only capability
+  (nothing else the app does needs one — the camera is an Info.plist usage string, `expo-secure-store`
+  uses the App ID's default keychain group, and spec §11.3 rules out background modes) and **no
+  account-level capability requests**. Still open on iOS: `eas credentials -p ios` for the APNs key,
+  and the App Store Connect app record that yields `ascAppId`.
+  **Google Play:** the Miambi organization account
   (Account ID `9220450949259514576`) is live and the `shellbell` app record already exists as a
   **Draft** for `dev.bilalahmad.shellbell`, created 2026-09-07.
   **API access is not available on this account** (as of 2026-09-15), so the Play service-account
@@ -53,6 +63,24 @@ grep -rn "REPLACE_SECURITY_CONTACT\|REPLACE_APPLE_ID_EMAIL\|REPLACE_ASC_APP_ID\|
   through the Console by hand, so the Play service-account key only matters from the second release
   onward.
 - **Bundle id / package stays `dev.bilalahmad.shellbell`** (Bilal's call; permanent once shipped).
+- **Public support contact is `support@shellbell.dev`** (2026-09-19) — used for the Play listing's
+  required support email, the App Store listing, and `PRIVACY.md`. It needs no setup: the
+  `shellbell.dev` Email Routing catch-all already forwards every address to `bilal@miambi.ai`, and
+  Bilal will re-point it when he wants to. Chosen over a personal address (`self@bilalahmad.dev`)
+  so that the public contact matches `SECURITY.md`'s `security@shellbell.dev` — for an
+  end-to-end-encrypted app, a single project-owned domain is part of what users verify, and a
+  store listing outlives any one person's mailbox.
+  **The App Review Information contact is separate and private** (only Apple's reviewer sees it);
+  use whichever address Bilal reads fastest, since an unread rejection is expensive.
+- **App Store listing name is `Shellbell Terminal`** (2026-09-19). Plain "Shellbell" is rejected as
+  taken — [Shell Bell](https://apps.apple.com/us/app/shell-bell/id6754162416), an unrelated egg-timer
+  app; Apple's uniqueness check folds the space. This is the *listing* name only: `app.json`'s
+  `"name": "Shellbell"` becomes `CFBundleDisplayName`, so the home-screen name is still **Shellbell**
+  and `app.json` needs no change. "Terminal" also adds a search keyword the invented word lacks.
+  Apple's trademark-claim route was considered and **rejected** — `TRADEMARK.md` asserts only
+  common-law rights, the other app is live rather than a dormant name reservation, and a claim would
+  take weeks to probably fail while blocking 0.1.0. Do not re-raise.
+  ASC record created 2026-09-19 with SKU `dev.bilalahmad.shellbell` (private, account-scoped).
 - **Expo:** project `@miambi/shellbell` (`4a002a82-…`) under the `miambi` organization; `owner:
   "miambi"` in `apps/mobile/app.json`. (A first project under the personal account was deleted.)
 - **Builds:** EAS project is required for Expo push; EAS Build/Submit are optional (`eas build
