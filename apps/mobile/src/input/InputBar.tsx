@@ -9,6 +9,7 @@ import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
 import { Bar } from "../ui/Bar";
 import { fireInput } from "./fireInput";
+import { clampInputHeight, INPUT_MIN_HEIGHT } from "./height";
 import { lineExceedsLimit } from "./limits";
 import { preparePaste } from "./paste";
 import { QuickKeys } from "./QuickKeys";
@@ -33,6 +34,7 @@ export function InputBar({
   const [text, setText] = useState("");
   const [rawText, setRawText] = useState("");
   const [histIdx, setHistIdx] = useState(-1);
+  const [inputHeight, setInputHeight] = useState(INPUT_MIN_HEIGHT);
   const rawPrev = useRef("");
 
   const conn = () => connectionManager.get(fp);
@@ -123,6 +125,8 @@ export function InputBar({
     sendLine(text);
     setText("");
     setHistIdx(-1);
+    // The field is empty again, so collapse the bar without waiting for a layout pass.
+    setInputHeight(INPUT_MIN_HEIGHT);
   };
 
   return (
@@ -149,7 +153,9 @@ export function InputBar({
           style={{
             flex: 1,
             flexDirection: "row",
-            alignItems: "center",
+            // Multi-line input grows downward, so the `$` and the history arrow sit at the bottom
+            // with the last line rather than floating beside the middle of the text.
+            alignItems: raw ? "center" : "flex-end",
             backgroundColor: tokens.surface2,
             borderRadius: 16,
             borderWidth: 1,
@@ -157,7 +163,16 @@ export function InputBar({
             paddingLeft: 12,
           }}
         >
-          <Text style={{ color: tokens.textMuted, fontWeight: "700" }}>{raw ? "»" : "$"}</Text>
+          <Text
+            style={{
+              color: tokens.textMuted,
+              fontWeight: "700",
+              // Keeps the prompt glyph on the baseline of the last line as the field grows.
+              lineHeight: raw ? undefined : INPUT_MIN_HEIGHT,
+            }}
+          >
+            {raw ? "»" : "$"}
+          </Text>
           <TextInput
             value={raw ? rawText : text}
             onChangeText={
@@ -171,6 +186,20 @@ export function InputBar({
             onKeyPress={raw ? (e) => onRawKeyPress(e.nativeEvent.key) : undefined}
             onSubmitEditing={raw ? submitRaw : submitLine}
             blurOnSubmit={false}
+            // Line mode wraps to at most three lines so a long command stays readable while it is
+            // typed. Raw mode stays single-line: it forwards keystrokes as they happen, so there
+            // is nothing to wrap and a growing box would only shrink the terminal.
+            multiline={!raw}
+            // Return still SENDS rather than inserting a newline, which is what `multiline`
+            // does by default. Multi-line composition is a separate, unsettled question: the
+            // tmux backend presses Enter between lines (`tmux/backend.ts`), so a multi-line body
+            // would submit once per line inside a coding agent.
+            submitBehavior={raw ? undefined : "submit"}
+            onContentSizeChange={
+              raw
+                ? undefined
+                : (e) => setInputHeight(clampInputHeight(e.nativeEvent.contentSize.height))
+            }
             placeholder={raw ? "raw keystrokes (no CJK IME)" : "command…"}
             placeholderTextColor={tokens.textFaint}
             autoCorrect={false}
@@ -188,6 +217,8 @@ export function InputBar({
               paddingVertical: 10,
               paddingHorizontal: 8,
               fontSize: 15,
+              height: raw ? undefined : inputHeight,
+              textAlignVertical: "center",
             }}
           />
           {raw ? null : (

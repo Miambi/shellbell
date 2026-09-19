@@ -85,7 +85,10 @@ export default function Session() {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      // Android needs an explicit behavior. `undefined` relies on the OS resizing the window for
+      // the keyboard, which edge-to-edge (the default since SDK 54 / RN 0.81) no longer does — so
+      // the keyboard covered the terminal and you could not see what you were typing.
+      behavior={Platform.OS === "ios" ? "padding" : "height"}
     >
       <View style={{ flex: 1, backgroundColor: tokens.bg }}>
         <Stack.Screen
