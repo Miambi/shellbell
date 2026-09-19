@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { createLogger, type Logger } from "../../log.js";
 import type { BackendRegistry } from "../registry.js";
 import { BackendUnavailable } from "../types.js";
@@ -25,6 +26,21 @@ export interface CheckHerdrOptions {
   log?: Logger;
   socketPath?: string;
   client?: HerdrClient;
+  /** Injectable so tests can drive both no-socket states without touching the real `$PATH`. */
+  herdrOnPath?: () => boolean;
+}
+
+/**
+ * Herdr creates its socket only while it is running, so a missing socket cannot by itself tell
+ * "never installed" from "installed but stopped" — and telling someone who has herdr that it is
+ * not installed sends them to reinstall what they already have. The binary on `$PATH` is what
+ * separates the two. Best-effort by design: both states are a PASS (spec 8.13 ruling 14), so a
+ * wrong guess here changes wording, never the exit code.
+ */
+function herdrOnDefaultPath(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.PATH ?? "")
+    .split(delimiter)
+    .some((dir) => dir !== "" && existsSync(join(dir, "herdr")));
 }
 
 /**
@@ -37,7 +53,13 @@ export async function checkHerdr(opts: CheckHerdrOptions = {}): Promise<HerdrChe
   const client =
     opts.client ?? new HerdrClient({ log, socketPath: opts.socketPath, requestTimeoutMs: 3000 });
   if (!existsSync(client.socketPath))
-    return { name: "herdr", ok: true, detail: "not installed (optional)" };
+    return {
+      name: "herdr",
+      ok: true,
+      detail: (opts.herdrOnPath ?? herdrOnDefaultPath)()
+        ? "installed but not running (optional)"
+        : "not installed (optional)",
+    };
   let pong: { version?: string; protocol?: number };
   try {
     pong = await client.ping();

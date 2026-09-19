@@ -85,15 +85,12 @@ export function semverAtLeast(version: string, min: [number, number, number]): b
  * `<config>/herdr/sessions/<name>/herdr.sock`, else `<config>/herdr/herdr.sock`, where `<config>`
  * is `$XDG_CONFIG_HOME` or `~/.config`.
  *
- * ⚠ The macOS default is the one thing here that is READ FROM THE RUST SOURCE BUT NOT YET
- * OBSERVED ON A MAC: research §1 shows the config dir resolving through `$XDG_CONFIG_HOME` →
- * `~/.config` with no `~/Library/Application Support` branch, and spec 8.13 states that as fact,
- * but the research's own spike checklist still lists it as unconfirmed. **Spike question 1 must
- * print the socket path herdr actually created on macOS.** If it turns out to live under
- * `~/Library/Application Support/herdr/`, this function needs a second candidate (probe both with
- * `existsSync` and prefer the one that exists) — nothing else in the plan changes, because every
- * caller already treats "no socket" as "herdr is not installed". Users are never stuck meanwhile:
- * `$HERDR_SOCKET_PATH` overrides everything.
+ * The macOS default was once only read from the Rust source, never observed. **It is confirmed
+ * now** and needs no second `~/Library/Application Support/herdr/` candidate: spike question 1
+ * recorded `~/.config/herdr/herdr.sock` (`docs/spike-herdr.md`, herdr 0.8.2, 2026-09-06), and a
+ * running 0.8.2 server log on macOS independently printed
+ * `api_socket=~/.config/herdr/herdr.sock` with a `herdr-client.sock` sibling (2026-09-19).
+ * `$HERDR_SOCKET_PATH` still overrides everything.
  */
 export function herdrSocketPath(
   env: NodeJS.ProcessEnv = process.env,

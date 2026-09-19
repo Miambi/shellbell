@@ -47,8 +47,29 @@ describe("checkHerdr", () => {
   it("PASSES when herdr is not installed at all (it is optional)", async () => {
     // spec 8.13 (ruling 14): `doctor` exits 1 if any check fails, and most users have no herdr.
     const dir = mkdtempSync(join(tmpdir(), "sb-herdr-doctor-"));
-    const check = await checkHerdr({ log, socketPath: join(dir, "herdr.sock") });
+    const check = await checkHerdr({
+      log,
+      socketPath: join(dir, "herdr.sock"),
+      herdrOnPath: () => false,
+    });
     expect(check).toEqual({ name: "herdr", ok: true, detail: "not installed (optional)" });
+  });
+
+  it("says herdr is installed but not running when the binary exists and the socket does not", async () => {
+    // Herdr only creates its socket while it is running, so an installed-but-stopped herdr looks
+    // exactly like a missing one at the socket. Reporting "not installed" to someone who has it
+    // installed sends them to reinstall something they already have.
+    const dir = mkdtempSync(join(tmpdir(), "sb-herdr-doctor-"));
+    const check = await checkHerdr({
+      log,
+      socketPath: join(dir, "herdr.sock"),
+      herdrOnPath: () => true,
+    });
+    expect(check).toEqual({
+      name: "herdr",
+      ok: true,
+      detail: "installed but not running (optional)",
+    });
   });
 
   it("FAILS when a running herdr is too old, with the upgrade fix", async () => {

@@ -103,7 +103,10 @@ describe("runDoctor's herdr check (Minor, Task 6 review: injectable via RunDocto
     const dir = mkdtempSync(join(tmpdir(), "sb-doctor-"));
     const checks = await runDoctor(fakePaths(dir), fakeConfig(), {
       requestCookieAndKey: noRealITerm2Cookie,
-      checkHerdr: () => checkHerdr({ log, socketPath: join(dir, "herdr.sock") }),
+      // `herdrOnPath` is pinned false so this asserts the absent wording on any host. Left to the
+      // real `$PATH` probe it passes on CI and fails on a developer machine that has herdr.
+      checkHerdr: () =>
+        checkHerdr({ log, socketPath: join(dir, "herdr.sock"), herdrOnPath: () => false }),
     });
     expect(checks.find((c) => c.name === "herdr")).toEqual({
       name: "herdr",
