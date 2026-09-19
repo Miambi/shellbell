@@ -11,9 +11,9 @@
   "submit": {
     "production": {
       "ios": {
-        "appleId": "REPLACE_APPLE_ID_EMAIL",
-        "ascAppId": "REPLACE_ASC_APP_ID",
-        "appleTeamId": "REPLACE_APPLE_TEAM_ID"
+        "appleId": "bilal@miambi.ai",
+        "ascAppId": "6813929475",
+        "appleTeamId": "2CW9DK45CV"
       },
       "android": {
         "serviceAccountKeyPath": "./play-service-account.json",
