@@ -17,6 +17,12 @@ web-build/
 *.key
 *.mobileprovision
 
+# EAS local credentials. The .p12/.mobileprovision are covered above, but
+# `credentials.json` written by `eas credentials` holds the distribution
+# certificate's password in plaintext and is NOT covered by any pattern above.
+credentials.json
+credentials/
+
 # Metro
 .metro-health-check*
 
