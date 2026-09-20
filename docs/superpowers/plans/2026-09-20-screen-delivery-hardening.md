@@ -2,7 +2,8 @@
 
 Completed 2026-09-20 on `fix/screen-delivery-hardening`; see the
 [execution record](../sessions/2026-09-20-screen-delivery-hardening.md) for regression evidence,
-review corrections, verification and remaining scope. Integration is awaiting the user's choice.
+review corrections, verification and remaining scope. Merged locally into `main` on 2026-09-20
+at the user's request; not pushed.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

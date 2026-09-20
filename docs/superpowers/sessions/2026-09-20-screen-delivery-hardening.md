@@ -60,4 +60,5 @@ Linux per-user hosting, the native macOS installer/controller, and byte-bounded 
 receiver backpressure are not implemented by these commits.
 
 Existing uncommitted audit documentation remains in the primary checkout unchanged. This work
-is isolated on `fix/screen-delivery-hardening`; no push, merge, deployment, or release occurred.
+was isolated on `fix/screen-delivery-hardening`, then fast-forward merged locally into `main`
+at the user's request on 2026-09-20. No push, deployment, or release occurred.
