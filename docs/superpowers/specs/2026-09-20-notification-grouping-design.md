@@ -27,7 +27,7 @@ This document fixes the first. The second is a tuning change, covered in §7.
 
 ## 2. What a notification says
 
-**Session title plus event kind.** `claude-code — agent is waiting`, grouped under the computer.
+**Session title plus event kind.** `claude-code — agent is waiting`.
 
 Chosen over including output or an agent's question. The complaint is that notifications are
 *indistinguishable*, not that they are uninformative, and naming the session fixes exactly that at
@@ -37,14 +37,39 @@ the smallest privacy cost (§5).
 
 **Group per computer, expandable.**
 
-| Level | Content | Identity |
-|---|---|---|
-| Child | One per session: `<title> — <kind>` | `${fp}:${sessionId}` |
-| Summary | `<computer name> · N sessions need attention` | `${fp}` |
+| Level | Content | Identity | Status |
+|---|---|---|---|
+| Child | One per session: `<title> — <kind>` | `${fp}:${sessionId}` | ships |
+| Summary | `<computer name> · N sessions need attention` | `${fp}` | *deferred — see errata below* |
 
 A new event for a session **replaces** that session's child notification rather than adding one.
 One session ringing looks like an ordinary notification; six look like one expandable group. This
 also scales to multiple paired Macs — one group each.
+
+### Errata 2026-09-20: explicit grouping is not reachable, and is deferred
+
+The summary row above **cannot be built with `expo-notifications`**. Verified against the installed
+types: `NotificationContentInput` exposes `title, subtitle, body, data, badge, sound,
+launchImageName, vibrate, priority, color, autoDismiss, categoryIdentifier, sticky, attachments,
+interruptionLevel` — **no Android group key and no group summary**. `threadIdentifier` exists but
+is marked `@platform ios`. Reaching Android's `setGroup()` / `setGroupSummary()` would require a
+config plugin or a custom native module.
+
+**What ships instead: per-session replacement only.**
+`NotificationRequestInput.identifier` *is* supported, so each session owns exactly one
+notification, keyed `${fp}:${sessionId}`, replaced on every new event. That is the original ask —
+one notification per shell — and it fixes the actual complaint, which was that notifications were
+indistinguishable rather than merely numerous.
+
+**Android is expected to group them anyway.** Since Nougat the system auto-bundles 4+ notifications
+from one app that carry no explicit group, generating its own summary. So the grouped, expandable
+behaviour is likely to arrive from the OS rather than from this app — for free, and without native
+code.
+
+**This is a decision to ship and observe** (chosen 2026-09-20). The user is the first user and will
+see a real tray within a day. If OEM auto-bundling disappoints — One UI differs from stock — the
+config-plugin route is still open and much easier to justify with evidence that the OS did not do
+the job. Do not build native grouping before that evidence exists.
 
 ## 4. Delivery: enrich, never replace, the delivery guarantee
 
@@ -59,7 +84,7 @@ one unacceptable failure mode.
 
 So the degradation ladder is:
 
-- **JS runs** → enriched, named, grouped.
+- **JS runs** → enriched and named, one notification per session.
 - **JS does not run** → today's generic notification. No regression.
 
 The visible cost is a brief flash of generic text before replacement when the app wakes slowly.
@@ -92,12 +117,13 @@ to output or commands without revisiting the decision.
 ## 6. Behaviour details
 
 - **Tap** opens that session: deep-link `/c/{fp}/s/{sid}`, using the existing response data path
-  (`notifications/index.ts:62`). Tapping the summary opens the computer's session list.
+  (`notifications/index.ts:62`). There is no summary notification to tap (see §3 errata).
 - **Unknown title** — a session the phone has not seen (first run, or a session created while
   unpaired) falls back to the backend label if known (`iTerm2` / `tmux` / `Herdr`), else
   `Session`. Never show the raw session id: it is opaque and means nothing to the user.
-- **Opening a session dismisses its notification** and decrements the group summary. Consistent
-  with spec §11.3's attentive suppression: if you are looking at it, it is not waiting for you.
+- **Opening a session dismisses its notification** (`dismissNotificationAsync` with that
+  session's identifier). Consistent with spec §11.3's attentive suppression: if you are looking at
+  it, it is not waiting for you.
 - **Foreground** behaviour is unchanged — spec §10.8's in-app toast, no OS banner.
 - The `rings` channel and its emerald light colour are unchanged. Brand amber deliberately does
   not apply to in-app accents (brand spec §4).
@@ -105,8 +131,8 @@ to output or commands without revisiting the decision.
 ## 7. Related, separate: the idle heuristic fires too readily
 
 Not part of this design, recorded so the two are not confused. `idleQuietMs` at 4 s produces most
-of the volume. Grouping (§3) hides that volume behind one tray entry, but the underlying churn
-remains and the summary count will flicker.
+of the volume. Per-session replacement (§3) caps the tray at one entry per session, but the
+underlying churn remains — each entry will keep rewriting itself.
 
 Raising the default is a one-line change with no architecture behind it. **Recommended: 30 s.** It
 should be decided and changed separately from this work, and ideally made settable via
@@ -123,8 +149,7 @@ should be decided and changed separately from this work, and ideally made settab
 
 ## 9. Open
 
-- Whether the summary count should mean "sessions with an unacknowledged event" or "events since
-  last open". The former is simpler and matches "N sessions need attention"; assume it unless
-  implementation shows otherwise.
+- Whether Android's auto-bundling actually produces an acceptable grouped tray on One UI. This
+  is the evidence the §3 errata says to gather before building native grouping.
 - Whether a session's notification should auto-dismiss when the agent reports it resolved, rather
   than only on open. Desirable; needs a resolution signal that may not exist yet.
