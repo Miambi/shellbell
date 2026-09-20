@@ -10,6 +10,7 @@ import { tokens } from "../theme/tokens";
 import { Bar } from "../ui/Bar";
 import { fireInput } from "./fireInput";
 import { clampInputHeight, INPUT_MIN_HEIGHT } from "./height";
+import { imeProps } from "./imeProps";
 import { lineExceedsLimit } from "./limits";
 import { preparePaste } from "./paste";
 import { QuickKeys } from "./QuickKeys";
@@ -31,6 +32,7 @@ export function InputBar({
 }) {
   const raw = useUiStore((s) => s.rawModeBySession[sessionId] ?? false);
   const setRaw = useUiStore((s) => s.setRawMode);
+  const ime = imeProps(raw ? "raw" : "line", Platform.OS === "ios" ? "ios" : "android");
   const [text, setText] = useState("");
   const [rawText, setRawText] = useState("");
   const [histIdx, setHistIdx] = useState(-1);
@@ -200,16 +202,14 @@ export function InputBar({
                 ? undefined
                 : (e) => setInputHeight(clampInputHeight(e.nativeEvent.contentSize.height))
             }
-            placeholder={raw ? "raw keystrokes (no CJK IME)" : "command…"}
+            placeholder={raw ? "keys sent as you type" : "compose, then send"}
             placeholderTextColor={tokens.textFaint}
-            autoCorrect={false}
-            autoCapitalize="none"
-            spellCheck={false}
-            autoComplete="off"
+            autoCorrect={ime.autoCorrect}
+            autoCapitalize={ime.autoCapitalize}
+            spellCheck={ime.spellCheck}
+            autoComplete={ime.autoComplete}
             textContentType="none"
-            keyboardType={
-              raw ? (Platform.OS === "ios" ? "ascii-capable" : "visible-password") : "default"
-            }
+            keyboardType={ime.keyboardType}
             returnKeyType="send"
             style={{
               flex: 1,

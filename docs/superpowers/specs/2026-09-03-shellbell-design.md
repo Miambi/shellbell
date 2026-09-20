@@ -1604,7 +1604,22 @@ Bottom bar (glass on iOS where available), three rows:
 3. **Text field**:
    - **Line mode** (default): single-line `TextInput`, `returnKeyType="send"`, autocorrect
      off, autocapitalize none; Send → `input.line`. History: the last 100 lines sent in
-     this app process, per computer, in memory only; `↑` button browses it.
+     this app process, per computer, in memory only; `↑` button browses it. (Errata,
+     2026-09-20 — reversed: the primary use case, per the product owner, is replying to an
+     ongoing LLM/coding-agent session from the phone, not typing shell commands. Line mode
+     has no differ and the user reviews the composed text before pressing Send, so
+     autocorrect is harmless there and actively helpful for dictated prose to an agent. Line
+     mode's `TextInput` now sets `autoCorrect={true}`, `spellCheck={true}`,
+     `autoComplete={undefined}` (system default) and `autoCapitalize="sentences"` — not
+     `"none"` — instead of the settings above. On Android, `autoCorrect={false}` sets
+     `TYPE_TEXT_FLAG_NO_SUGGESTIONS`, which hides Gboard's suggestion strip; the
+     voice-input mic button lives in that strip, so the old settings made dictation
+     impossible. Placeholder: `"compose, then send"` (was `"command…"`). Raw mode's IME
+     settings, immediately below, are unchanged and for the same reason they were
+     specified: the differ depends on suppressing autocorrect/composition, and dictation
+     was never viable there. Selection logic lives in `src/input/imeProps.ts`, a pure
+     `(mode, os) => props` helper kept separate from `InputBar.tsx` because the mobile
+     test setup runs in a `node` Vitest environment and cannot render components.)
    - **Raw mode** (toggle `⌨︎`; remembered per session): every character typed is sent
      immediately as `input.text`; Backspace → `input.key backspace`; Return →
      `input.key enter`; the visible field mirrors what was typed and a differ against the
@@ -1618,10 +1633,25 @@ Bottom bar (glass on iOS where available), three rows:
      against the previous value — appended suffix → `input.text`; shortened by `k` →
      `k × backspace`; replaced middle → backspaces then the new suffix — plus `onKeyPress`
      for `Backspace`/`Enter`. IME composition (CJK) is not supported in raw mode
-     (documented in-app; use line mode).
+     (documented in-app; use line mode). (Errata, 2026-09-20: placeholder reworded to
+     `"keys sent as you type"`, was `"raw keystrokes (no CJK IME)"` — wording only, no
+     behavior change.)
    - Paste → `input.text` with clipboard content (no trailing newline).
 - Haptics: `impactAsync(Light)` on every send; `notificationAsync(Success)` on pair;
   `notificationAsync(Warning)` when an `event` arrives for the session you are viewing.
+- **Keyboard avoidance (errata, 2026-09-20):** the session screen originally wrapped the
+  terminal and this bar in React Native's `KeyboardAvoidingView` (`behavior="height"` on
+  Android). Confirmed on a real device (Samsung Z Fold7): the input area stayed hidden
+  under the keyboard. Root cause: Expo SDK 54+ enables edge-to-edge by default, and on
+  Android 15/16 the window no longer resizes for the keyboard at all — Android 16 apps
+  cannot even opt out — so `KeyboardAvoidingView`, which depends on that resize, cannot
+  work with any `behavior` value. Fix (per Expo's own keyboard-handling guide): replaced it
+  with `react-native-keyboard-controller`'s `KeyboardAvoidingView` (`behavior="padding"` on
+  both platforms), which measures the keyboard directly instead of relying on window
+  resize. The root layout (`app/_layout.tsx`) wraps the app in `<KeyboardProvider>`, which
+  that library requires. The terminal view is not wrapped in a `ScrollView` — it renders
+  its own grid and must not be nested in a scroller — so this is purely a library swap, not
+  a layout change.
 - Header: session title, computer accent dot, backend badge (`iTerm2` / `tmux` / `Herdr`),
   state badge (incl. `blocked`), `⋯` menu: Bring to front on Mac (iTerm2 and Herdr) · New
   tab · Split vertical · Split horizontal. Items are hidden when the backend lacks the

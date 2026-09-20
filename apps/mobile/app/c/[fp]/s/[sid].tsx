@@ -1,7 +1,8 @@
 import { useKeepAwake } from "expo-keep-awake";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef } from "react";
-import { KeyboardAvoidingView, Platform, View } from "react-native";
+import { View } from "react-native";
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { InputBar } from "../../../../src/input/InputBar";
 import { connectionManager } from "../../../../src/net/manager";
 import { ScreenView } from "../../../../src/screen/ScreenView";
@@ -85,10 +86,14 @@ export default function Session() {
   return (
     <KeyboardAvoidingView
       style={{ flex: 1 }}
-      // Android needs an explicit behavior. `undefined` relies on the OS resizing the window for
-      // the keyboard, which edge-to-edge (the default since SDK 54 / RN 0.81) no longer does — so
-      // the keyboard covered the terminal and you could not see what you were typing.
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
+      // react-native-keyboard-controller's KeyboardAvoidingView, not RN's built-in one (errata,
+      // spec 10.6): edge-to-edge is the default since SDK 54/RN 0.81, and on Android 15/16 the
+      // window no longer resizes for the keyboard at all -- Android 16 apps cannot even opt out.
+      // RN's KeyboardAvoidingView relies on that resize, so no `behavior` value fixed it; the
+      // input area stayed hidden under the keyboard (confirmed on a Z Fold7). This component
+      // measures the keyboard itself instead of relying on window resize, so `"padding"` works on
+      // both platforms -- see app/_layout.tsx for the required `KeyboardProvider` wrapper.
+      behavior="padding"
     >
       <View style={{ flex: 1, backgroundColor: tokens.bg }}>
         <Stack.Screen

@@ -8,6 +8,7 @@ import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { loadOrCreateIdentity } from "../src/identity/keys";
 import { connectionManager } from "../src/net/manager";
@@ -135,46 +136,54 @@ export default function RootLayout() {
 
   if (identityError) {
     return (
-      <View
-        style={{
-          flex: 1,
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 24,
-          gap: 8,
-          backgroundColor: tokens.bg,
-        }}
-      >
-        <StatusBar style="light" />
-        <Text style={{ color: tokens.text, textAlign: "center", fontSize: 16 }}>
-          Could not access secure storage.
-        </Text>
-        <Text style={{ color: tokens.textMuted, textAlign: "center" }}>
-          Restart Shellbell. If this keeps happening, reinstall the app and re-pair.
-        </Text>
-      </View>
+      <KeyboardProvider>
+        <View
+          style={{
+            flex: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 24,
+            gap: 8,
+            backgroundColor: tokens.bg,
+          }}
+        >
+          <StatusBar style="light" />
+          <Text style={{ color: tokens.text, textAlign: "center", fontSize: 16 }}>
+            Could not access secure storage.
+          </Text>
+          <Text style={{ color: tokens.textMuted, textAlign: "center" }}>
+            Restart Shellbell. If this keeps happening, reinstall the app and re-pair.
+          </Text>
+        </View>
+      </KeyboardProvider>
     );
   }
 
   return (
-    <SafeAreaProvider>
-      <GestureHandlerRootView style={{ flex: 1, backgroundColor: tokens.bg }}>
-        <StatusBar style="light" />
-        <Stack
-          screenOptions={{
-            headerStyle: { backgroundColor: tokens.bg },
-            headerTintColor: tokens.text,
-            contentStyle: { backgroundColor: tokens.bg },
-          }}
-        >
-          <Stack.Screen name="index" options={{ title: "Computers" }} />
-          <Stack.Screen name="pair" options={{ presentation: "modal", title: "Pair" }} />
-          <Stack.Screen name="settings" options={{ title: "Settings" }} />
-          <Stack.Screen name="c/[fp]" options={{ headerShown: false }} />
-          <Stack.Screen name="dev/render-spike" options={{ title: "Render spike" }} />
-        </Stack>
-        <ToastHost />
-      </GestureHandlerRootView>
-    </SafeAreaProvider>
+    // Wraps the whole tree (not just the session screen) so KeyboardProvider is always mounted
+    // before any screen that needs it -- react-native-keyboard-controller's hooks/components
+    // throw if used outside it. See app/c/[fp]/s/[sid].tsx for why plain `KeyboardAvoidingView`
+    // cannot keep the input above the keyboard on Android 15/16.
+    <KeyboardProvider>
+      <SafeAreaProvider>
+        <GestureHandlerRootView style={{ flex: 1, backgroundColor: tokens.bg }}>
+          <StatusBar style="light" />
+          <Stack
+            screenOptions={{
+              headerStyle: { backgroundColor: tokens.bg },
+              headerTintColor: tokens.text,
+              contentStyle: { backgroundColor: tokens.bg },
+            }}
+          >
+            <Stack.Screen name="index" options={{ title: "Computers" }} />
+            <Stack.Screen name="pair" options={{ presentation: "modal", title: "Pair" }} />
+            <Stack.Screen name="settings" options={{ title: "Settings" }} />
+            <Stack.Screen name="c/[fp]" options={{ headerShown: false }} />
+            <Stack.Screen name="dev/render-spike" options={{ title: "Render spike" }} />
+          </Stack>
+          <ToastHost />
+        </GestureHandlerRootView>
+      </SafeAreaProvider>
+    </KeyboardProvider>
   );
 }
