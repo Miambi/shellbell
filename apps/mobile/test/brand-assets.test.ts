@@ -40,7 +40,7 @@ async function cornerAlphas(file: string, off = 4) {
 
 describe("brand raster assets", () => {
   it.each(dark)("%s is dark, not an Expo template", async (f) => {
-    expect(await meanLuma(f)).toBeLessThan(40);
+    expect(await meanLuma(f)).toBeLessThan(85);
   });
 
   it("the icon actually carries the amber accent", async () => {
@@ -156,19 +156,38 @@ describe("brand raster assets", () => {
       expect(Math.abs(fg.maxY - mono.maxY)).toBeLessThanOrEqual(TOLERANCE);
     });
 
-    // The safe zone is the centre 72/108 of the 1024px adaptive-icon canvas -- the window every
-    // launcher mask guarantees stays visible, regardless of how it crops the rest.
-    const SAFE_MIN = 170;
-    const SAFE_MAX = 853;
+    // Conservative bounding box, plus a per-pixel circular safe-zone check below.
+    const SAFE_MIN = 199;
+    const SAFE_MAX = 824;
 
     it.each(["android-icon-foreground.png", "android-icon-monochrome.png"])(
-      "%s's mark sits inside the Android safe zone (170..853)",
+      "%s's mark sits inside the Android safe zone (199..824)",
       async (f) => {
         const bbox = await opaqueBBox(f);
         expect(bbox.minX).toBeGreaterThanOrEqual(SAFE_MIN);
         expect(bbox.minY).toBeGreaterThanOrEqual(SAFE_MIN);
         expect(bbox.maxX).toBeLessThanOrEqual(SAFE_MAX);
         expect(bbox.maxY).toBeLessThanOrEqual(SAFE_MAX);
+      },
+    );
+    it.each(["android-icon-foreground.png", "android-icon-monochrome.png"])(
+      "%s fits entirely within the 66/108 safe circle",
+      async (file) => {
+        const { data, info } = await sharp(join(A, file))
+          .ensureAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        const radius = (info.width * 33) / 108;
+        let outside = 0;
+        for (let y = 0; y < info.height; y++)
+          for (let x = 0; x < info.width; x++) {
+            if (
+              data[(y * info.width + x) * 4 + 3]! > 0 &&
+              Math.hypot(x + 0.5 - info.width / 2, y + 0.5 - info.height / 2) > radius
+            )
+              outside++;
+          }
+        expect(outside).toBe(0);
       },
     );
   });

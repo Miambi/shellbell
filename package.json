@@ -11,7 +11,10 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "build": "pnpm -r --if-present build",
-    "brand:family": "node scripts/extract-brand-family.mjs && node scripts/render-brand-family.mjs"
+    "brand": "pnpm -F @shellbell/mobile run brand",
+    "brand:family": "node scripts/extract-brand-family.mjs && node scripts/render-brand-family.mjs",
+    "brand:platforms": "node scripts/render-platform-icons.mjs && node scripts/render-brand-preview.mjs",
+    "brand:check": "pnpm -F @shellbell/mobile run brand:check"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",

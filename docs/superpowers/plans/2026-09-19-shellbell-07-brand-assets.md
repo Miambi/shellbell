@@ -1,5 +1,7 @@
 # Shellbell brand assets implementation plan
 
+> **Plan 07 errata, 2026-09-20 — source: Bilal's approved terminal-attention identity and glossy/platform icon request.** This is the historical execution record for the superseded escape-sequence brand. Its mark, color split, anchoring, size, and asset-count instructions are no longer current. The revised [brand design specification](../specs/2026-09-19-shellbell-brand-design.md) and [brand guide](../../../brand/README.md) govern future work. The new pipeline uses a custom four-part prompt/cursor/rays symbol, high-contrast wordmark, glossy app/service icons, and flat menu-bar/tray templates. Do not re-execute the old design instructions below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
 > (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.

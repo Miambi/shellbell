@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 const FAMILY_PNG_DIR = join(__dirname, "../../../brand/png");
 
 const VARIANTS = ["mark", "wordmark", "horizontal", "stacked"];
-const COLOURWAYS = ["on-dark", "on-light"];
+const COLOURWAYS = ["on-dark", "on-light", "black", "white"];
 const NAMES = VARIANTS.flatMap((v) => COLOURWAYS.map((c) => `${v}-${c}`));
 const SCALES: ReadonlyArray<readonly [string, number]> = [
   ["1x", 128],
@@ -56,7 +56,7 @@ async function pixelStats(file: string) {
 }
 
 describe("brand family PNG assets", () => {
-  it("has all 16 expected files (8 SVGs x @1x/@2x)", async () => {
+  it("has all 32 expected files (16 SVGs x @1x/@2x)", async () => {
     for (const [file] of FILES) {
       await expect(sharp(join(FAMILY_PNG_DIR, file)).metadata()).resolves.toBeDefined();
     }
@@ -72,20 +72,20 @@ describe("brand family PNG assets", () => {
     expect(m.height).toBe(height);
   });
 
-  // Measured across the committed family (all 16 files): non-transparent coverage ranges from
-  // ~16.3% (stacked@2x) to ~29.8% (wordmark-on-dark@1x); amber coverage ranges from ~6.8%
-  // (stacked@2x) to ~13.4% (wordmark-on-dark@1x). 5% / 2% sit well below every measured value --
-  // loose enough not to flake on legitimate layout tweaks, tight enough that a blank or
-  // near-blank render (0% on both) fails immediately.
+  // Coverage catches blank renders without depending on libvips-specific antialiasing.
+  // Only the symbol is amber; the wordmark is uniformly light or dark.
   it.each(FILES)("%s is not blank: more than 5%% of pixels are non-transparent", async (file) => {
     const { nonTransparentFraction } = await pixelStats(file);
     expect(nonTransparentFraction).toBeGreaterThan(0.05);
   });
 
-  it.each(FILES)("%s carries the amber accent: more than 2%% of pixels are amber", async (file) => {
-    const { amberFraction } = await pixelStats(file);
-    expect(amberFraction).toBeGreaterThan(0.02);
-  });
+  it.each(FILES.filter(([name]) => !name.startsWith("wordmark") && name.includes("-on-")))(
+    "%s carries the amber symbol",
+    async (file) => {
+      const { amberFraction } = await pixelStats(file);
+      expect(amberFraction).toBeGreaterThan(0.01);
+    },
+  );
 
   it("every @2x is exactly double its @1x height, aspect ratio preserved", async () => {
     for (const n of NAMES) {

@@ -1,4 +1,4 @@
-// Drift guard between committed SVG sources and what the generators would produce from the font
+// Drift guard between committed SVG sources and what the generators produce from shared geometry
 // today. Mirrors scripts/sync-vectors.mjs --check.
 //
 // Two independent checks:
@@ -9,7 +9,7 @@
 //
 // Each re-runs its generator into a scratch directory (via an env var the generator reads to
 // redirect its output) and byte-compares the result against the committed SVGs -- extraction is
-// deterministic, so any difference means the font or the framing geometry changed without
+// deterministic, so any difference means the symbol, wordmark font, or framing changed without
 // regenerating and committing the output.
 //
 // Deliberately SVG-only: PNGs are NOT byte-compared here, for either check. Raster output depends
@@ -68,6 +68,8 @@ checkDrift({
   generator: join(here, "../../../scripts/extract-brand-family.mjs"),
   envVar: "SHELLBELL_BRAND_FAMILY_SVG_OUT",
   committedDir: join(here, "../../../brand/svg"),
-  files: FAMILY_VARIANTS.flatMap((v) => [`${v}-on-dark.svg`, `${v}-on-light.svg`]),
+  files: FAMILY_VARIANTS.flatMap((v) =>
+    ["on-dark", "on-light", "black", "white"].map((c) => `${v}-${c}.svg`),
+  ),
   remedy: "run `pnpm brand:family` from the repo root and commit the result",
 });

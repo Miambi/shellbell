@@ -2,6 +2,13 @@
 
 Your terminal rings. You answer.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/svg/horizontal-on-dark.svg">
+  <img src="brand/svg/horizontal-on-light.svg" alt="Shellbell terminal-attention logo" width="360">
+</picture>
+
+[Brand guide and platform icons](brand/README.md)
+
 **[MIT licensed](LICENSE)** · the Shellbell name and logo are a trademark ([`TRADEMARK.md`](TRADEMARK.md)) · free to use
 
 Shellbell mirrors your Mac's terminal sessions to your phone, so you can see and type into
