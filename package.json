@@ -10,11 +10,14 @@
     "lint:fix": "biome check --write .",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "build": "pnpm -r --if-present build"
+    "build": "pnpm -r --if-present build",
+    "brand:family": "node scripts/extract-brand-family.mjs && node scripts/render-brand-family.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@changesets/cli": "3.0.1",
+    "opentype.js": "^2.0.0",
+    "sharp": "^0.35.4",
     "typescript": "5.9.3"
   }
 }

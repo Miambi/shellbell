@@ -159,7 +159,59 @@ as rendered by `apps/mobile/scripts/render-brand.mjs` from the committed SVG sou
 
 Source SVGs live in the repo so the raster assets can be regenerated rather than hand-edited.
 
-## 7. Non-goals
+## 7. Logo family
+
+**Added 2026-09-20.** The app icon set above (§6) is for the app; the website, the README and
+press need a family of files that are not tied to a square tile. `brand/` at the repo root (not
+under `apps/mobile/`) holds these.
+
+Four variants, all drawn from the same JetBrains Mono Bold outlines as the app icon, each tightly
+cropped to the union bounding box of its own glyphs (no tile, no inset — that padding is specific
+to the icon's square anchoring in §3):
+
+| Variant | Content |
+|---|---|
+| `mark` | `$\a` — the same three glyphs as the icon lockup |
+| `wordmark` | `shellbell` |
+| `horizontal` | `$\a` then `shellbell` on one baseline, gap 0.55em between the mark's rightmost ink and the wordmark's leftmost ink |
+| `stacked` | `$\a` above `shellbell`, both starting at the same x (left-aligned), 0.42em between the mark's bottom ink edge and the wordmark's top ink edge |
+
+Each variant carries the two-tone rule (§3) **twice, independently**, not as one split across the
+whole composition: in `horizontal` and `stacked`, the mark's own `a` is amber *and* the wordmark's
+own `bell` is amber, with `$`, `\` and `shell` all muted in between. In the wordmark, the split
+falls after the 5th character — `shell` recedes, `bell` carries the accent, echoing the mark's own
+`$` / `a` structure.
+
+Two colourways per variant, `-on-dark` and `-on-light`:
+
+| Element | on-dark | on-light |
+|---|---|---|
+| `$`, `\`, `shell` (muted) | `#4A4A55` | `#3A3A44` |
+| `a`, `bell` (accent) | `#F59E0B` | `#F59E0B` |
+
+**`#3A3A44` is a darker muted value than the icon's `#4A4A55`, used only on light backgrounds.**
+The icon's `#6B6B78` — the obvious "just lighten it" choice — was tried first and read as washed
+out next to the amber `bell`/`a` on a white or near-white page; `#3A3A44` keeps enough contrast
+against light backgrounds to still read as "receding" rather than "faded out."
+
+Files:
+
+```
+brand/svg/<variant>-on-<dark|light>.svg   # 8 files, paths only, no font reference
+brand/png/<variant>-on-<dark|light>@1x.png   # 128px tall, transparent
+brand/png/<variant>-on-<dark|light>@2x.png   # 256px tall, transparent
+```
+
+**Regenerate with `pnpm brand:family`** from the repo root (also runs as part of
+`pnpm -F @shellbell/mobile run brand`, alongside the app icon's `brand:extract`/`brand:render`).
+The generator is `scripts/extract-brand-family.mjs` (SVGs) and `scripts/render-brand-family.mjs`
+(PNGs) at the repo root — not under `apps/mobile/scripts/`, since these outputs are not app assets
+and don't ship inside the APK/IPA. `apps/mobile/scripts/check-brand.mjs` byte-compares the 8 SVGs
+against the generator as part of `brand:check`, the same drift guard the app icon SVGs already get;
+the 16 PNGs are deliberately not byte-compared, for the same reason the app icon's PNGs aren't (§6
+note) — raster output is libvips-version-dependent.
+
+## 8. Non-goals
 
 - **Light mode.** Deferred by decision on 2026-09-19. Spec §71 states OLED-black as a product
   principle and §1694 derives the shadow-less card design from it; reversing that needs its own
@@ -168,7 +220,7 @@ Source SVGs live in the repo so the raster assets can be regenerated rather than
 - **A drawn bell.** Tried and rejected; see §1.
 - **Unifying brand accent with in-app accents.** See §4.
 
-## 8. Open
+## 9. Open
 
 - ~~Optical spacing~~ — **closed 2026-09-20.** Superseded by parametric anchoring (§3): the mark is
   framed from its glyph bounding box at a fixed `occupy`/`inset`, so there is nothing to hand-tune

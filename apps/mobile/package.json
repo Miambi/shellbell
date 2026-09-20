@@ -49,7 +49,7 @@
     "test": "pnpm run sync:vectors && vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "doctor": "expo-doctor",
-    "brand": "pnpm brand:extract && pnpm brand:render",
+    "brand": "pnpm brand:extract && pnpm brand:render && pnpm --dir ../.. run brand:family",
     "brand:extract": "node scripts/extract-glyphs.mjs",
     "brand:render": "node scripts/render-brand.mjs",
     "brand:check": "node scripts/check-brand.mjs",
