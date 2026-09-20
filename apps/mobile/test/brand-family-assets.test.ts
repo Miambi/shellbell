@@ -32,6 +32,29 @@ async function cornerAlphas(file: string, off = 2) {
   };
 }
 
+/** Fraction of pixels that are non-transparent, and fraction that are specifically amber
+ *  (`#F59E0B`-ish, same tolerance brand-assets.test.ts uses for the app icon). Corner-alpha and
+ *  height/aspect checks all pass trivially for a fully blank, correctly-sized transparent PNG --
+ *  a render regression (wrong source path, failed compositing, an empty resize) would slip
+ *  through everything else in this file. This is the guard for "something was actually drawn". */
+async function pixelStats(file: string) {
+  const { data, info } = await sharp(join(FAMILY_PNG_DIR, file)).ensureAlpha().raw().toBuffer({
+    resolveWithObject: true,
+  });
+  const { channels } = info;
+  let total = 0;
+  let nonTransparent = 0;
+  let amber = 0;
+  for (let i = 0; i < data.length; i += channels) {
+    total++;
+    const a = data[i + 3]!;
+    if (a === 0) continue;
+    nonTransparent++;
+    if (data[i]! > 200 && data[i + 1]! > 120 && data[i + 1]! < 190 && data[i + 2]! < 80) amber++;
+  }
+  return { nonTransparentFraction: nonTransparent / total, amberFraction: amber / total };
+}
+
 describe("brand family PNG assets", () => {
   it("has all 16 expected files (8 SVGs x @1x/@2x)", async () => {
     for (const [file] of FILES) {
@@ -47,6 +70,21 @@ describe("brand family PNG assets", () => {
   it.each(FILES)("%s has the expected height", async (file, height) => {
     const m = await sharp(join(FAMILY_PNG_DIR, file)).metadata();
     expect(m.height).toBe(height);
+  });
+
+  // Measured across the committed family (all 16 files): non-transparent coverage ranges from
+  // ~16.3% (stacked@2x) to ~29.8% (wordmark-on-dark@1x); amber coverage ranges from ~6.8%
+  // (stacked@2x) to ~13.4% (wordmark-on-dark@1x). 5% / 2% sit well below every measured value --
+  // loose enough not to flake on legitimate layout tweaks, tight enough that a blank or
+  // near-blank render (0% on both) fails immediately.
+  it.each(FILES)("%s is not blank: more than 5%% of pixels are non-transparent", async (file) => {
+    const { nonTransparentFraction } = await pixelStats(file);
+    expect(nonTransparentFraction).toBeGreaterThan(0.05);
+  });
+
+  it.each(FILES)("%s carries the amber accent: more than 2%% of pixels are amber", async (file) => {
+    const { amberFraction } = await pixelStats(file);
+    expect(amberFraction).toBeGreaterThan(0.02);
   });
 
   it("every @2x is exactly double its @1x height, aspect ratio preserved", async () => {
