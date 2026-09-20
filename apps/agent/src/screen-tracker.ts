@@ -22,6 +22,13 @@ export interface ScreenTrackerOptions {
   onSessionGone?: (sessionId: string) => void;
 }
 
+interface PreparedFrame {
+  gen: number;
+  diff: InnerMessage;
+  forceSnapshotAll: boolean;
+  snapshotFor: (degraded: boolean) => InnerMessage;
+}
+
 interface SessionState {
   viewers: Map<string, { lastSentGen: number; forceSnapshot: boolean; skipped: number }>;
   dirty: boolean;
@@ -37,6 +44,7 @@ interface SessionState {
   rrOffset: number;
   /** Set once we've logged that even a stripped snapshot exceeds `maxEncodedBytes`. */
   oversizeWarned: boolean;
+  prepared: PreparedFrame | null;
 }
 
 interface Budget {
@@ -191,6 +199,7 @@ export class ScreenTracker {
         gen: 0,
         rrOffset: 0,
         oversizeWarned: false,
+        prepared: null,
       };
       this.sessions.set(sessionId, s);
     }
@@ -200,48 +209,61 @@ export class ScreenTracker {
   private async tick(): Promise<void> {
     for (const [sessionId, s] of this.sessions) {
       if (this.stopped) return;
-      if (!s.dirty || s.inflight || s.viewers.size === 0) continue;
-      s.inflight = true;
-      s.dirty = false;
-      let screen: Screen;
-      try {
-        screen = await this.opts.backend.getScreen(sessionId);
-      } catch (err) {
-        if (err instanceof SessionGone) {
-          this.log.warn("getScreen: session gone; dropping", { session: sessionId.slice(0, 12) });
-          this.opts.onSessionGone?.(sessionId);
-          this.sessionRemoved(sessionId);
-        } else {
-          // Transient error (RPC timeout, etc.): keep viewers, resync everyone next tick.
-          this.log.warn("getScreen failed; will retry", {
+      if (s.inflight || s.viewers.size === 0) continue;
+      if (s.dirty) {
+        s.inflight = true;
+        s.dirty = false;
+        let screen: Screen;
+        try {
+          screen = await this.opts.backend.getScreen(sessionId);
+        } catch (err) {
+          if (err instanceof SessionGone) {
+            this.log.warn("getScreen: session gone; dropping", { session: sessionId.slice(0, 12) });
+            this.opts.onSessionGone?.(sessionId);
+            this.sessionRemoved(sessionId);
+          } else {
+            // Transient error (RPC timeout, etc.): keep viewers, resync everyone next tick.
+            this.log.warn("getScreen failed; will retry", {
+              session: sessionId.slice(0, 12),
+              err: err instanceof Error ? err.name : String(err),
+            });
+            for (const v of s.viewers.values()) v.forceSnapshot = true;
+            s.dirty = true;
+          }
+          s.inflight = false;
+          continue;
+        }
+        // A `stop()` or remove/recreate may have landed while `getScreen` was in flight: never
+        // commit that obsolete capture or let it reach the sink.
+        if (this.stopped || this.sessions.get(sessionId) !== s) {
+          s.inflight = false;
+          continue;
+        }
+        try {
+          this.processScreen(sessionId, s, screen);
+        } catch (err) {
+          // Diff preparation failed after getScreen succeeded. Retry a fresh capture and force a
+          // snapshot, but keep delivery failures below separate from backend polling.
+          this.log.error("processScreen threw; will resync every viewer next tick", {
             session: sessionId.slice(0, 12),
-            err: err instanceof Error ? err.name : String(err),
+            err: err instanceof Error ? err.name : "unknown",
           });
           for (const v of s.viewers.values()) v.forceSnapshot = true;
           s.dirty = true;
+          continue;
+        } finally {
+          s.inflight = false;
         }
-        s.inflight = false;
-        continue;
-      }
-      // A `stop()` may have landed while `getScreen` was in flight: never reach the sink after it.
-      if (this.stopped) {
-        s.inflight = false;
-        continue;
       }
       try {
-        this.processScreen(sessionId, s, screen);
+        this.deliver(s);
       } catch (err) {
-        // Minor: distinct from a getScreen failure -- getScreen already succeeded by this point,
-        // so a throw here is a bug in the diffing/sink path itself, not a transient backend
-        // hiccup. Recover the same way (resync every viewer next tick) but diagnose it correctly.
-        this.log.error("processScreen threw; will resync every viewer next tick", {
+        // Keep the prepared generation and viewer state intact so the next tick can retry without
+        // manufacturing another backend capture.
+        this.log.error("screen delivery threw; will retry prepared generation", {
           session: sessionId.slice(0, 12),
           err: err instanceof Error ? err.name : "unknown",
         });
-        for (const v of s.viewers.values()) v.forceSnapshot = true;
-        s.dirty = true;
-      } finally {
-        s.inflight = false;
       }
     }
   }
@@ -359,6 +381,14 @@ export class ScreenTracker {
     };
     const diff: InnerMessage = { type: "screen.diff", ...base, scroll: delta, changed };
 
+    s.prepared = { gen: s.gen, diff, forceSnapshotAll, snapshotFor };
+  }
+
+  private deliver(s: SessionState): void {
+    const frame = s.prepared;
+    if (!frame || s.viewers.size === 0) return;
+    const { gen, diff, forceSnapshotAll, snapshotFor } = frame;
+
     // Fair service order under a scarce budget: most-coalesced viewer first; ties broken by
     // rotating the start offset each tick, so no viewer is stuck permanently at the back.
     const entries = [...s.viewers.entries()];
@@ -372,7 +402,7 @@ export class ScreenTracker {
     s.rrOffset = (s.rrOffset + 1) % n;
 
     for (const [conn, v] of ordered) {
-      const stale = v.lastSentGen !== s.gen;
+      const stale = v.lastSentGen !== gen;
       if (!stale && !v.forceSnapshot) continue; // already has this exact generation; nothing to do
       if (!this.spend()) {
         // Global budget exhausted this tick: coalesce. `lastSentGen` stays stale, so this viewer
@@ -382,9 +412,9 @@ export class ScreenTracker {
       }
       const starved = v.skipped >= COALESCE_DEGRADE_TICKS;
       const upToDate =
-        v.lastSentGen === s.gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
+        v.lastSentGen === gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
       this.opts.sink(conn, upToDate ? diff : snapshotFor(starved));
-      v.lastSentGen = s.gen;
+      v.lastSentGen = gen;
       v.forceSnapshot = false;
       v.skipped = 0;
     }

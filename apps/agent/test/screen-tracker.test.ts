@@ -41,6 +41,19 @@ const flush = async () => {
   await vi.advanceTimersByTimeAsync(130);
 };
 
+const restartAtOneFramePerSecond = () => {
+  tracker.stop();
+  sent = [];
+  tracker = new ScreenTracker({
+    backend,
+    sink: (conn, msg) => sent.push({ conn, msg }),
+    log,
+    maxFramesPerSecond: 1,
+    now: () => Date.now(),
+  });
+  tracker.start();
+};
+
 describe("ScreenTracker", () => {
   it("snapshot on view; diff with scroll when tailing; nothing when no viewers", async () => {
     tracker.setViewed("p1", "S");
@@ -183,6 +196,101 @@ describe("ScreenTracker", () => {
     }
     expect(sent.length).toBeGreaterThanOrEqual(10); // at least one tick was served in full
     expect(sent.length).toBeLessThanOrEqual(40); // 70 attempts, 40 tokens
+  });
+
+  it("delivers six static viewers without recapturing", async () => {
+    for (let i = 0; i < 6; i++) tracker.setViewed(`p${i}`, "S");
+    await vi.advanceTimersByTimeAsync(125);
+    expect(new Set(sent.map((x) => x.conn)).size).toBe(5);
+    const captures = backend.getScreenCalls;
+    await vi.advanceTimersByTimeAsync(125);
+    expect(new Set(sent.map((x) => x.conn)).size).toBe(6);
+    expect(backend.getScreenCalls).toBe(captures);
+    expect(new Set(sent.map((x) => ("gen" in x.msg ? x.msg.gen : -1)))).toEqual(new Set([1]));
+  });
+
+  describe("pending delivery", () => {
+    it("delivers the first snapshot after an initially empty bucket without recapturing", async () => {
+      restartAtOneFramePerSecond();
+      tracker.setViewed("p1", "S");
+
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(0);
+      const captures = backend.getScreenCalls;
+
+      await vi.advanceTimersByTimeAsync(875);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.msg.type).toBe("screen.snapshot");
+      expect(backend.getScreenCalls).toBe(captures);
+    });
+
+    it("delivers final output after quietness without recapturing", async () => {
+      restartAtOneFramePerSecond();
+      tracker.setViewed("p1", "S");
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sent).toHaveLength(1);
+
+      backend.appendLine("S", "final");
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(1);
+      const captures = backend.getScreenCalls;
+
+      await vi.advanceTimersByTimeAsync(875);
+      expect(sent).toHaveLength(2);
+      expect(text(sent[1]?.msg as InnerMessage)).toContain("final");
+      expect(backend.getScreenCalls).toBe(captures);
+    });
+
+    it("cancels a pending frame when its viewer unsubscribes", async () => {
+      restartAtOneFramePerSecond();
+      tracker.setViewed("p1", "S");
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(0);
+
+      tracker.setViewed("p1", null);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sent).toHaveLength(0);
+    });
+
+    it("cancels a pending frame when its session is removed", async () => {
+      restartAtOneFramePerSecond();
+      tracker.setViewed("p1", "S");
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(0);
+
+      backend.emit({ type: "session-removed", sessionId: "S" });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sent).toHaveLength(0);
+    });
+
+    it("cancels a pending frame when the tracker stops", async () => {
+      restartAtOneFramePerSecond();
+      tracker.setViewed("p1", "S");
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(0);
+
+      tracker.stop();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sent).toHaveLength(0);
+    });
+
+    it("discards an obsolete capture when a session is removed and recreated", async () => {
+      let release: () => void = () => {};
+      backend.getScreenGate = new Promise((resolve) => {
+        release = resolve;
+      });
+      tracker.setViewed("old-viewer", "S");
+      await vi.advanceTimersByTimeAsync(125);
+      expect(backend.getScreenCalls).toBe(1);
+
+      backend.emit({ type: "session-removed", sessionId: "S" });
+      tracker.setViewed("new-viewer", "S");
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sent.map((x) => x.conn)).not.toContain("old-viewer");
+      expect(tracker.viewedBy("S")).toEqual(["new-viewer"]);
+    });
   });
 
   it("suppresses no-op ticks: unchanged content wakes no already-current viewer", async () => {
