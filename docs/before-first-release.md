@@ -131,6 +131,86 @@ the exact steps. An agent must never run, simulate, or report the outcome of any
   `v0.1.0`; then the M6 gate — two people other than the author pair and use Shellbell from the
   written docs alone, recorded in `docs/feedback-0.1.md`.
 
+## Scope that exists nowhere in the plan (added 2026-09-19)
+
+The numbered plan makes Task 13 look like it follows Task 12 directly. It does not. Bilal's own
+ordering, stated while dogfooding on 2026-09-19:
+
+1. Dev builds on devices — **done for Android**
+2. **Dogfooding. Weeks, not hours.** This is the gate, not a step
+3. Tasks 11 and 12 largely fall out of dogfooding rather than being separate exercises
+4. **A website and branding pass** — no spec, no plan, no estimate; simply not written down before
+5. Task 13, when it is actually ready
+
+"Release is the last thing on my mind" (2026-09-19). Do not treat Task 13 as imminent, and do not
+re-raise merging PR #9 on the strength of Tasks 11/12 being finishable.
+
+## Found by using it (2026-09-19, first real dogfooding session)
+
+Everything here came out of one evening of actually running Shellbell, not from review. That is
+the argument for doing more of it before release, not less.
+
+- **The documented setup leaves the agent dead.** `README.md`'s 60-second setup is `npx shellbell`
+  → install app → scan QR → confirm. It never mentions `shellbell service install`, and `start`
+  never offers it. A user follows the docs exactly, pairs, closes the terminal — and the agent
+  exits. Their phone goes quiet and nothing explains why. **This silently breaks the core promise
+  and is the most valuable pre-release fix on this list.** Cheapest form: after a successful pair,
+  `start` asks "keep Shellbell running when you close this window? [Y/n]" and runs the install.
+- **`service install` cannot work from a dev checkout.** `install()` uses `process.argv[1]` as the
+  program path, so from the repo it writes a plist running `node src/cli.ts` — which node cannot
+  execute. `isGlobalInstall()` rejects npx paths but not a `.ts` entry point, so it fails silently
+  at boot rather than refusing up front. Workaround used on 2026-09-19: `pnpm -F shellbell build`,
+  `pnpm pack`, `npm i -g ./shellbell-0.0.1.tgz`, then `shellbell service install`.
+- **A sleeping Mac looks exactly like a broken Shellbell.** `KeepAlive` restarts a *crashed* agent;
+  nothing can run a *sleeping* one. Closed lid → no events, no rings, no explanation. Bilal is
+  running **Amphetamine** to work around this, with nothing in either app indicating they are
+  related. Note closed-display mode is a separate Amphetamine toggle and generally needs the power
+  adapter.
+- **Login Items shows "Node.js Foundation", not Shellbell.** macOS attributes a background item to
+  the code signature of the program being run, and the program is node
+  (`Developer ID Application: Node.js Foundation (HX7739G8FX)`); the plist `Label` is not used.
+  **Publishing to npm does not fix this** — `npm i -g shellbell` produces the same entry. Only a
+  binary signed with Miambi's own Developer ID does. It matters more than it looks: an
+  unattributable background process is what a careful user disables, and "trust us with your
+  terminal, end-to-end encrypted" is exactly the pitch it undercuts. Mitigating factor: the entry
+  only appears if the user runs `service install`, which the documented path never tells them to.
+- **The local agent config kept a dead relay URL.** `~/.shellbell/config.json` still held
+  `wss://relay.shellbell.app` from before the 2026-09-14 domain change, because `relayUrl` is
+  persisted and changing `DEFAULT_RELAY` does not migrate an existing install. Harmless now (one
+  install, nothing published) but the same shape of bug bites hard after a post-release domain
+  change.
+- **`expo-doctor` is a CI gate that fails on upstream time, not on this repo.** It resolves the
+  SDK's expected versions from the network, so main went red on 2026-09-19 with no code change
+  when Expo published four patch releases. Before hunting a cause in the diff, check whether
+  anything here actually changed.
+- **Dev-client builds are useless away from the Mac.** The `development` profile ships no JS and
+  fetches its bundle from Metro over the LAN. Off-network it is a blank shell. Use the `preview`
+  profile for anything resembling real use — that is a standalone APK. The relay itself has no
+  such constraint: agent and phone both dial *outbound* to `relay.shellbell.dev`, so cellular from
+  anywhere works, and creating sessions from the phone (`session.create`, supported by all three
+  backends) works the same way.
+
+## Deferred by decision, with the reasoning (2026-09-19)
+
+- **A signed macOS menu bar app.** Post-1.0, needs its own spec. Three independent arguments
+  arrived separately from real use, which is why it is worth more than it first sounds: (a) setup —
+  "people won't need complex lines to execute and will have an app they can install"; (b) sleep —
+  a user is already running Amphetamine to keep Shellbell working, and nothing connects the two;
+  (c) identity — it is the only thing that fixes the Login Items attribution, and Miambi now holds
+  the Developer ID (Team `2CW9DK45CV`) it would be signed with. It also subsumes the
+  `service install` gap entirely.
+- **Multi-line input composition.** Deliberately *not* built on 2026-09-19. The input bar now grows
+  to three lines and Return still sends; what was dropped is Return-inserts-newline plus a Send
+  button. Reason: `apps/agent/src/backends/tmux/backend.ts` splits text on newlines and presses
+  Enter between the parts, so a multi-line body submits once per line inside a coding agent — the
+  exact opposite of what composing an agent prompt needs, and that prompt is the motivating use
+  case. Doing it properly means **bracketed paste**: tmux can do it correctly via
+  `load-buffer` + `paste-buffer -p` (which emits it only if the application enabled it), iTerm2's
+  `sendText` has no equivalent guard and would emit `ESC[200~` blind, and the protocol probably
+  needs to distinguish "type this" from "paste this". Three components and a wire change — its own
+  spec. **Before designing it, run the cheap experiment:** paste a three-line prompt into a real
+  Claude Code pane through Herdr and observe what actually happens.
+
 ## Known follow-ups (not placeholders, but not yet done)
 
 - **Herdr fixtures are real except for three panes.** Plan 04b Task 7 ran on 2026-09-06 against a

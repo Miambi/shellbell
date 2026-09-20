@@ -138,7 +138,10 @@ sync by hand.
   `node -e "require('fs').writeFileSync('log.txt',require('zlib').brotliDecompressSync(require('fs').readFileSync('raw.bin')))"`,
   then parse the JSON-per-line records. The CLI's `--json` output truncates the real error;
   the log file has it.
-- `.superpowers/` is gitignored agent working state; `docs/superpowers/` is the committed record.
+- `.superpowers/` is gitignored agent working state; `docs/superpowers/` is the committed record —
+  `specs/` (authority), `plans/` (execution records) and `sessions/` (narrative behind decisions
+  that would otherwise only exist in a chat log; the live checklist stays
+  `docs/before-first-release.md`).
 
 ## Release state — read this before touching anything release-related
 
