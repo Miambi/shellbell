@@ -379,6 +379,65 @@ describe("ScreenTracker", () => {
   });
 
   describe("fairness under a scarce global budget", () => {
+    it("rotates scarce tokens fairly across sessions", async () => {
+      restartAtOneFramePerSecond();
+      backend.addSession("T", { rows: 3, lines: ["x", "y", "z"], scrollbackTotal: 20 });
+      tracker.setViewed("viewer-s", "S");
+      tracker.setViewed("viewer-t", "T");
+
+      for (let tick = 0; tick < 3000 / 125; tick++) {
+        backend.appendLine("S", `busy-${tick}`);
+        await vi.advanceTimersByTimeAsync(125);
+      }
+
+      expect(sent.some(({ conn }) => conn === "viewer-t")).toBe(true);
+      expect(sent.length).toBeLessThanOrEqual(3);
+    });
+
+    it("delivers static generation 1 across sessions without recapturing", async () => {
+      restartAtOneFramePerSecond();
+      backend.addSession("T", { rows: 3, lines: ["x", "y", "z"], scrollbackTotal: 20 });
+      tracker.setViewed("viewer-s", "S");
+      tracker.setViewed("viewer-t", "T");
+
+      await vi.advanceTimersByTimeAsync(125);
+      expect(sent).toHaveLength(0);
+      const captures = backend.getScreenCalls;
+
+      await vi.advanceTimersByTimeAsync(875);
+      expect(sent).toHaveLength(1);
+      expect(backend.getScreenCalls).toBe(captures);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(sent).toHaveLength(2);
+      expect(sent.map(({ conn }) => conn).sort()).toEqual(["viewer-s", "viewer-t"]);
+      expect(sent.map(({ msg }) => ("gen" in msg ? msg.gen : -1))).toEqual([1, 1]);
+      expect(backend.getScreenCalls).toBe(captures);
+    });
+
+    it("counts a throwing send as spent when rotating across sessions", async () => {
+      tracker.stop();
+      backend.addSession("T", { rows: 3, lines: ["x", "y", "z"], scrollbackTotal: 20 });
+      sent = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => {
+          if (conn === "viewer-s") throw new Error("transport refused");
+          sent.push({ conn, msg });
+        },
+        log,
+        maxFramesPerSecond: 1,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("viewer-s", "S");
+      tracker.setViewed("viewer-t", "T");
+
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(sent.some(({ conn }) => conn === "viewer-t")).toBe(true);
+    });
+
     it("10 viewers, continuous output for 3s: every viewer is served, total capped at 40/s", async () => {
       const conns = Array.from({ length: 10 }, (_, i) => `v${i}`);
       for (const c of conns) tracker.setViewed(c, "S");

@@ -61,6 +61,7 @@ const COALESCE_DEGRADE_TICKS = 3;
 
 export class ScreenTracker {
   private readonly sessions = new Map<string, SessionState>();
+  private sessionOffset = 0;
   private readonly viewerSession = new Map<string, string>();
   /** ONE bucket for every sink call: they all share the agent's single relay socket. */
   private readonly budget: Budget;
@@ -207,7 +208,13 @@ export class ScreenTracker {
   }
 
   private async tick(): Promise<void> {
-    for (const [sessionId, s] of this.sessions) {
+    const entries = [...this.sessions.entries()];
+    if (entries.length === 0) return;
+    const offset = this.sessionOffset % entries.length;
+    const ordered = entries.slice(offset).concat(entries.slice(0, offset));
+
+    for (const entry of ordered) {
+      const [sessionId, s] = entry;
       if (this.stopped) return;
       if (s.inflight || s.viewers.size === 0) continue;
       if (s.dirty) {
@@ -255,9 +262,13 @@ export class ScreenTracker {
           s.inflight = false;
         }
       }
+      let tokenSpent = false;
       try {
-        this.deliver(s);
+        tokenSpent = this.deliver(s);
       } catch (err) {
+        // Fallible frame construction and the sink both happen after spending. Count that refused
+        // send so the same session cannot monopolize each subsequent refill.
+        tokenSpent = true;
         // Keep the prepared generation and viewer state intact so the next tick can retry without
         // manufacturing another backend capture.
         this.log.error("screen delivery threw; will retry prepared generation", {
@@ -265,6 +276,7 @@ export class ScreenTracker {
           err: err instanceof Error ? err.name : "unknown",
         });
       }
+      if (tokenSpent) this.sessionOffset = (entries.indexOf(entry) + 1) % entries.length;
     }
   }
 
@@ -384,10 +396,11 @@ export class ScreenTracker {
     s.prepared = { gen: s.gen, diff, forceSnapshotAll, snapshotFor };
   }
 
-  private deliver(s: SessionState): void {
+  private deliver(s: SessionState): boolean {
     const frame = s.prepared;
-    if (!frame || s.viewers.size === 0) return;
+    if (!frame || s.viewers.size === 0) return false;
     const { gen, diff, forceSnapshotAll, snapshotFor } = frame;
+    let tokenSpent = false;
 
     // Fair service order under a scarce budget: most-coalesced viewer first; ties broken by
     // rotating the start offset each tick, so no viewer is stuck permanently at the back.
@@ -410,6 +423,7 @@ export class ScreenTracker {
         v.skipped += 1;
         continue;
       }
+      tokenSpent = true;
       const starved = v.skipped >= COALESCE_DEGRADE_TICKS;
       const upToDate =
         v.lastSentGen === gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
@@ -418,6 +432,7 @@ export class ScreenTracker {
       v.forceSnapshot = false;
       v.skipped = 0;
     }
+    return tokenSpent;
   }
 
   /**
