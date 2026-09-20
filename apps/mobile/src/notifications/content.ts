@@ -46,12 +46,17 @@ function titleFor(label: SessionLabel | undefined): string {
   return "Session";
 }
 
+/** One definition of the identifier, shared by the presenter and the dismisser. */
+export function notificationIdFor(fp: string, sessionId: string): string {
+  return `${fp}:${sessionId}`;
+}
+
 export function buildRingNotification(
   payload: RingPayload,
   lookup: TitleLookup,
 ): { identifier: string; title: string; body: string } {
   return {
-    identifier: `${payload.computerFp}:${payload.sessionId}`,
+    identifier: notificationIdFor(payload.computerFp, payload.sessionId),
     title: titleFor(lookup(payload.computerFp, payload.sessionId)),
     body: bodyFor(payload.kind),
   };

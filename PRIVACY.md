@@ -26,6 +26,16 @@ It never stores, and never sees, terminal content, session titles, commands, or 
 an agent type. Not encrypted-and-discarded — never received in the first place: those bytes are
 sealed with a key only your phone and Mac hold.
 
+## What your phone stores
+
+Your phone keeps a local list of session **titles**, so a notification can name the session
+instead of showing a generic message. That is the only thing kept:
+
+- Session titles are stored on-device only. They are never sent anywhere — not to the relay, not
+  to Apple or Google, not anywhere else.
+- The relay still never sees them; this store doesn't change what it stores (above).
+- Output and commands are **not** stored, on the phone or anywhere else.
+
 ## Logs
 
 The relay's own code logs only a handful of generic error strings when something goes wrong — for

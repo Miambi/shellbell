@@ -1,10 +1,12 @@
 import { useKeepAwake } from "expo-keep-awake";
+import { dismissNotificationAsync } from "expo-notifications";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef } from "react";
 import { View } from "react-native";
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { InputBar } from "../../../../src/input/InputBar";
 import { connectionManager } from "../../../../src/net/manager";
+import { notificationIdFor } from "../../../../src/notifications/content";
 import { ScreenView } from "../../../../src/screen/ScreenView";
 import { useComputersStore } from "../../../../src/store/computers";
 import { useConnectionsStore } from "../../../../src/store/connections";
@@ -40,6 +42,9 @@ export default function Session() {
     useConnectionsStore.getState().patch(fp ?? "", (x) => ({
       unread: { ...x.unread, [sessionId]: 0 },
     }));
+    // Spec §6: if you are looking at it, it is not waiting for you. A failure here must never
+    // break the screen — a stale notification is a nuisance, a crashed render is a bug.
+    void dismissNotificationAsync(notificationIdFor(fp ?? "", sessionId)).catch(() => undefined);
     return () => {
       c?.subscribe(null);
     };

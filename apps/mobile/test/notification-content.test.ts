@@ -34,8 +34,17 @@ describe("buildRingNotification", () => {
     expect(n.title).toBe("Session");
   });
 
-  it("never renders a raw session id", () => {
-    const n = buildRingNotification({ computerFp: "abc", sessionId: "s9", kind: "idle" }, none);
+  it("never renders a raw session id when a title is known", () => {
+    const n = buildRingNotification({ computerFp: "abc", sessionId: "s9", kind: "idle" }, known);
+    expect(n.title).not.toContain("s9");
+    expect(n.body).not.toContain("s9");
+  });
+
+  it("never renders a raw session id when the backend is known but the title is empty", () => {
+    const n = buildRingNotification({ computerFp: "abc", sessionId: "s9", kind: "idle" }, () => ({
+      title: "",
+      backend: "tmux" as const,
+    }));
     expect(n.title).not.toContain("s9");
     expect(n.body).not.toContain("s9");
   });
