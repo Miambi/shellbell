@@ -1,11 +1,19 @@
 import Constants from "expo-constants";
 import * as Haptics from "expo-haptics";
 import * as ExpoNotifications from "expo-notifications";
+import Storage from "expo-sqlite/kv-store";
 import { Platform } from "react-native";
 import { connectionManager } from "../net/manager";
 import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
 import { foregroundToast, validProjectId } from "./routing";
+import type { TitleStorage } from "./sessionTitles";
+
+/** The real, on-device backend for `sessionTitles.ts`'s injectable `TitleStorage`. */
+export const kvTitleStorage: TitleStorage = {
+  getItemSync: (k) => Storage.getItemSync(k),
+  setItemSync: (k, v) => Storage.setItemSync(k, v),
+};
 
 export interface PermissionState {
   granted: boolean;
