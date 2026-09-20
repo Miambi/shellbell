@@ -230,6 +230,31 @@ the argument for doing more of it before release, not less.
   the hoisted layout is a ~20 minute operation. Do it when the website work starts and something
   actually consumes `brand/`, not before. The reviewer explicitly called it "not a blocker".
 
+## Current state and handoff (2026-09-20)
+
+`main` is at `0d45724`, pushed, CI green, 838 tests across the workspace. The full narrative is in
+`docs/superpowers/sessions/2026-09-20-notifications-keyboard-and-brand.md` — read it before
+picking this up, from either Codex or Claude Code.
+
+**The one thing blocking everything: nothing built today has run on a phone.** The notification
+identity work, the second attempt at the keyboard occlusion fix, line-mode dictation, and whether
+Android auto-bundles notifications are all unverified. The APK built from `0d45724` is at
+`https://expo.dev/artifacts/eas/7gTUGYOsWcTT-4PvMrpz-gKWQg4xpR_C0q1Jga5_kao.apk`.
+Do not mark any of them done from a green test run — that mistake was already made once, on the
+keyboard fix, which was asserted as working and was not.
+
+**The brand assets in git are being superseded.** As of the end of 2026-09-20, Codex is rebuilding
+the brand with a different naming convention (`-black`/`-white` rather than `-on-dark`/`-on-light`)
+and much broader platform coverage (`brand/{android,ios,macos,windows,linux,web,tray}/`, an asset
+manifest, new generators). That work was uncommitted at handoff. **Do not reconcile the working
+tree back to what is committed.** The design reasoning in
+`docs/superpowers/specs/2026-09-19-shellbell-brand-design.md` should survive any re-rendering; the
+specific files may not.
+
+**Still open and small:** `idleQuietMs` is 4 s and produces most of the notification volume
+(recommended 30 s, one line, `apps/agent/src/config.ts`); the Firebase API-key restriction still
+needs the SHA-1 from Play Console → App integrity.
+
 ## Deferred by decision, with the reasoning (2026-09-19)
 
 - **A signed macOS menu bar app.** Post-1.0, needs its own spec. Three independent arguments
