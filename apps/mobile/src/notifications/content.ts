@@ -6,6 +6,10 @@ export interface RingPayload {
   computerFp: string;
   sessionId: string;
   kind: string;
+  // Structurally assignable to `expo-notifications`' `NotificationContentInput.data`
+  // (`Record<string, unknown>`) so `buildScheduleInput` (ring.ts) needs no cast at the Expo
+  // boundary.
+  [key: string]: unknown;
 }
 
 export interface SessionLabel {
@@ -51,13 +55,23 @@ export function notificationIdFor(fp: string, sessionId: string): string {
   return `${fp}:${sessionId}`;
 }
 
-export function buildRingNotification(
-  payload: RingPayload,
-  lookup: TitleLookup,
-): { identifier: string; title: string; body: string } {
+export interface RingNotification {
+  identifier: string;
+  title: string;
+  body: string;
+  /**
+   * Spec §6: tapping the notification must still open the session. `data` carries the same
+   * `{computerFp, sessionId, kind}` the relay's generic notification carried, so the existing
+   * `resolveTarget` (`routing.ts`) tap path keeps working unchanged (review C1).
+   */
+  data: RingPayload;
+}
+
+export function buildRingNotification(payload: RingPayload, lookup: TitleLookup): RingNotification {
   return {
     identifier: notificationIdFor(payload.computerFp, payload.sessionId),
     title: titleFor(lookup(payload.computerFp, payload.sessionId)),
     body: bodyFor(payload.kind),
+    data: payload,
   };
 }

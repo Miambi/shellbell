@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { extractRingPayload, handleIncomingRing } from "../src/notifications/ring";
+import {
+  buildScheduleInput,
+  extractRingPayload,
+  handleIncomingRing,
+  selectRingInput,
+} from "../src/notifications/ring";
 
 function deps() {
   return {
@@ -21,6 +26,7 @@ describe("handleIncomingRing (spec 2026-09-20 §4)", () => {
       identifier: "abc:s1",
       title: "claude-code",
       body: "An agent is waiting for you",
+      data: { computerFp: "abc", sessionId: "s1", kind: "blocked" },
     });
   });
 
@@ -62,6 +68,90 @@ describe("handleIncomingRing (spec 2026-09-20 §4)", () => {
     };
     await handleIncomingRing({ computerFp: "abc", sessionId: "s1", kind: "idle" }, "i", d);
     expect(order).toEqual(["present", "dismiss"]);
+  });
+
+  it("skips the dismiss when there is no identifier to dismiss (review I3)", async () => {
+    const d = deps();
+    await handleIncomingRing({ computerFp: "abc", sessionId: "s1", kind: "idle" }, undefined, d);
+    expect(d.present).toHaveBeenCalled();
+    expect(d.dismiss).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Review C2: `NotificationContentInput` (verified against the installed
+ * `expo-notifications/src/Notifications.types.ts`) has no `channelId` — only
+ * `ChannelAwareTriggerInput` (`{ channelId: string }`, one arm of `NotificationTriggerInput`) does.
+ * `trigger: null` (the pre-fix code) makes Android's `BaseNotificationBuilder.kt` fall back to
+ * `expo_notifications_fallback_notification_channel`, losing the `rings` channel's emerald
+ * light/vibration and risking a double-buzz on a second, muted-by-default channel.
+ */
+describe("buildScheduleInput (review C1 data passthrough + C2 channel)", () => {
+  it("schedules on the rings channel and carries data for the tap path", () => {
+    const n = {
+      identifier: "abc:s1",
+      title: "claude-code",
+      body: "An agent is waiting for you",
+      data: { computerFp: "abc", sessionId: "s1", kind: "blocked" },
+    };
+    expect(buildScheduleInput(n)).toEqual({
+      identifier: "abc:s1",
+      content: {
+        title: "claude-code",
+        body: "An agent is waiting for you",
+        sound: "default",
+        data: { computerFp: "abc", sessionId: "s1", kind: "blocked" },
+      },
+      trigger: { channelId: "rings" },
+    });
+  });
+});
+
+/**
+ * Review I1/I2: the raw `expo-task-manager` shape selection (response vs. plain-message) and the
+ * dismissal identifier's `tag ?? messageId` fallback (mirrors `FirebaseMessagingDelegate.kt`'s
+ * `getNotificationIdentifier`: `remoteMessage.data["tag"] ?: remoteMessage.messageId ?: ...`) were
+ * previously inline in `index.ts`'s `defineTask` and untested.
+ */
+describe("selectRingInput (review I1/I2)", () => {
+  it("reads the response shape's content and identifier from notification.request", () => {
+    const raw = {
+      actionIdentifier: "expo.modules.notifications.actions.DEFAULT",
+      notification: { request: { identifier: "abc:s1", content: { dataString: "{}" } } },
+    };
+    expect(selectRingInput(raw)).toEqual({
+      content: { dataString: "{}" },
+      identifier: "abc:s1",
+    });
+  });
+
+  it("prefers data.tag over messageId on the plain-message shape (review I2)", () => {
+    const raw = { data: { dataString: "{}", tag: "abc:s1" }, messageId: "0:abcdef" };
+    expect(selectRingInput(raw)).toEqual({
+      content: { dataString: "{}", tag: "abc:s1" },
+      identifier: "abc:s1",
+    });
+  });
+
+  it("falls back to messageId when there is no tag", () => {
+    const raw = { data: { dataString: "{}" }, messageId: "0:abcdef" };
+    expect(selectRingInput(raw)).toEqual({
+      content: { dataString: "{}" },
+      identifier: "0:abcdef",
+    });
+  });
+
+  it("has no identifier when neither tag nor messageId is present", () => {
+    const raw = { data: { dataString: "{}" } };
+    expect(selectRingInput(raw)).toEqual({
+      content: { dataString: "{}" },
+      identifier: undefined,
+    });
+  });
+
+  it("returns undefined for an unrecognised (missing) payload", () => {
+    expect(selectRingInput(undefined)).toBeUndefined();
+    expect(selectRingInput(null)).toBeUndefined();
   });
 });
 

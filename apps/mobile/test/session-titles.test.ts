@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  evictUnpairedComputers,
   lookupSessionTitle,
   saveSessionTitles,
   type TitleStorage,
@@ -46,5 +47,40 @@ describe("session title persistence", () => {
     expect(lookupSessionTitle("fp1", "s1", st)).toBeUndefined();
     saveSessionTitles("fp1", [s("s1", "ok")], st);
     expect(lookupSessionTitle("fp1", "s1", st)?.title).toBe("ok");
+  });
+
+  /**
+   * Spec §5: "cap total entries per computer" — defense in depth even though the protocol already
+   * bounds a single `sessions` message to 500 (`packages/protocol/src/inner.ts:95`); this cap must
+   * hold regardless of what produced the list (review Minor).
+   */
+  it("caps entries per computer instead of storing an unbounded list", () => {
+    const st = memory();
+    const many = Array.from({ length: 600 }, (_, i) => s(`s${i}`, `title${i}`));
+    saveSessionTitles("fp1", many, st);
+    expect(lookupSessionTitle("fp1", "s0", st)?.title).toBe("title0");
+    expect(lookupSessionTitle("fp1", "s599", st)).toBeUndefined();
+  });
+});
+
+/**
+ * Spec §5's bound is per-session; review Minor additionally asks that an unpaired computer's
+ * whole entry not linger forever. Wired from `settings.tsx`'s unpair handler.
+ */
+describe("evictUnpairedComputers (review Minor)", () => {
+  it("removes entries for computers no longer paired", () => {
+    const st = memory();
+    saveSessionTitles("fp1", [s("s1", "one")], st);
+    saveSessionTitles("fp2", [s("s1", "two")], st);
+    evictUnpairedComputers(["fp2"], st);
+    expect(lookupSessionTitle("fp1", "s1", st)).toBeUndefined();
+    expect(lookupSessionTitle("fp2", "s1", st)?.title).toBe("two");
+  });
+
+  it("is a no-op when every stored computer is still paired", () => {
+    const st = memory();
+    saveSessionTitles("fp1", [s("s1", "one")], st);
+    evictUnpairedComputers(["fp1", "fp2"], st);
+    expect(lookupSessionTitle("fp1", "s1", st)?.title).toBe("one");
   });
 });

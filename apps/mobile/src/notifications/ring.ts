@@ -1,4 +1,9 @@
-import { buildRingNotification, type RingPayload, type SessionLabel } from "./content";
+import {
+  buildRingNotification,
+  type RingNotification,
+  type RingPayload,
+  type SessionLabel,
+} from "./content";
 
 /**
  * Pure decision logic for replacing the relay's generic ring notification with one that names its
@@ -8,7 +13,7 @@ import { buildRingNotification, type RingPayload, type SessionLabel } from "./co
  */
 export interface RingHandlerDeps {
   lookup: (fp: string, sessionId: string) => SessionLabel | undefined;
-  present: (n: { identifier: string; title: string; body: string }) => Promise<void>;
+  present: (n: RingNotification) => Promise<void>;
   dismiss: (identifier: string) => Promise<void>;
 }
 
@@ -17,16 +22,49 @@ export interface RingHandlerDeps {
  * when this task gets to run we replace it with one that names the session. Keyed
  * `${fp}:${sessionId}`, so a session's next ring overwrites its previous notification instead of
  * stacking. If this never runs, the generic notification simply stands — no regression.
+ *
+ * `incomingIdentifier` is `undefined` when the generic notification's own identifier could not be
+ * determined (review I3: on the plain-message path, Android may fall back to a random UUID that
+ * we cannot reconstruct in JS — see `selectRingInput` below). In that case we still present the
+ * enriched notification, but skip the dismiss: calling `dismiss("")` would be a no-op at best and
+ * risks dismissing an unrelated notification at worst.
  */
 export async function handleIncomingRing(
   payload: RingPayload,
-  incomingIdentifier: string,
+  incomingIdentifier: string | undefined,
   deps: RingHandlerDeps,
 ): Promise<void> {
   if (!payload.computerFp || !payload.sessionId || !payload.kind) return;
   const n = buildRingNotification(payload, deps.lookup);
   await deps.present(n);
-  await deps.dismiss(incomingIdentifier);
+  if (incomingIdentifier) await deps.dismiss(incomingIdentifier);
+}
+
+/**
+ * Spec §6 / review C2: schedules on the same `rings` Android channel the generic notification
+ * used (created in `index.ts`'s `ensureChannel`). Verified against the installed
+ * `expo-notifications/src/Notifications.types.ts`: `NotificationContentInput` has no `channelId`
+ * field — only `ChannelAwareTriggerInput` (`{ channelId: string }`, one arm of the
+ * `NotificationTriggerInput` union) does. The pre-fix code passed `trigger: null`, which Android's
+ * `BaseNotificationBuilder.kt` resolves by falling back to
+ * `expo_notifications_fallback_notification_channel` — losing the `rings` channel's emerald
+ * light/vibration pattern, silently creating a second channel, and breaking mute for anyone who
+ * mutes `rings`. `content.data` carries the payload through so a tap still routes (review C1).
+ */
+const RING_CHANNEL_ID = "rings";
+
+export interface RingScheduleInput {
+  identifier: string;
+  content: { title: string; body: string; sound: "default"; data: RingPayload };
+  trigger: { channelId: string };
+}
+
+export function buildScheduleInput(n: RingNotification): RingScheduleInput {
+  return {
+    identifier: n.identifier,
+    content: { title: n.title, body: n.body, sound: "default", data: n.data },
+    trigger: { channelId: RING_CHANNEL_ID },
+  };
 }
 
 /**
@@ -46,6 +84,12 @@ export async function handleIncomingRing(
 export interface RawRingContent {
   data?: unknown;
   dataString?: unknown;
+  /**
+   * Only present on the plain-message shape (`RemoteMessageSerializer.java` flattens the FCM
+   * `data` map's entries alongside `dataString`). Review I2: this is the dismissal identifier
+   * Android actually posted the generic notification under — see `selectRingInput` below.
+   */
+  tag?: unknown;
 }
 
 function isRingPayload(v: unknown): v is RingPayload {
@@ -76,4 +120,53 @@ export function extractRingPayload(
     }
   }
   return isRingPayload(content.data) ? content.data : undefined;
+}
+
+/**
+ * The raw shape `expo-task-manager` hands the background task, per the installed native source
+ * (see `RawRingContent`'s doc comment above): either a `NotificationResponse` (a background
+ * action tap — has `actionIdentifier`, and its content lives at `notification.request.content`),
+ * or a plain incoming remote message (no `actionIdentifier`; its content is `data` itself, and
+ * `notification` is the raw, unrelated FCM/APNs notification fields — never `.request`). Kept
+ * distinct from `RawRingContent` deliberately: they describe different levels of the payload.
+ */
+export interface RawRingTaskData {
+  actionIdentifier?: unknown;
+  notification?: { request?: { identifier?: unknown; content?: RawRingContent } } | null;
+  data?: RawRingContent;
+  messageId?: unknown;
+}
+
+export interface RingInput {
+  content: RawRingContent | undefined;
+  identifier: string | undefined;
+}
+
+/**
+ * Pure shape selection (review I1), previously inline and untested in `index.ts`'s `defineTask`.
+ *
+ * Response shape: content and identifier both come from `notification.request` (`
+ * NotificationSerializer.java`).
+ *
+ * Plain-message shape: content is `data` itself. The identifier mirrors Android's own rule for
+ * what it posted the generic notification under — verified against the installed
+ * `FirebaseMessagingDelegate.kt`'s `getNotificationIdentifier`:
+ * `remoteMessage.data["tag"] ?: remoteMessage.messageId ?: UUID.randomUUID().toString()` (review
+ * I2). We can't reconstruct the random-UUID fallback in JS, so when neither `tag` nor `messageId`
+ * is present the identifier is `undefined` — `handleIncomingRing` then skips the dismiss (I3)
+ * rather than dismissing the wrong (or no) notification.
+ */
+export function selectRingInput(raw: RawRingTaskData | null | undefined): RingInput | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw.actionIdentifier === "string") {
+    const rawIdentifier = raw.notification?.request?.identifier;
+    return {
+      content: raw.notification?.request?.content,
+      identifier: typeof rawIdentifier === "string" ? rawIdentifier : undefined,
+    };
+  }
+  const tag = raw.data?.tag;
+  const identifier =
+    typeof tag === "string" ? tag : typeof raw.messageId === "string" ? raw.messageId : undefined;
+  return { content: raw.data, identifier };
 }

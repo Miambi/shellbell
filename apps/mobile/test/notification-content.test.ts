@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildRingNotification } from "../src/notifications/content";
+import { resolveTarget } from "../src/notifications/routing";
+import { sidToRoute } from "../src/util/routes";
 
 const known = () => ({ title: "claude-code", backend: "herdr" as const });
 const none = () => undefined;
@@ -47,5 +49,21 @@ describe("buildRingNotification", () => {
     }));
     expect(n.title).not.toContain("s9");
     expect(n.body).not.toContain("s9");
+  });
+
+  it("carries the payload as `data` so a tap can still route (spec §6, review C1)", () => {
+    const payload = { computerFp: "abc", sessionId: "s1", kind: "blocked" };
+    const n = buildRingNotification(payload, known);
+    expect(n.data).toEqual(payload);
+  });
+
+  it("that `data` is exactly what resolveTarget needs to route the tap (review C1)", () => {
+    const fp = "a".repeat(26);
+    const payload = { computerFp: fp, sessionId: "iterm2:w0t0p0", kind: "blocked" };
+    const n = buildRingNotification(payload, known);
+    expect(resolveTarget(n.data, [fp])).toEqual({
+      computerFp: fp,
+      sessionRoute: sidToRoute("iterm2:w0t0p0"),
+    });
   });
 });

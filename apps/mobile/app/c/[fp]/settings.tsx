@@ -2,6 +2,8 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { Alert, Pressable, ScrollView, Switch, Text, View } from "react-native";
 import { deletePairSecret } from "../../../src/identity/keys";
 import { connectionManager } from "../../../src/net/manager";
+import { kvTitleStorage } from "../../../src/notifications";
+import { evictUnpairedComputers } from "../../../src/notifications/sessionTitles";
 import { useComputersStore } from "../../../src/store/computers";
 import { useConnectionsStore } from "../../../src/store/connections";
 import { tokens } from "../../../src/theme/tokens";
@@ -37,6 +39,12 @@ export default function ComputerSettings() {
             connectionManager.get(fp)?.close("user");
             void deletePairSecret(fp);
             remove(fp);
+            // Spec §5 / review Minor: an unpaired computer's session titles must not linger in
+            // kv-store forever.
+            evictUnpairedComputers(
+              useComputersStore.getState().computers.map((c) => c.fp),
+              kvTitleStorage,
+            );
             router.replace("/");
           },
         },

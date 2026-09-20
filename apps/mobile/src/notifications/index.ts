@@ -8,10 +8,12 @@ import { connectionManager } from "../net/manager";
 import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
 import {
+  buildScheduleInput,
   extractRingPayload,
   handleIncomingRing,
-  type RawRingContent,
+  type RawRingTaskData,
   type RingHandlerDeps,
+  selectRingInput,
 } from "./ring";
 import { foregroundToast, validProjectId } from "./routing";
 import { lookupSessionTitle, type TitleStorage } from "./sessionTitles";
@@ -173,11 +175,7 @@ export async function registerPushTokenWhenConnected(fp: string): Promise<void> 
 export const defaultRingHandlerDeps: RingHandlerDeps = {
   lookup: (fp, sessionId) => lookupSessionTitle(fp, sessionId, kvTitleStorage),
   present: async (n) => {
-    await ExpoNotifications.scheduleNotificationAsync({
-      identifier: n.identifier,
-      content: { title: n.title, body: n.body, sound: "default" },
-      trigger: null,
-    });
+    await ExpoNotifications.scheduleNotificationAsync(buildScheduleInput(n));
   },
   dismiss: async (id) => {
     await ExpoNotifications.dismissNotificationAsync(id);
@@ -186,32 +184,14 @@ export const defaultRingHandlerDeps: RingHandlerDeps = {
 
 export const RING_TASK = "shellbell-ring";
 
-/**
- * The raw shape `expo-task-manager` hands the background task, per the installed native source
- * (see `ring.ts`'s `RawRingContent` doc comment): either a `NotificationResponse` (a background
- * action tap — has `actionIdentifier`, and its content lives at `notification.request.content`),
- * or a plain incoming remote message (no `actionIdentifier`; its content is `data` itself, and
- * `notification` is the raw, unrelated FCM/APNs notification fields — never `.request`).
- */
-interface RawRingTaskData {
-  actionIdentifier?: unknown;
-  notification?: { request?: { identifier?: unknown; content?: RawRingContent } } | null;
-  data?: RawRingContent;
-  messageId?: unknown;
-}
-
 /** Defined at module scope: the OS may start the task before any React tree exists. */
 TaskManager.defineTask(RING_TASK, async ({ data, error }) => {
   if (error) return;
-  const raw = data as RawRingTaskData | undefined;
-  if (!raw) return;
-  const isResponse = typeof raw.actionIdentifier === "string";
-  const content = isResponse ? raw.notification?.request?.content : raw.data;
-  const payload = extractRingPayload(content);
+  const input = selectRingInput(data as RawRingTaskData | undefined);
+  if (!input) return;
+  const payload = extractRingPayload(input.content);
   if (!payload) return;
-  const rawIdentifier = isResponse ? raw.notification?.request?.identifier : raw.messageId;
-  const identifier = typeof rawIdentifier === "string" ? rawIdentifier : "";
-  await handleIncomingRing(payload, identifier, defaultRingHandlerDeps);
+  await handleIncomingRing(payload, input.identifier, defaultRingHandlerDeps);
 });
 
 /** Registration failures are swallowed: an unregistered task just means generic notifications
