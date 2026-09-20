@@ -2,12 +2,15 @@ import Constants from "expo-constants";
 import * as Haptics from "expo-haptics";
 import * as ExpoNotifications from "expo-notifications";
 import Storage from "expo-sqlite/kv-store";
+import * as TaskManager from "expo-task-manager";
 import { Platform } from "react-native";
 import { connectionManager } from "../net/manager";
 import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
+import type { RingPayload } from "./content";
+import { handleIncomingRing, type RingHandlerDeps } from "./ring";
 import { foregroundToast, validProjectId } from "./routing";
-import type { TitleStorage } from "./sessionTitles";
+import { lookupSessionTitle, type TitleStorage } from "./sessionTitles";
 
 /** The real, on-device backend for `sessionTitles.ts`'s injectable `TitleStorage`. */
 export const kvTitleStorage: TitleStorage = {
@@ -159,5 +162,43 @@ export async function registerPushTokenWhenConnected(fp: string): Promise<void> 
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+/** The real, Expo-backed deps for `handleIncomingRing` (pure logic lives in `./ring.ts`). */
+export const defaultRingHandlerDeps: RingHandlerDeps = {
+  lookup: (fp, sessionId) => lookupSessionTitle(fp, sessionId, kvTitleStorage),
+  present: async (n) => {
+    await ExpoNotifications.scheduleNotificationAsync({
+      identifier: n.identifier,
+      content: { title: n.title, body: n.body, sound: "default" },
+      trigger: null,
+    });
+  },
+  dismiss: async (id) => {
+    await ExpoNotifications.dismissNotificationAsync(id);
+  },
+};
+
+export const RING_TASK = "shellbell-ring";
+
+/** Defined at module scope: the OS may start the task before any React tree exists. */
+TaskManager.defineTask(RING_TASK, async ({ data, error }) => {
+  if (error) return;
+  const n = (
+    data as { notification?: { request?: { identifier?: string; content?: { data?: unknown } } } }
+  )?.notification?.request;
+  const payload = n?.content?.data as RingPayload | undefined;
+  if (!payload) return;
+  await handleIncomingRing(payload, n?.identifier ?? "", defaultRingHandlerDeps);
+});
+
+/** Registration failures are swallowed: an unregistered task just means generic notifications
+ * keep showing (spec §4's designed fallback), never a crash. */
+export async function registerRingTask(): Promise<void> {
+  try {
+    await ExpoNotifications.registerTaskAsync(RING_TASK);
+  } catch {
+    // Fallback is the generic notification — never crash startup over this.
   }
 }

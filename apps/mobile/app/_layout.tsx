@@ -18,6 +18,7 @@ import {
   installNotificationHandler,
   installTapHandler,
   kvTitleStorage,
+  registerRingTask,
   showForegroundEvent,
 } from "../src/notifications";
 import { createTapHandler, type NavTarget, parseDeepLink } from "../src/notifications/routing";
@@ -90,6 +91,7 @@ export default function RootLayout() {
     // arrive, so both are installed at startup rather than at permission time.
     installNotificationHandler();
     void ensureChannel();
+    void registerRingTask();
     const handle = createTapHandler(openTarget, pairedFps);
     const offTap = installTapHandler(handle);
     const onUrl = (url: string) => {
