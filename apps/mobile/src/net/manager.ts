@@ -1,6 +1,11 @@
 import type { Identity, InnerMessageLoose } from "@shellbell/protocol";
 import { AppState, type AppStateStatus } from "react-native";
 import { loadPairSecret } from "../identity/keys";
+import {
+  type SessionLike,
+  saveSessionTitles,
+  type TitleStorage,
+} from "../notifications/sessionTitles";
 import { useComputersStore } from "../store/computers";
 import type { Status } from "../store/connections";
 import { useConnectionsStore } from "../store/connections";
@@ -20,6 +25,26 @@ export interface ManagerDeps {
   /** Spec 10.8 foreground path. Injected by `_layout.tsx` so this module stays native-free:
    *  importing `src/notifications` here would pull `expo-notifications` into `manager.test.ts`. */
   onForegroundEvent?: (computerFp: string, sessionTitle: string, kind: string) => void;
+  /** Spec 2026-09-20 §5: the on-device title store (`kvTitleStorage`), injected by `_layout.tsx`
+   *  for the same reason as `onForegroundEvent` above — `sessionTitles.ts` itself stays free of
+   *  Expo imports so node tests can import it, and its real backend lives in `src/notifications`,
+   *  which this module must not import at module scope. */
+  titleStorage?: TitleStorage;
+}
+
+/**
+ * Spec 2026-09-20 §5: titles must outlive the in-memory store, or a backgrounded app cannot name
+ * the session a ring came from. Exported for tests; `storage` is injectable for the same reason.
+ * A missing storage (no deps configured yet, or a test that doesn't care) is a silent no-op
+ * rather than a throw — titles are a notification nicety, never load-bearing for the socket.
+ */
+export function onSessionsMessage(
+  fp: string,
+  list: readonly SessionLike[],
+  storage?: TitleStorage,
+): void {
+  if (storage === undefined) return;
+  saveSessionTitles(fp, list, storage);
 }
 
 class Manager {
@@ -212,6 +237,7 @@ class Manager {
         return;
       case "sessions":
         store.patch(fp, () => ({ sessions: m.list }));
+        onSessionsMessage(fp, m.list, this.deps?.titleStorage);
         return;
       case "screen.snapshot":
         store.patch(fp, (c) => ({

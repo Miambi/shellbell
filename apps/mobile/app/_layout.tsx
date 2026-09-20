@@ -17,6 +17,7 @@ import {
   getPushToken,
   installNotificationHandler,
   installTapHandler,
+  kvTitleStorage,
   showForegroundEvent,
 } from "../src/notifications";
 import { createTapHandler, type NavTarget, parseDeepLink } from "../src/notifications/routing";
@@ -129,6 +130,7 @@ export default function RootLayout() {
             return { ...t, enabled: c.pushEnabled };
           },
           onForegroundEvent: showForegroundEvent,
+          titleStorage: kvTitleStorage,
         });
       })
       .catch(() => setIdentityError(true));
