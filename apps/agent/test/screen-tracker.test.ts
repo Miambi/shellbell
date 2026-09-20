@@ -26,7 +26,9 @@ beforeEach(() => {
   sent = [];
   tracker = new ScreenTracker({
     backend,
-    sink: (conn, msg) => sent.push({ conn, msg }),
+    sink: (conn, msg) => {
+      sent.push({ conn, msg });
+    },
     log,
     now: () => Date.now(),
   });
@@ -46,7 +48,9 @@ const restartAtOneFramePerSecond = () => {
   sent = [];
   tracker = new ScreenTracker({
     backend,
-    sink: (conn, msg) => sent.push({ conn, msg }),
+    sink: (conn, msg) => {
+      sent.push({ conn, msg });
+    },
     log,
     maxFramesPerSecond: 1,
     now: () => Date.now(),
@@ -241,6 +245,144 @@ describe("ScreenTracker", () => {
       expect(backend.getScreenCalls).toBe(captures);
     });
 
+    it("retries a refused prepared snapshot without recapturing or changing generation", async () => {
+      tracker.stop();
+      const attempts: InnerMessage[] = [];
+      let available = false;
+      tracker = new ScreenTracker({
+        backend,
+        sink: (_conn, msg) => {
+          attempts.push(msg);
+          return available;
+        },
+        log,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("p1", "S");
+
+      await vi.advanceTimersByTimeAsync(125);
+      const captures = backend.getScreenCalls;
+      available = true;
+      await vi.advanceTimersByTimeAsync(125);
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts.map((msg) => msg.type)).toEqual(["screen.snapshot", "screen.snapshot"]);
+      expect(attempts.map((msg) => ("gen" in msg ? msg.gen : -1))).toEqual([1, 1]);
+      expect(backend.getScreenCalls).toBe(captures);
+    });
+
+    it("preserves an undelivered diff when a new viewer triggers an unchanged recapture", async () => {
+      tracker.stop();
+      let oldAvailable = true;
+      let oldState: ScreenState | undefined;
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => {
+          if (conn !== "old" || !oldAvailable) return conn !== "old";
+          if (msg.type === "screen.snapshot") {
+            oldState = applySnapshot(oldState, msg);
+          } else if (msg.type === "screen.diff") {
+            if (!oldState) throw new Error("diff received before snapshot");
+            const applied = applyDiff(oldState, msg);
+            expect(applied.gap).toBe(false);
+            oldState = applied.state;
+          }
+          return true;
+        },
+        log,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("old", "S");
+      await vi.advanceTimersByTimeAsync(125);
+
+      oldAvailable = false;
+      backend.appendLine("S", "d");
+      await vi.advanceTimersByTimeAsync(125);
+
+      oldAvailable = true;
+      tracker.setViewed("new", "S");
+      await vi.advanceTimersByTimeAsync(125);
+
+      const current = await backend.getScreen("S");
+      expect(oldState?.lines).toEqual(current.lines);
+    });
+
+    it("continues delivering to other viewers when one sink throws", async () => {
+      tracker.stop();
+      const attempted: string[] = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => {
+          attempted.push(conn);
+          if (conn === "throwing") throw new Error("transport failed");
+          sent.push({ conn, msg });
+        },
+        log,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("throwing", "S");
+      tracker.setViewed("healthy", "S");
+
+      await vi.advanceTimersByTimeAsync(125);
+
+      expect(attempted).toContain("throwing");
+      expect(sent.some(({ conn }) => conn === "healthy")).toBe(true);
+    });
+
+    it("does not retry a refused frame after its viewer is dropped", async () => {
+      tracker.stop();
+      const attempts: string[] = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn) => {
+          attempts.push(conn);
+          return false;
+        },
+        log,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("gone", "S");
+
+      await vi.advanceTimersByTimeAsync(125);
+      tracker.dropViewer("gone");
+      await vi.advanceTimersByTimeAsync(250);
+
+      expect(attempts).toEqual(["gone"]);
+    });
+
+    it("captures current content after the last viewer leaves and a new viewer subscribes", async () => {
+      tracker.stop();
+      const attempts: { conn: string; msg: InnerMessage }[] = [];
+      tracker = new ScreenTracker({
+        backend,
+        sink: (conn, msg) => {
+          attempts.push({ conn, msg });
+          return conn !== "old";
+        },
+        log,
+        now: () => Date.now(),
+      });
+      tracker.start();
+      tracker.setViewed("old", "S");
+      await vi.advanceTimersByTimeAsync(125);
+      const captures = backend.getScreenCalls;
+
+      tracker.dropViewer("old");
+      backend.setLines("S", ["new-a", "new-b", "new-c"]);
+      tracker.setViewed("new", "S");
+      await vi.advanceTimersByTimeAsync(125);
+
+      const fresh = attempts.find(({ conn }) => conn === "new")?.msg;
+      expect(fresh?.type).toBe("screen.snapshot");
+      expect(text(fresh as InnerMessage)).toEqual(["new-a", "new-b", "new-c"]);
+      expect(backend.getScreenCalls).toBe(captures + 1);
+      expect(attempts.filter(({ conn }) => conn === "old")).toHaveLength(1);
+    });
+
     it("cancels a pending frame when its viewer unsubscribes", async () => {
       restartAtOneFramePerSecond();
       tracker.setViewed("p1", "S");
@@ -347,7 +489,9 @@ describe("ScreenTracker", () => {
       sent = [];
       tracker = new ScreenTracker({
         backend,
-        sink: (conn, msg) => sent.push({ conn, msg }),
+        sink: (conn, msg) => {
+          sent.push({ conn, msg });
+        },
         log,
         onSessionGone,
         now: () => Date.now(),
@@ -462,7 +606,9 @@ describe("ScreenTracker", () => {
       sent = [];
       tracker = new ScreenTracker({
         backend,
-        sink: (conn, msg) => sent.push({ conn, msg }),
+        sink: (conn, msg) => {
+          sent.push({ conn, msg });
+        },
         log,
         maxFramesPerSecond: 1,
         now: () => Date.now(),
@@ -512,7 +658,9 @@ describe("ScreenTracker", () => {
     };
     tracker = new ScreenTracker({
       backend,
-      sink: (conn, msg) => sent.push({ conn, msg }),
+      sink: (conn, msg) => {
+        sent.push({ conn, msg });
+      },
       log: tinyLog,
       maxEncodedBytes: 10,
       now: () => Date.now(),
@@ -641,7 +789,9 @@ describe("per-backend absoluteLines via BackendRegistry.capabilitiesOf (minor: w
     const localSent: { conn: string; msg: InnerMessage }[] = [];
     const t = new ScreenTracker({
       backend: registry,
-      sink: (conn, msg) => localSent.push({ conn, msg }),
+      sink: (conn, msg) => {
+        localSent.push({ conn, msg });
+      },
       log,
       now: () => Date.now(),
     });

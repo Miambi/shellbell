@@ -12,7 +12,8 @@ import type { Logger } from "./log.js";
 
 export interface ScreenTrackerOptions {
   backend: TerminalBackend;
-  sink: (connId: string, msg: InnerMessage) => void;
+  // biome-ignore lint/suspicious/noConfusingVoidType: void preserves existing callback compatibility.
+  sink: (connId: string, msg: InnerMessage) => boolean | void;
   log: Logger;
   intervalMs?: number;
   maxFramesPerSecond?: number;
@@ -122,7 +123,9 @@ export class ScreenTracker {
   setViewed(connId: string, sessionId: string | null): void {
     const prev = this.viewerSession.get(connId);
     if (prev) {
-      this.sessions.get(prev)?.viewers.delete(connId);
+      const previous = this.sessions.get(prev);
+      previous?.viewers.delete(connId);
+      if (previous?.viewers.size === 0) previous.prepared = null;
       this.viewerSession.delete(connId);
     }
     if (sessionId) {
@@ -345,10 +348,12 @@ export class ScreenTracker {
     const noOp = !forceSnapshotAll && delta === 0 && changed.length === 0 && !cursorChanged;
 
     if (!noOp) s.gen += 1;
+    const preservePrepared = noOp && s.prepared?.gen === s.gen;
     s.lastKeys = keys;
     s.lastCols = screen.cols;
     s.lastRows = screen.rows;
     s.lastCursor = screen.cursor;
+    if (preservePrepared) return;
 
     const base = { sessionId, cursor: screen.cursor, scrollbackTotal: s.reported, gen: s.gen };
     const maxBytes = this.opts.maxEncodedBytes ?? 262_144;
@@ -427,7 +432,22 @@ export class ScreenTracker {
       const starved = v.skipped >= COALESCE_DEGRADE_TICKS;
       const upToDate =
         v.lastSentGen === gen - 1 && !v.forceSnapshot && !forceSnapshotAll && !starved;
-      this.opts.sink(conn, upToDate ? diff : snapshotFor(starved));
+      try {
+        const accepted = this.opts.sink(conn, upToDate ? diff : snapshotFor(starved));
+        if (accepted === false) {
+          v.skipped += 1;
+          v.forceSnapshot = true;
+          continue;
+        }
+      } catch (err) {
+        v.skipped += 1;
+        v.forceSnapshot = true;
+        this.log.error("screen sink threw; will retry prepared generation", {
+          conn: conn.slice(0, 12),
+          err: err instanceof Error ? err.name : "unknown",
+        });
+        continue;
+      }
       v.lastSentGen = gen;
       v.forceSnapshot = false;
       v.skipped = 0;

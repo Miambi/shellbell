@@ -176,7 +176,9 @@ describe("herdr through the agent's units", () => {
     // through the SAME registry the backend is added to, exactly like `Agent` composes them.
     const tracker = new ScreenTracker({
       backend: h.registry,
-      sink: (connId, msg) => frames.push({ connId, msg }),
+      sink: (connId, msg) => {
+        frames.push({ connId, msg });
+      },
       log,
       intervalMs: 30,
     });

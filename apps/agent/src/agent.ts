@@ -526,8 +526,8 @@ export class Agent {
     }
   }
 
-  private sendTo(connId: string, msg: InnerMessage): void {
-    this.links.get(connId)?.send(msg);
+  private sendTo(connId: string, msg: InnerMessage): boolean {
+    return this.links.get(connId)?.send(msg) ?? false;
   }
 
   private broadcast(msg: InnerMessage): void {

@@ -23,7 +23,8 @@ export interface PhoneLinkOptions {
   name: string;
   kPair: Uint8Array;
   computerFp: string;
-  send: (env: Envelope) => void;
+  // biome-ignore lint/suspicious/noConfusingVoidType: void preserves existing callback compatibility.
+  send: (env: Envelope) => boolean | void;
   log: Logger;
   now?: () => number;
 }
@@ -174,15 +175,16 @@ export class PhoneLink {
       encodeCbor(msg),
       frameAd(this.opts.computerFp, this.phoneFp, this.connTag, this.seqOut),
     );
-    this.opts.send({
-      v: 1,
-      t: "e2e",
-      from: this.opts.computerFp,
-      to: this.phoneFp,
-      seq: this.seqOut,
-      body: box,
-    });
-    return true;
+    return (
+      this.opts.send({
+        v: 1,
+        t: "e2e",
+        from: this.opts.computerFp,
+        to: this.phoneFp,
+        seq: this.seqOut,
+        body: box,
+      }) !== false
+    );
   }
 
   rememberAck(reqId: string, ack: InnerMessageOf<"ack">): void {

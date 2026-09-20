@@ -26,16 +26,27 @@ function setup() {
     derivePairKey(phoneId.x25519.priv, mac.x25519.pub, code, fpC, fpP),
   );
   const sent: Envelope[] = [];
+  let transportAccepted = true;
   const link = new PhoneLink({
     phoneFp: fpP,
     connId: "c1",
     name: "iPhone",
     kPair,
     computerFp: fpC,
-    send: (e) => sent.push(e),
+    send: (e) => {
+      sent.push(e);
+      return transportAccepted;
+    },
     log,
   });
-  return { link, phone, sent };
+  return {
+    link,
+    phone,
+    sent,
+    setTransportAccepted: (accepted: boolean) => {
+      transportAccepted = accepted;
+    },
+  };
 }
 
 /** Flips a bit in a sealed envelope's ciphertext so AEAD decryption fails, without touching `n`. */
@@ -226,6 +237,22 @@ describe("PhoneLink", () => {
   it("does not send before the handshake", () => {
     const { link } = setup();
     expect(link.send({ type: "ack", reqId: "r", ok: true })).toBe(false);
+  });
+
+  it("reports transport refusal without reusing the sealed frame sequence", () => {
+    const { link, phone, sent, setTransportAccepted } = setup();
+    link.handleEnvelope(phone.hello());
+    phone.acceptHello(sent[0] as Envelope);
+
+    setTransportAccepted(false);
+    expect(link.send({ type: "ack", reqId: "refused", ok: true })).toBe(false);
+    setTransportAccepted(true);
+    expect(link.send({ type: "ack", reqId: "accepted", ok: true })).toBe(true);
+
+    const [refused, accepted] = sent.slice(1);
+    expect(refused?.seq).toBe(1);
+    expect(accepted?.seq).toBe(2);
+    expect((accepted?.seq ?? 0) > (refused?.seq ?? 0)).toBe(true);
   });
 
   it("reports conn.hello overdue after 10 s and stops once a late hello arrives", () => {
