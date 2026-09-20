@@ -214,6 +214,22 @@ the argument for doing more of it before release, not less.
 
   Do not let the second half block the first. Grouping per session is a small, self-contained win.
 
+- **The brand-family generators live at the repo root and duplicate two dependencies.**
+  `scripts/extract-brand-family.mjs` and `scripts/render-brand-family.mjs` sit at the root, which
+  required adding `opentype.js` and `sharp` to the **root** `package.json` — the same version
+  specifiers already declared in `apps/mobile/package.json`. Two declarations of one dependency can
+  drift on a future version bump. The whole-branch reviewer recommended moving the generators under
+  `apps/mobile/scripts/`, writing to `../../../brand/`, and having the root script shell in via
+  `pnpm --dir apps/mobile` — which removes the duplication entirely.
+  It also dismantled the justification given for root placement: `sync-vectors.mjs` was cited as
+  precedent for a mobile script writing outside itself, but it only *reads* from
+  `packages/protocol` and writes *within* `apps/mobile`. It is not the precedent claimed.
+  **Deferred deliberately (2026-09-20).** The reviewer's own urgency argument is "before the family
+  assets get more consumers", and there are currently zero — the website does not exist and has no
+  spec. The fix requires a lockfile change, and therefore a full workspace reinstall, which under
+  the hoisted layout is a ~20 minute operation. Do it when the website work starts and something
+  actually consumes `brand/`, not before. The reviewer explicitly called it "not a blocker".
+
 ## Deferred by decision, with the reasoning (2026-09-19)
 
 - **A signed macOS menu bar app.** Post-1.0, needs its own spec. Three independent arguments
