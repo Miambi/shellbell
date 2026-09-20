@@ -7,8 +7,12 @@ import { Platform } from "react-native";
 import { connectionManager } from "../net/manager";
 import { useConnectionsStore } from "../store/connections";
 import { tokens } from "../theme/tokens";
-import type { RingPayload } from "./content";
-import { handleIncomingRing, type RingHandlerDeps } from "./ring";
+import {
+  extractRingPayload,
+  handleIncomingRing,
+  type RawRingContent,
+  type RingHandlerDeps,
+} from "./ring";
 import { foregroundToast, validProjectId } from "./routing";
 import { lookupSessionTitle, type TitleStorage } from "./sessionTitles";
 
@@ -182,15 +186,32 @@ export const defaultRingHandlerDeps: RingHandlerDeps = {
 
 export const RING_TASK = "shellbell-ring";
 
+/**
+ * The raw shape `expo-task-manager` hands the background task, per the installed native source
+ * (see `ring.ts`'s `RawRingContent` doc comment): either a `NotificationResponse` (a background
+ * action tap — has `actionIdentifier`, and its content lives at `notification.request.content`),
+ * or a plain incoming remote message (no `actionIdentifier`; its content is `data` itself, and
+ * `notification` is the raw, unrelated FCM/APNs notification fields — never `.request`).
+ */
+interface RawRingTaskData {
+  actionIdentifier?: unknown;
+  notification?: { request?: { identifier?: unknown; content?: RawRingContent } } | null;
+  data?: RawRingContent;
+  messageId?: unknown;
+}
+
 /** Defined at module scope: the OS may start the task before any React tree exists. */
 TaskManager.defineTask(RING_TASK, async ({ data, error }) => {
   if (error) return;
-  const n = (
-    data as { notification?: { request?: { identifier?: string; content?: { data?: unknown } } } }
-  )?.notification?.request;
-  const payload = n?.content?.data as RingPayload | undefined;
+  const raw = data as RawRingTaskData | undefined;
+  if (!raw) return;
+  const isResponse = typeof raw.actionIdentifier === "string";
+  const content = isResponse ? raw.notification?.request?.content : raw.data;
+  const payload = extractRingPayload(content);
   if (!payload) return;
-  await handleIncomingRing(payload, n?.identifier ?? "", defaultRingHandlerDeps);
+  const rawIdentifier = isResponse ? raw.notification?.request?.identifier : raw.messageId;
+  const identifier = typeof rawIdentifier === "string" ? rawIdentifier : "";
+  await handleIncomingRing(payload, identifier, defaultRingHandlerDeps);
 });
 
 /** Registration failures are swallowed: an unregistered task just means generic notifications
