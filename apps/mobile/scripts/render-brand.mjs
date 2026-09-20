@@ -36,12 +36,17 @@ const tileBackground = (size) =>
     .png()
     .toBuffer();
 
+const TRANSPARENT = "transparent";
+
 /**
- * Flatten onto `bg` so no asset ships with transparency the stores would letterbox. `bg` is
- * either a flat colour (sharp `create` background) or a pre-rendered PNG buffer the full size of
- * the canvas (the gradient tile). The source SVGs are already framed top-left with the correct
- * padding (spec §3 "Anchoring"), so the mark is rendered at its full target size and composited at
- * 0,0 -- `pad` exists only for the Android adaptive-icon safe zone, not for recentring.
+ * Composite the mark onto `bg`. `bg` is a flat colour or `"transparent"` (sharp `create`
+ * background), or a pre-rendered PNG buffer the full size of the canvas (the gradient tile).
+ * Flat/gradient variants flatten out so no asset ships with transparency the stores would
+ * letterbox; `"transparent"` is for the Android layers the OS composites itself, where baking in
+ * a background would double it up or fight themed-icon tinting (see the Android block below). The
+ * source SVGs are already framed top-left with the correct padding (spec §3 "Anchoring"), so the
+ * mark is rendered at its full target size and composited at 0,0 -- `pad` exists only for the
+ * Android adaptive-icon safe zone, not for recentring.
  */
 async function out(svg, size, bg, file, pad = 0) {
   const inner = size - pad * 2;
@@ -50,9 +55,18 @@ async function out(svg, size, bg, file, pad = 0) {
     .png()
     .toBuffer();
   const base =
-    typeof bg === "string"
-      ? sharp({ create: { width: size, height: size, channels: 4, background: bg } })
-      : sharp(bg);
+    bg === TRANSPARENT
+      ? sharp({
+          create: {
+            width: size,
+            height: size,
+            channels: 4,
+            background: { r: 0, g: 0, b: 0, alpha: 0 },
+          },
+        })
+      : typeof bg === "string"
+        ? sharp({ create: { width: size, height: size, channels: 4, background: bg } })
+        : sharp(bg);
   const buf = await base
     .composite([{ input: art, top: pad, left: pad }])
     .png()
@@ -63,32 +77,35 @@ async function out(svg, size, bg, file, pad = 0) {
 
 const mono = src("monogram.svg");
 const lock = src("lockup.svg");
+const lockWhite = Buffer.from(lock.toString().replace(/fill="#[0-9A-Fa-f]{6}"/g, 'fill="#FFFFFF"'));
 
-// App icon: the LOCKUP ($\a), not the monogram (spec §3 errata 2026-09-20), on the gradient tile.
+// iOS app icon: the LOCKUP ($\a), not the monogram (spec §3 errata 2026-09-20), on the gradient
+// tile. This is a single flat layer -- iOS doesn't composite icons the way Android does -- so the
+// tile is baked straight in.
 const iconTile = await tileBackground(1024);
 await out(lock, 1024, iconTile, "icon.png");
-// Android adaptive icon foreground: same lockup and tile, kept inside the 66% safe zone so no
-// launcher mask shape crops the mark.
-await out(lock, 1024, iconTile, "android-icon-foreground.png", 180);
+
+// --- Android adaptive icon: three SEPARATE layers, composited by the OS at draw time. ---
+// The gradient tile lives ONLY in the background layer. The foreground and monochrome layers
+// carry ONLY the mark on a transparent canvas -- Android draws background, then foreground, then
+// (on Android 13+, in a themed context) substitutes monochrome for both, tinted by the launcher.
+// Baking the tile into foreground/monochrome too would leave android-icon-background.png dead
+// (never visible under an opaque foreground) and would fight themed-icon tinting, which needs an
+// alpha-only source. Do not "helpfully" re-flatten these -- transparency here is load-bearing.
+await out(lock, 1024, TRANSPARENT, "android-icon-foreground.png", 180);
+// Android themed (monochrome) icon: same LOCKUP as the rest of the icon (it's the same icon,
+// themed, not a small-size context -- the monogram's remit is favicon.png and below ~32px), single
+// flat colour, transparent, safe-zone padded. No two-tone: replacing both fills with #FFFFFF is
+// the intent.
+await out(lockWhite, 1024, TRANSPARENT, "android-icon-monochrome.png", 180);
+// Android background plate: the gradient tile, full-bleed, opaque. This IS the layer the tile art
+// belongs in -- Android's circular/rounded-square mask crops a 135deg diagonal gracefully.
+writeFileSync(join(A, "android-icon-background.png"), iconTile);
+console.log("brand: android-icon-background.png (1024px)");
+
 // Splash uses the LOCKUP on true black -- no gradient here (spec §4). app.json sets imageWidth 200
 // on a #000000 background, so it renders small -- check it on device before assuming three glyphs
 // survive.
 await out(lock, 1024, BLACK, "splash-icon.png");
 // Favicon: the MONOGRAM (\a) -- the only surviving use, for anything at or below ~32px.
 await out(mono, 196, TILE, "favicon.png");
-
-// Flat background plate. Stays flat, not the gradient: Android composites this under a circular
-// (or other launcher-defined) mask, so a gradient here would crop unpredictably depending on
-// device.
-await sharp({ create: { width: 1024, height: 1024, channels: 4, background: TILE } })
-  .png()
-  .toFile(join(A, "android-icon-background.png"));
-// Android themed (monochrome) icon: single flat colour on black, no gradient, no two-tone --
-// replacing both fills with #FFFFFF is the intent.
-await out(
-  Buffer.from(mono.toString().replace(/fill="#[0-9A-Fa-f]{6}"/g, 'fill="#FFFFFF"')),
-  1024,
-  BLACK,
-  "android-icon-monochrome.png",
-  180,
-);
