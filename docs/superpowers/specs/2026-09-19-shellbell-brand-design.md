@@ -39,12 +39,42 @@ Two marks, one system.
 
 | Mark | Form | Used for |
 |---|---|---|
-| **Lockup** | `$\a` | Website, README, splash, store listings, anywhere with room |
-| **Monogram** | `\a` | App icon, favicon, avatars — anywhere under ~64px |
+| **Lockup** | `$\a` | **The app icon**, splash, website, README, store listings |
+| **Monogram** | `\a` | Favicon and anything at or below ~32px |
 
-**Why two.** Three glyphs at 46px on a crowded home screen is a legibility risk; two is not. The
-lockup keeps the prompt, which is a requirement, and the monogram keeps the icon readable. Full
-lockup plus monogram is a conventional structure, not a compromise.
+**Errata 2026-09-20 (Task 2 checkpoint).** This table originally gave the app icon to the monogram,
+on the grounds that three glyphs at 46px was a legibility risk. Tested at the icon sizes that
+matter, that was too strong: `$\a` at 62% tile width is about as legible at 46px as `\a` at 38%.
+The prompt therefore stays in the icon, which is what the original brief asked for. The monogram
+survives only for sub-32px use, where three glyphs genuinely do collapse.
+
+The trade accepted knowingly: a wider lockup fills more of the tile, so the icon is less airy than
+the monogram version. Legibility and the brief both pointed the same way, and the negative space
+lost.
+
+### Anchoring
+
+**The mark sits at the top left, not centred** — a prompt at the start of an otherwise empty
+screen. This follows the convention every serious terminal icon uses: `Terminal.app` puts `>` in
+the upper left with `_` on the line below; iTerm2 does the same with `$`. Centring a terminal mark
+reads as a logo in a box; anchoring it reads as a shell.
+
+Geometry is parametric, not hand-placed:
+
+| Parameter | Value | Meaning |
+|---|---|---|
+| `occupy` | **0.62** | Mark width as a fraction of the tile |
+| `inset` | **0.13** | Padding above and left of the mark, in the same units |
+
+The monogram, where used, is `occupy` 0.38 / `inset` 0.15.
+
+Framing is computed from the **union bounding box of the actual glyph outlines**, never from font
+metrics. Metrics describe a line of text and know nothing about a square tile — using them is what
+made the first attempt sit visibly high.
+
+**A cursor block on the next line was tried and rejected.** It echoed `Terminal.app`'s `_` and read
+well at 150px, but the frame has to grow to fit a second line, which shrinks the glyphs by roughly
+20% and costs more at 46px than the narrative is worth.
 
 **Two-tone is the default treatment.** The leading glyph (`$`, or the `\` in the monogram) is
 muted; the final `a` carries the accent. The escape recedes, the bell rings. Solid single-colour
@@ -72,6 +102,20 @@ works better on it. Recorded so the option is not re-litigated from scratch.
 | Canvas | `#000000` | `tokens.bg`, true black |
 | Tile / surface | `#0B0B0D` | `tokens.surface`, the icon's rounded-square field |
 | Hairline | `#1F1F26` | `tokens.border` |
+
+**The icon tile carries a diagonal sheen** (added 2026-09-20): a linear gradient at 135°, from
+`#1B1B24` at 0%, through `#0B0B0D` at 46%, to `#050507` at 100%. Lighter at the top left, darker at
+the bottom right.
+
+**Depth belongs to the container, not the glyph.** Gradients across the letterforms were tried —
+amber-to-orange, diagonal, and with a gloss highlight — and all were rejected: they desaturate the
+accent at small sizes and read as decoration. `Terminal.app` does exactly this, flat white glyphs
+on a softly lit tile, and it is right. This also keeps the glyph fills to the two approved colours,
+so the source SVGs stay two-tone and the colour test in `apps/mobile/test/brand-sources.test.ts`
+keeps its teeth.
+
+The gradient is applied when rasterising, not stored in the mark's SVG source, so the same source
+serves the lit icon, the true-black splash, and the flat single-colour Android monochrome variant.
 
 **Amber over emerald, deliberately.** Amber is authentic phosphor heritage, it is *unclaimed* in
 this space (Ghostty owns violet, Herdr lavender, iTerm2 green), and it means attention — it is the
@@ -125,7 +169,9 @@ Source SVGs live in the repo so the raster assets can be regenerated rather than
 
 ## 8. Open
 
-- Optical spacing between `$` and `\a` in the lockup — needs to be set by eye, not by the font's
-  metrics.
-- Whether the splash shows the lockup alone or adds the wordmark "shellbell".
-- Whether the website's `$\a` is static or animates the `a` on load, once, as a ring.
+- ~~Optical spacing~~ — **closed 2026-09-20.** Superseded by parametric anchoring (§3): the mark is
+  framed from its glyph bounding box at a fixed `occupy`/`inset`, so there is nothing to hand-tune
+  and nothing to be overwritten by regenerating.
+- **The splash shows the lockup alone, no "shellbell" wordmark** — closed 2026-09-20.
+- Whether the website's `$\a` is static or animates the `a` on load, once, as a ring. Still open;
+  there is no website spec yet.
