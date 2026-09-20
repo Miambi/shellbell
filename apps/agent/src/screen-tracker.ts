@@ -227,18 +227,24 @@ export class ScreenTracker {
         try {
           screen = await this.opts.backend.getScreen(sessionId);
         } catch (err) {
-          if (err instanceof SessionGone) {
-            this.log.warn("getScreen: session gone; dropping", { session: sessionId.slice(0, 12) });
-            this.opts.onSessionGone?.(sessionId);
-            this.sessionRemoved(sessionId);
-          } else {
-            // Transient error (RPC timeout, etc.): keep viewers, resync everyone next tick.
-            this.log.warn("getScreen failed; will retry", {
-              session: sessionId.slice(0, 12),
-              err: err instanceof Error ? err.name : String(err),
-            });
-            for (const v of s.viewers.values()) v.forceSnapshot = true;
-            s.dirty = true;
+          // A stopped tracker or remove/recreate makes this rejection obsolete just like a
+          // successful capture below. Release the old state without mutating its replacement.
+          if (!this.stopped && this.sessions.get(sessionId) === s) {
+            if (err instanceof SessionGone) {
+              this.log.warn("getScreen: session gone; dropping", {
+                session: sessionId.slice(0, 12),
+              });
+              this.opts.onSessionGone?.(sessionId);
+              this.sessionRemoved(sessionId);
+            } else {
+              // Transient error (RPC timeout, etc.): keep viewers, resync everyone next tick.
+              this.log.warn("getScreen failed; will retry", {
+                session: sessionId.slice(0, 12),
+                err: err instanceof Error ? err.name : String(err),
+              });
+              for (const v of s.viewers.values()) v.forceSnapshot = true;
+              s.dirty = true;
+            }
           }
           s.inflight = false;
           continue;

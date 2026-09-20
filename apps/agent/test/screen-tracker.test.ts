@@ -436,6 +436,40 @@ describe("ScreenTracker", () => {
     });
   });
 
+  it("ignores SessionGone from an obsolete capture after remove and recreate", async () => {
+    const onSessionGone = vi.fn();
+    tracker.stop();
+    tracker = new ScreenTracker({
+      backend,
+      sink: (conn, msg) => {
+        sent.push({ conn, msg });
+      },
+      log,
+      onSessionGone,
+      now: () => Date.now(),
+    });
+    tracker.start();
+
+    let release: () => void = () => {};
+    backend.getScreenGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    backend.throwOnNextGetScreen("S", new SessionGone("S"));
+    tracker.setViewed("old-viewer", "S");
+    const tickPromise = (tracker as unknown as { tick: () => Promise<void> }).tick();
+    expect(backend.getScreenCalls).toBe(1);
+
+    backend.emit({ type: "session-removed", sessionId: "S" });
+    tracker.setViewed("new-viewer", "S");
+    expect(tracker.viewedBy("S")).toEqual(["new-viewer"]);
+
+    release();
+    await tickPromise;
+
+    expect(onSessionGone).not.toHaveBeenCalled();
+    expect(tracker.viewedBy("S")).toEqual(["new-viewer"]);
+  });
+
   it("suppresses no-op ticks: unchanged content wakes no already-current viewer", async () => {
     tracker.setViewed("p1", "S");
     await flush();
@@ -480,6 +514,38 @@ describe("ScreenTracker", () => {
     tracker.stop();
     release();
     await vi.advanceTimersByTimeAsync(0); // let the in-flight getScreen settle
+    expect(sent).toHaveLength(0);
+  });
+
+  it("stop() ignores SessionGone from a getScreen already in flight", async () => {
+    const onSessionGone = vi.fn();
+    tracker.stop();
+    tracker = new ScreenTracker({
+      backend,
+      sink: (conn, msg) => {
+        sent.push({ conn, msg });
+      },
+      log,
+      onSessionGone,
+      now: () => Date.now(),
+    });
+    tracker.start();
+
+    let release: () => void = () => {};
+    backend.getScreenGate = new Promise((resolve) => {
+      release = resolve;
+    });
+    backend.throwOnNextGetScreen("S", new SessionGone("S"));
+    tracker.setViewed("p1", "S");
+    const tickPromise = (tracker as unknown as { tick: () => Promise<void> }).tick();
+    expect(backend.getScreenCalls).toBe(1);
+
+    tracker.stop();
+    release();
+    await tickPromise;
+
+    expect(onSessionGone).not.toHaveBeenCalled();
+    expect(tracker.viewedBy("S")).toEqual(["p1"]);
     expect(sent).toHaveLength(0);
   });
 
