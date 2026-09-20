@@ -274,12 +274,13 @@ describe("ScreenTracker", () => {
 
     it("preserves an undelivered diff when a new viewer triggers an unchanged recapture", async () => {
       tracker.stop();
-      let oldAvailable = true;
       let oldState: ScreenState | undefined;
+      const oldFrames: InnerMessage[] = [];
       tracker = new ScreenTracker({
         backend,
         sink: (conn, msg) => {
-          if (conn !== "old" || !oldAvailable) return conn !== "old";
+          if (conn !== "old") return;
+          oldFrames.push(msg);
           if (msg.type === "screen.snapshot") {
             oldState = applySnapshot(oldState, msg);
           } else if (msg.type === "screen.diff") {
@@ -288,24 +289,24 @@ describe("ScreenTracker", () => {
             expect(applied.gap).toBe(false);
             oldState = applied.state;
           }
-          return true;
         },
         log,
+        maxFramesPerSecond: 4,
         now: () => Date.now(),
       });
       tracker.start();
       tracker.setViewed("old", "S");
-      await vi.advanceTimersByTimeAsync(125);
+      await vi.advanceTimersByTimeAsync(250);
 
-      oldAvailable = false;
       backend.appendLine("S", "d");
       await vi.advanceTimersByTimeAsync(125);
+      expect(oldState?.lines.map((line) => line.r[0]?.t)).toEqual(["a", "b", "c"]);
 
-      oldAvailable = true;
       tracker.setViewed("new", "S");
       await vi.advanceTimersByTimeAsync(125);
 
       const current = await backend.getScreen("S");
+      expect(oldFrames.map((msg) => msg.type)).toEqual(["screen.snapshot", "screen.diff"]);
       expect(oldState?.lines).toEqual(current.lines);
     });
 
