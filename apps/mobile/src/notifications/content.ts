@@ -42,7 +42,7 @@ const BACKEND_LABEL: Record<string, string> = {
 function titleFor(label: SessionLabel | undefined): string {
   if (label?.title) return label.title;
   const backend = label?.backend;
-  if (backend && BACKEND_LABEL[backend]) return BACKEND_LABEL[backend]!;
+  if (backend && BACKEND_LABEL[backend]) return BACKEND_LABEL[backend] as string;
   return "Session";
 }
 
