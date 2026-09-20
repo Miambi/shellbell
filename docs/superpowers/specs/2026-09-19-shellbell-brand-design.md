@@ -141,19 +141,20 @@ with wide letterspacing (~0.2em) as a texture, matching the existing UI.
 
 ## 6. Assets to produce
 
-Every file below is currently an **unmodified Expo template placeholder** — `icon.png` still has
-its construction guides baked in (concentric circles, dashed axes, centre crosshair) and
-`splash-icon.png` is blank graph paper. Both are light-themed, contradicting the OLED-black
-identity. These were never tracked as placeholders in `before-first-release.md`.
+**Errata 2026-09-20.** This section originally described the assets as an unmodified Expo template
+placeholder, and gave the app icon and both Android mark layers to the monogram with a flat
+background. Both are superseded: the anchoring errata in §3 moved the app icon to the lockup, and
+the gradient tile in §4 replaced the flat background. The table below reflects what actually ships,
+as rendered by `apps/mobile/scripts/render-brand.mjs` from the committed SVG sources.
 
 | File | Content |
 |---|---|
-| `apps/mobile/assets/icon.png` | `\a` monogram, two-tone amber on `#0B0B0D` |
-| `apps/mobile/assets/android-icon-foreground.png` | `\a`, safe-zone aware |
-| `apps/mobile/assets/android-icon-background.png` | Flat `#0B0B0D` |
-| `apps/mobile/assets/android-icon-monochrome.png` | `\a`, single colour, for themed icons |
-| `apps/mobile/assets/splash-icon.png` | `$\a` lockup on true black |
-| `apps/mobile/assets/favicon.png` | `\a` monogram |
+| `apps/mobile/assets/icon.png` | `$\a` lockup on the 135° gradient tile, opaque |
+| `apps/mobile/assets/android-icon-foreground.png` | `$\a` lockup mark only, fully transparent canvas, safe-zone inset |
+| `apps/mobile/assets/android-icon-background.png` | The gradient tile, full bleed, opaque |
+| `apps/mobile/assets/android-icon-monochrome.png` | `$\a` lockup mark only, flat `#FFFFFF`, transparent canvas, safe-zone inset |
+| `apps/mobile/assets/splash-icon.png` | `$\a` lockup on true black `#000000` |
+| `apps/mobile/assets/favicon.png` | `\a` monogram on the tile (196²) |
 | Website | `$\a` lockup, plus an SVG source of record |
 
 Source SVGs live in the repo so the raster assets can be regenerated rather than hand-edited.

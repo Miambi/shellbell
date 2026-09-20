@@ -24,7 +24,7 @@ const tileGradientSvg = (
   <defs>
     <linearGradient id="tile" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#1B1B24"/>
-      <stop offset="46%" stop-color="#0B0B0D"/>
+      <stop offset="46%" stop-color="${TILE}"/>
       <stop offset="100%" stop-color="#050507"/>
     </linearGradient>
   </defs>
@@ -77,6 +77,11 @@ async function out(svg, size, bg, file, pad = 0) {
 
 const mono = src("monogram.svg");
 const lock = src("lockup.svg");
+// Coupled to scripts/extract-glyphs.mjs's exact output spelling: it always writes fills as
+// `fill="#RRGGBB"` (see its `paint()`), which is what this regex assumes. If that script ever
+// changes how it serialises fills (e.g. shorthand hex, currentColor, a style attribute), this
+// silently stops matching and the monochrome layer keeps the two-tone colours instead of flattening
+// to white.
 const lockWhite = Buffer.from(lock.toString().replace(/fill="#[0-9A-Fa-f]{6}"/g, 'fill="#FFFFFF"'));
 
 // iOS app icon: the LOCKUP ($\a), not the monogram (spec §3 errata 2026-09-20), on the gradient

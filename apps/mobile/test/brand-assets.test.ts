@@ -51,7 +51,7 @@ describe("brand raster assets", () => {
     let amber = 0;
     for (let i = 0; i < data.length; i += info.channels)
       if (data[i]! > 200 && data[i + 1]! > 120 && data[i + 1]! < 190 && data[i + 2]! < 80) amber++;
-    expect(amber).toBeGreaterThan(1000);
+    expect(amber).toBeGreaterThan(15000);
   });
 
   it.each(["icon.png", "android-icon-foreground.png", "android-icon-monochrome.png"])(
@@ -103,5 +103,73 @@ describe("brand raster assets", () => {
       const bottomRight = lumaAt(width - 1 - off, height - 1 - off);
       expect(topLeft).toBeGreaterThan(bottomRight);
     });
+  });
+
+  // Task 3's Critical (opaque tile baked into foreground/monochrome) got a regression test above.
+  // Its sibling finding never did: nothing asserted that the monochrome layer is actually
+  // single-colour, or that foreground and monochrome carry the *same* mark in the *same* place
+  // inside the safe zone. A regression here could silently ship a themed icon that doesn't match
+  // the normal one, or a mark that bleeds outside the guaranteed-visible window.
+  describe("Android foreground/monochrome mark parity (spec §3, §4)", () => {
+    /** Bounding box of non-transparent pixels, in source pixel coordinates. */
+    async function opaqueBBox(file: string) {
+      const { data, info } = await sharp(join(A, file)).ensureAlpha().raw().toBuffer({
+        resolveWithObject: true,
+      });
+      const { width, height, channels } = info;
+      let minX = width;
+      let minY = height;
+      let maxX = -1;
+      let maxY = -1;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const alpha = data[(y * width + x) * channels + 3]!;
+          if (alpha === 0) continue;
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+      return { minX, minY, maxX, maxY };
+    }
+
+    it("android-icon-monochrome.png is single-colour: every opaque pixel is #FFFFFF", async () => {
+      const { data, info } = await sharp(join(A, "android-icon-monochrome.png"))
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const { channels } = info;
+      for (let i = 0; i < data.length; i += channels) {
+        if (data[i + 3] === 0) continue;
+        expect([data[i], data[i + 1], data[i + 2]]).toEqual([255, 255, 255]);
+      }
+    });
+
+    it("foreground and monochrome carry the same mark (matching opaque-pixel bounding boxes)", async () => {
+      const fg = await opaqueBBox("android-icon-foreground.png");
+      const mono = await opaqueBBox("android-icon-monochrome.png");
+      const TOLERANCE = 2; // pixels -- allows for antialiasing/rounding, not a different mark.
+      expect(Math.abs(fg.minX - mono.minX)).toBeLessThanOrEqual(TOLERANCE);
+      expect(Math.abs(fg.minY - mono.minY)).toBeLessThanOrEqual(TOLERANCE);
+      expect(Math.abs(fg.maxX - mono.maxX)).toBeLessThanOrEqual(TOLERANCE);
+      expect(Math.abs(fg.maxY - mono.maxY)).toBeLessThanOrEqual(TOLERANCE);
+    });
+
+    // The safe zone is the centre 72/108 of the 1024px adaptive-icon canvas -- the window every
+    // launcher mask guarantees stays visible, regardless of how it crops the rest.
+    const SAFE_MIN = 170;
+    const SAFE_MAX = 853;
+
+    it.each(["android-icon-foreground.png", "android-icon-monochrome.png"])(
+      "%s's mark sits inside the Android safe zone (170..853)",
+      async (f) => {
+        const bbox = await opaqueBBox(f);
+        expect(bbox.minX).toBeGreaterThanOrEqual(SAFE_MIN);
+        expect(bbox.minY).toBeGreaterThanOrEqual(SAFE_MIN);
+        expect(bbox.maxX).toBeLessThanOrEqual(SAFE_MAX);
+        expect(bbox.maxY).toBeLessThanOrEqual(SAFE_MAX);
+      },
+    );
   });
 });

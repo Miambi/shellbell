@@ -17,6 +17,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -F @shellbell/mobile check:vectors
+      - run: pnpm -F @shellbell/mobile brand:check
       - run: pnpm -F @shellbell/mobile doctor
       - run: pnpm lint
       - run: pnpm typecheck

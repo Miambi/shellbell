@@ -11,7 +11,10 @@ import { fileURLToPath } from "node:url";
 import opentype from "opentype.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const OUT = join(here, "../assets/brand");
+// scripts/check-brand.mjs re-runs this extraction into a scratch directory to diff against the
+// committed SVGs (drift guard); SHELLBELL_BRAND_OUT lets it redirect the output without duplicating
+// the extraction logic. Unset in normal use, so `pnpm brand:extract` is unaffected.
+const OUT = process.env.SHELLBELL_BRAND_OUT ?? join(here, "../assets/brand");
 const AMBER = "#F59E0B";
 const MUTED = "#4A4A55";
 const EM = 300;
