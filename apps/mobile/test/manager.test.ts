@@ -263,6 +263,46 @@ describe("ConnectionManager", () => {
     connectionManager.stop();
   });
 
+  it("onInner: a sessions message persists titles via the injected titleStorage (spec 2026-09-20 §5)", async () => {
+    const { loadPairSecret } = await import("../src/identity/keys");
+    (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kPair: new Uint8Array(32),
+      computerEd25519Pub: new Uint8Array(32),
+      computerX25519Pub: new Uint8Array(32),
+    });
+    const { connectionManager } = await import("../src/net/manager");
+    const { lookupSessionTitle } = await import("../src/notifications/sessionTitles");
+    const titles = new Map<string, string>();
+    const titleStorage = {
+      getItemSync: (k: string) => titles.get(k) ?? null,
+      setItemSync: (k: string, v: string) => void titles.set(k, v),
+    };
+    connectionManager.start({
+      identity: {} as never,
+      phoneFp: "p1",
+      phoneName: "iPhone",
+      appVersion: "t",
+      pushToken: async () => null,
+      titleStorage,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const conn = created[0];
+    if (!conn) throw new Error("test setup: no connection created");
+
+    // Drives the real `case "sessions":` branch through the manager's message loop -- not a
+    // direct call to `onSessionsMessage` -- so this guards the wiring itself (the call site and
+    // the `this.deps?.titleStorage` plumbing), not just the exported function's own logic.
+    conn.opts.onInner({
+      type: "sessions",
+      list: [{ id: "s1", title: "claude-code", backend: "herdr" }],
+    });
+
+    expect(lookupSessionTitle("f1", "s1", titleStorage)?.title).toBe("claude-code");
+    connectionManager.stop();
+  });
+
   it("notifyPushToggle sends push-token when a token exists, and is a no-op otherwise", async () => {
     const { loadPairSecret } = await import("../src/identity/keys");
     (loadPairSecret as ReturnType<typeof vi.fn>).mockResolvedValue({
