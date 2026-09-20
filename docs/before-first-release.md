@@ -191,6 +191,29 @@ the argument for doing more of it before release, not less.
   anywhere works, and creating sessions from the phone (`session.create`, supported by all three
   backends) works the same way.
 
+- **Notifications need a revamp — they all look alike and they stack.** Observed on device
+  2026-09-19. Three complaints, and they are *not* one problem:
+  - **They never replace or update each other.** Every ring creates a new notification instead of
+    updating the existing one for that session. `ExpoMessage` in `apps/relay/src/push.ts` carries
+    no thread or collapse identifier at all — no iOS `thread-id`/`apns-collapse-id`, no Android
+    `tag`. **This is the cheap half and should be done first:** the data payload *already* carries
+    an opaque session id, so threading and collapsing by it leaks nothing that is not already
+    sent, needs no privacy change, and needs no client rearchitecture. Check what Expo's push API
+    actually exposes before designing.
+  - **They all look the same.** `pushBody()` returns one generic string per event kind. Only
+    `prompt` adds anything (exit code and duration); `idle` and `blocked` are fixed sentences.
+  - **They should carry detail — and this half is genuinely hard.** The relay cannot supply it:
+    it never sees plaintext, and `PRIVACY.md` publishes the promise that a push carries "never the
+    session title, the command, or its output". `push.ts` even cites spec 8.13/11.3 at the
+    `blocked` case for exactly this reason. So richer text cannot come from the server without
+    breaking a published guarantee. The only honest route is to **decrypt on the device and
+    rewrite the notification locally** — an iOS Notification Service Extension with
+    `mutableContent`, and an Android data message that builds the notification client-side. That
+    is an architectural change with its own spec, and it would add an App ID capability we
+    deliberately declined (see the session record).
+
+  Do not let the second half block the first. Grouping per session is a small, self-contained win.
+
 ## Deferred by decision, with the reasoning (2026-09-19)
 
 - **A signed macOS menu bar app.** Post-1.0, needs its own spec. Three independent arguments
