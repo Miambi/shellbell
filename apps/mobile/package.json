@@ -38,6 +38,7 @@
     "@types/react": "~19.2.2",
     "@types/ws": "8.18.1",
     "expo-doctor": "^1.20.4",
+    "opentype.js": "^2.0.0",
     "typescript": "5.9.3",
     "vitest": "5.0.0",
     "ws": "8.21.3"
@@ -47,6 +48,7 @@
     "test": "pnpm run sync:vectors && vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "doctor": "expo-doctor",
+    "brand:extract": "node scripts/extract-glyphs.mjs",
     "sync:vectors": "node scripts/sync-vectors.mjs",
     "check:vectors": "node scripts/sync-vectors.mjs --check",
     "export:check": "expo export --platform android --output-dir .expo/export-check"
