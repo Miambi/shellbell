@@ -1,6 +1,6 @@
 # Shellbell brand design
 
-Status: **approved 2026-09-19**, not yet implemented. Scope is the mark, colour and type —
+Status: **approved 2026-09-19, implemented 2026-09-20.** Scope is the mark, colour and type —
 everything that feeds the app icon, the splash, and the website. Light mode is explicitly **out of
 scope** (see Non-goals).
 
